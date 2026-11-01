@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Subtle glow behind the K -->
+    <path
+        android:pathData="M54,54m-28,0a28,28 0 1,0 56,0a28,28 0 1,0 -56,0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="28"
+                android:type="radial">
+                <item android:offset="0.0" android:color="#4DE50914" />
+                <item android:offset="1.0" android:color="#00E50914" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Stem of K -->
+    <path
+        android:pathData="M32,24 L44,24 L44,84 L32,84 Z"
+        android:fillColor="#B20710" />
+    <path
+        android:pathData="M32,24 L35,24 L35,84 L32,84 Z"
+        android:fillColor="#FF4D56" />
+
+    <!-- Upper diagonal arm of K -->
+    <path
+        android:pathData="M42,54 L63,24 L77,24 L53,60 Z"
+        android:fillColor="#E50914" />
+
+    <!-- Lower diagonal arm of K -->
+    <path
+        android:pathData="M47,53 L78,84 L63,84 L39,59 Z"
+        android:fillColor="#FF232D" />
+
+    <!-- Highlight bevel edge -->
+    <path
+        android:pathData="M42,54 L63,24 L66,24 L45,54 Z"
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.3" />
+</vector>
