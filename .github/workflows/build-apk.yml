@@ -11,54 +11,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Find app folder (where package.json is)
-        id: find
-        run: |
-          PKG=$(find . -name package.json -not -path "*/node_modules/*" -not -path "./android/*" | head -n 1)
-          if [ -z "$PKG" ]; then
-            echo "ERROR: package.json not found anywhere in the repo"
-            ls -R | head -50
-            exit 1
-          fi
-          DIR=$(dirname "$PKG")
-          echo "App folder: $DIR"
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Install dependencies
-        working-directory: ${{ steps.find.outputs.dir }}
-        run: npm install
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.13
 
-      - name: Install Capacitor
-        working-directory: ${{ steps.find.outputs.dir }}
-        run: npm install @capacitor/core @capacitor/cli @capacitor/android
-
-      - name: Build web app
-        working-directory: ${{ steps.find.outputs.dir }}
-        run: npm run build
-
-      - name: Write Capacitor config
-        working-directory: ${{ steps.find.outputs.dir }}
+      - name: Build debug APK
         run: |
-          if [ -d dist ]; then WEB=dist
-          elif [ -d build ]; then WEB=build
-          else echo "ERROR: no dist or build folder after npm run build"; ls; exit 1
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
           fi
-          rm -f capacitor.config.ts capacitor.config.json
-          cat > capacitor.config.json << EOF
-          {
-            "appId": "com.kras.tv",
-            "appName": "Kras TV",
-            "webDir": "$WEB",
-            "server": { "androidScheme": "http", "cleartext": true },
-            "plugins": {
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: KrasTV-apk
+          path: app/build/outputs/apk/debug/*.apk
