@@ -22,6 +22,18 @@ jobs:
         with:
           gradle-version: 9.3.1
 
+      - name: Create debug keystore
+        run: |
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
       - name: Build debug APK
         shell: bash
         run: |
@@ -37,7 +49,9 @@ jobs:
         if: failure()
         run: |
           echo "## Build errors" >> $GITHUB_STEP_SUMMARY
-          grep -n -E "^e: |error:|What went wrong|FAILURE|Execution failed|Could not|not found" -A3 build.log | head -60 >> $GITHUB_STEP_SUMMARY
+          grep -n -E "^e: |What went wrong|FAILURE|Execution failed|Could not|not found|password" -A3 build.log | head -60 >> $GITHUB_STEP_SUMMARY
+          echo "## Signing config" >> $GITHUB_STEP_SUMMARY
+          grep -n -i -B2 -A8 "signingConfigs" app/build.gradle.kts | head -30 >> $GITHUB_STEP_SUMMARY || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
