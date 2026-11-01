@@ -88,4 +88,23 @@ class ExampleRobolectricTest {
     assertEquals("cached_m1", cached[0].id)
     assertEquals("Matrix Resurrections", cached[0].name)
   }
+
+  @Test
+  fun `crash report preference persistence and dismissal`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val prefs = context.getSharedPreferences(KrasApplication.PREFS_CRASH, Context.MODE_PRIVATE)
+
+    // Simulate saving a crash report
+    val fakeReport = "=== Kras TV Crash Report ===\nException: NullPointerException: test crash"
+    prefs.edit().putString(KrasApplication.KEY_CRASH_REPORT, fakeReport).commit()
+
+    // Verify stored
+    val stored = prefs.getString(KrasApplication.KEY_CRASH_REPORT, null)
+    assertNotNull(stored)
+    assertEquals(fakeReport, stored)
+
+    // Simulate dismissal
+    prefs.edit().remove(KrasApplication.KEY_CRASH_REPORT).commit()
+    assertNull(prefs.getString(KrasApplication.KEY_CRASH_REPORT, null))
+  }
 }

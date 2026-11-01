@@ -99,13 +99,21 @@ fun SeriesDetailsSheet(
                         .fillMaxWidth()
                         .height(230.dp)
                 ) {
-                    val bg = details.backdrop.ifEmpty { details.cover.ifEmpty { seriesItem.streamIcon } }
-                    AsyncImage(
-                        model = bg,
-                        contentDescription = details.name,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    val bg = (details.backdrop.ifBlank { details.cover.ifBlank { seriesItem.streamIcon } }).takeIf { it.isNotBlank() }
+                    if (bg != null) {
+                        AsyncImage(
+                            model = bg,
+                            contentDescription = details.name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(CinemaCardElevated)
+                        )
+                    }
 
                     Box(
                         modifier = Modifier

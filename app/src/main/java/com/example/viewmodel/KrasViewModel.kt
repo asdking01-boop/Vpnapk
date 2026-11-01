@@ -9,11 +9,13 @@ import com.example.data.model.*
 import com.example.data.sample.SampleData
 import com.example.player.ExoPlayerWrapper
 import com.example.sound.CinematicSoundPlayer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -91,42 +93,70 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     fun playIntroSoundIfEnabled() {
         if (_userSettings.value.playIntroSound) {
             viewModelScope.launch {
-                CinematicSoundPlayer.playCinematicIntro()
+                try {
+                    CinematicSoundPlayer.playCinematicIntro()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
         }
     }
 
     private fun loadInitialData() {
         viewModelScope.launch {
-            _accounts.value = repository.getAccounts()
-            val active = repository.getActiveAccount()
-            _activeAccount.value = active
-            _favorites.value = repository.getFavorites()
-            _watchHistory.value = repository.getWatchHistory()
-            _downloads.value = repository.getDownloads()
+            try {
+                // Ensure all disk reading happens on Dispatchers.IO
+                val (loadedAccounts, active, favs, history, dlList, cachedMovies, cachedSeries, cachedLive, cachedMovieCats, cachedSeriesCats, cachedLiveCats) =
+                    withContext(Dispatchers.IO) {
+                        val accs = repository.getAccounts()
+                        val act = repository.getActiveAccount()
+                        val f = repository.getFavorites()
+                        val h = repository.getWatchHistory()
+                        val d = repository.getDownloads()
+                        val cm = repository.getCachedMediaList("cached_movies")
+                        val cs = repository.getCachedMediaList("cached_series")
+                        val cl = repository.getCachedMediaList("cached_live")
+                        val cmc = repository.getCachedCategories("cached_movie_cats")
+                        val csc = repository.getCachedCategories("cached_series_cats")
+                        val clc = repository.getCachedCategories("cached_live_cats")
+                        Tuple11(accs, act, f, h, d, cm, cs, cl, cmc, csc, clc)
+                    }
 
-            // Initialize player with buffer setting
-            playerWrapper.initPlayer(_userSettings.value.bufferSize)
+                _accounts.value = loadedAccounts
+                _activeAccount.value = active
+                _favorites.value = favs
+                _watchHistory.value = history
+                _downloads.value = dlList
 
-            // 1. Immediately restore cached home content from disk so it appears with 0ms delay:
-            val cachedMovies = repository.getCachedMediaList("cached_movies")
-            val cachedSeries = repository.getCachedMediaList("cached_series")
-            val cachedLive = repository.getCachedMediaList("cached_live")
-            val cachedMovieCats = repository.getCachedCategories("cached_movie_cats")
-            val cachedSeriesCats = repository.getCachedCategories("cached_series_cats")
-            val cachedLiveCats = repository.getCachedCategories("cached_live_cats")
+                // Initialize player with buffer setting
+                playerWrapper.initPlayer(_userSettings.value.bufferSize)
 
-            val hasCache = cachedMovies.isNotEmpty() || cachedSeries.isNotEmpty() || cachedLive.isNotEmpty()
-            if (hasCache) {
-                _movies.value = cachedMovies
-                _series.value = cachedSeries
-                _liveStreams.value = cachedLive
-                if (cachedMovieCats.isNotEmpty()) _movieCategories.value = cachedMovieCats
-                if (cachedSeriesCats.isNotEmpty()) _seriesCategories.value = cachedSeriesCats
-                if (cachedLiveCats.isNotEmpty()) _liveCategories.value = cachedLiveCats
-                _isLoading.value = false
-            } else if (active.isDemo) {
-                // If demo account and nothing cached yet, immediately display SampleData
+                val hasCache = cachedMovies.isNotEmpty() || cachedSeries.isNotEmpty() || cachedLive.isNotEmpty()
+                if (hasCache) {
+                    _movies.value = cachedMovies
+                    _series.value = cachedSeries
+                    _liveStreams.value = cachedLive
+                    if (cachedMovieCats.isNotEmpty()) _movieCategories.value = cachedMovieCats
+                    if (cachedSeriesCats.isNotEmpty()) _seriesCategories.value = cachedSeriesCats
+                    if (cachedLiveCats.isNotEmpty()) _liveCategories.value = cachedLiveCats
+                    _isLoading.value = false
+                } else if (active.isDemo) {
+                    _liveCategories.value = SampleData.liveCategories
+                    _liveStreams.value = SampleData.sampleLiveStreams
+                    _movieCategories.value = SampleData.movieCategories
+                    _movies.value = SampleData.sampleMovies
+                    _seriesCategories.value = SampleData.seriesCategories
+                    _series.value = SampleData.sampleSeries
+                    _isLoading.value = false
+                } else {
+                    _isLoading.value = true
+                }
+
+                // Refresh in background
+                loadContentForAccount(active, isBackgroundRefresh = hasCache)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                // Graceful fallback to sample data if anything fails
                 _liveCategories.value = SampleData.liveCategories
                 _liveStreams.value = SampleData.sampleLiveStreams
                 _movieCategories.value = SampleData.movieCategories
@@ -134,22 +164,27 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _seriesCategories.value = SampleData.seriesCategories
                 _series.value = SampleData.sampleSeries
                 _isLoading.value = false
-            } else {
-                _isLoading.value = true
             }
-
-            // 2. Refresh from server in background
-            loadContentForAccount(active, isBackgroundRefresh = hasCache)
         }
     }
 
+    private data class Tuple11<A, B, C, D, E, F, G, H, I, J, K>(
+        val a: A, val b: B, val c: C, val d: D, val e: E, val f: F, val g: G, val h: H, val i: I, val j: J, val k: K
+    )
+
     fun switchAccount(accountId: String) {
         viewModelScope.launch {
-            repository.setActiveAccount(accountId)
-            _accounts.value = repository.getAccounts()
-            val active = repository.getActiveAccount()
-            _activeAccount.value = active
-            loadContentForAccount(active)
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.setActiveAccount(accountId)
+                }
+                _accounts.value = withContext(Dispatchers.IO) { repository.getAccounts() }
+                val active = withContext(Dispatchers.IO) { repository.getActiveAccount() }
+                _activeAccount.value = active
+                loadContentForAccount(active)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
@@ -157,38 +192,59 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isLoading.value = true
             _errorMessage.value = null
-            val result = apiClient.authenticate(serverUrl, user, pass)
-            result.onSuccess { account ->
-                repository.addAccount(account)
-                _accounts.value = repository.getAccounts()
-                _activeAccount.value = account
-                loadContentForAccount(account)
+            try {
+                val result = apiClient.authenticate(serverUrl, user, pass)
+                result.onSuccess { account ->
+                    withContext(Dispatchers.IO) {
+                        repository.addAccount(account)
+                    }
+                    _accounts.value = withContext(Dispatchers.IO) { repository.getAccounts() }
+                    _activeAccount.value = account
+                    loadContentForAccount(account)
+                    _isLoading.value = false
+                    onResult(true, null)
+                }.onFailure { error ->
+                    _isLoading.value = false
+                    _errorMessage.value = error.message
+                    onResult(false, error.message)
+                }
+            } catch (e: Exception) {
                 _isLoading.value = false
-                onResult(true, null)
-            }.onFailure { error ->
-                _isLoading.value = false
-                _errorMessage.value = error.message
-                onResult(false, error.message)
+                val msg = e.message ?: "Authentication failed"
+                _errorMessage.value = msg
+                onResult(false, msg)
             }
         }
     }
 
     fun loginDemoMode() {
         viewModelScope.launch {
-            repository.addAccount(SampleData.demoAccount)
-            _accounts.value = repository.getAccounts()
-            _activeAccount.value = SampleData.demoAccount
-            loadContentForAccount(SampleData.demoAccount)
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.addAccount(SampleData.demoAccount)
+                }
+                _accounts.value = withContext(Dispatchers.IO) { repository.getAccounts() }
+                _activeAccount.value = SampleData.demoAccount
+                loadContentForAccount(SampleData.demoAccount)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
     fun removeAccount(accountId: String) {
         viewModelScope.launch {
-            repository.removeAccount(accountId)
-            _accounts.value = repository.getAccounts()
-            val active = repository.getActiveAccount()
-            _activeAccount.value = active
-            loadContentForAccount(active)
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.removeAccount(accountId)
+                }
+                _accounts.value = withContext(Dispatchers.IO) { repository.getAccounts() }
+                val active = withContext(Dispatchers.IO) { repository.getActiveAccount() }
+                _activeAccount.value = active
+                loadContentForAccount(active)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
@@ -208,7 +264,6 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         _errorMessage.value = null
 
         if (account.isDemo) {
-            // Load rich curated demo catalog
             _liveCategories.value = SampleData.liveCategories
             _liveStreams.value = SampleData.sampleLiveStreams
             _movieCategories.value = SampleData.movieCategories
@@ -216,13 +271,18 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             _seriesCategories.value = SampleData.seriesCategories
             _series.value = SampleData.sampleSeries
 
-            // Persist to cache
-            repository.cacheMediaList("cached_movies", SampleData.sampleMovies)
-            repository.cacheMediaList("cached_series", SampleData.sampleSeries)
-            repository.cacheMediaList("cached_live", SampleData.sampleLiveStreams)
-            repository.cacheCategories("cached_movie_cats", SampleData.movieCategories)
-            repository.cacheCategories("cached_series_cats", SampleData.seriesCategories)
-            repository.cacheCategories("cached_live_cats", SampleData.liveCategories)
+            withContext(Dispatchers.IO) {
+                try {
+                    repository.cacheMediaList("cached_movies", SampleData.sampleMovies)
+                    repository.cacheMediaList("cached_series", SampleData.sampleSeries)
+                    repository.cacheMediaList("cached_live", SampleData.sampleLiveStreams)
+                    repository.cacheCategories("cached_movie_cats", SampleData.movieCategories)
+                    repository.cacheCategories("cached_series_cats", SampleData.seriesCategories)
+                    repository.cacheCategories("cached_live_cats", SampleData.liveCategories)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
 
             _isLoading.value = false
             return
@@ -251,16 +311,20 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             _seriesCategories.value = finalSeriesCats
             _series.value = finalSeries
 
-            // Cache for instant display on next launch
-            repository.cacheMediaList("cached_movies", finalMovies)
-            repository.cacheMediaList("cached_series", finalSeries)
-            repository.cacheMediaList("cached_live", finalLiveItems)
-            repository.cacheCategories("cached_movie_cats", finalVodCats)
-            repository.cacheCategories("cached_series_cats", finalSeriesCats)
-            repository.cacheCategories("cached_live_cats", finalLiveCats)
+            withContext(Dispatchers.IO) {
+                try {
+                    repository.cacheMediaList("cached_movies", finalMovies)
+                    repository.cacheMediaList("cached_series", finalSeries)
+                    repository.cacheMediaList("cached_live", finalLiveItems)
+                    repository.cacheCategories("cached_movie_cats", finalVodCats)
+                    repository.cacheCategories("cached_series_cats", finalSeriesCats)
+                    repository.cacheCategories("cached_live_cats", finalLiveCats)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
         } catch (e: Exception) {
-            _errorMessage.value = "Failed to fetch from server: ${e.message}"
-            // Fallback to sample data if no cached data
+            _errorMessage.value = "Failed to update from server: ${e.message}"
             if (_movies.value.isEmpty()) {
                 _liveCategories.value = SampleData.liveCategories
                 _liveStreams.value = SampleData.sampleLiveStreams
@@ -277,18 +341,23 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     fun loadSeriesDetails(seriesItem: MediaItem) {
         viewModelScope.launch {
             _isLoading.value = true
-            val active = _activeAccount.value
-            if (active != null && !active.isDemo) {
-                val details = apiClient.getSeriesDetails(active, seriesItem.streamId)
-                if (details != null) {
-                    _currentSeriesDetails.value = details
-                    _isLoading.value = false
-                    return@launch
+            try {
+                val active = _activeAccount.value
+                if (active != null && !active.isDemo) {
+                    val details = apiClient.getSeriesDetails(active, seriesItem.streamId)
+                    if (details != null) {
+                        _currentSeriesDetails.value = details
+                        _isLoading.value = false
+                        return@launch
+                    }
                 }
+                _currentSeriesDetails.value = SampleData.getSampleSeriesDetails(seriesItem.streamId)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _currentSeriesDetails.value = SampleData.getSampleSeriesDetails(seriesItem.streamId)
+            } finally {
+                _isLoading.value = false
             }
-            // Fallback to rich sample series structure
-            _currentSeriesDetails.value = SampleData.getSampleSeriesDetails(seriesItem.streamId)
-            _isLoading.value = false
         }
     }
 
@@ -310,27 +379,33 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         progressTrackingJob = viewModelScope.launch {
             while (true) {
                 delay(1000)
-                playerWrapper.updatePosition()
-                val item = _nowPlayingItem.value ?: continue
-                val ep = _nowPlayingEpisode.value
-                val curPos = playerWrapper.currentPosition.value
-                val dur = playerWrapper.duration.value
+                try {
+                    playerWrapper.updatePosition()
+                    val item = _nowPlayingItem.value ?: continue
+                    val ep = _nowPlayingEpisode.value
+                    val curPos = playerWrapper.currentPosition.value
+                    val dur = playerWrapper.duration.value
 
-                if (dur > 0 && curPos > 5000) {
-                    val progress = WatchProgress(
-                        id = ep?.id ?: item.id,
-                        mediaId = ep?.id ?: item.id,
-                        title = ep?.title ?: item.name,
-                        type = item.type,
-                        posterUrl = ep?.coverUrl?.ifEmpty { item.streamIcon } ?: item.streamIcon,
-                        positionMs = curPos,
-                        durationMs = dur,
-                        seasonNum = ep?.seasonNumber,
-                        episodeNum = ep?.episodeNum,
-                        streamUrl = ep?.streamUrl ?: item.streamUrl
-                    )
-                    repository.saveWatchProgress(progress)
-                    _watchHistory.value = repository.getWatchHistory()
+                    if (dur > 0 && curPos > 5000) {
+                        val progress = WatchProgress(
+                            id = ep?.id ?: item.id,
+                            mediaId = ep?.id ?: item.id,
+                            title = ep?.title ?: item.name,
+                            type = item.type,
+                            posterUrl = ep?.coverUrl?.ifEmpty { item.streamIcon } ?: item.streamIcon,
+                            positionMs = curPos,
+                            durationMs = dur,
+                            seasonNum = ep?.seasonNumber,
+                            episodeNum = ep?.episodeNum,
+                            streamUrl = ep?.streamUrl ?: item.streamUrl
+                        )
+                        withContext(Dispatchers.IO) {
+                            repository.saveWatchProgress(progress)
+                        }
+                        _watchHistory.value = withContext(Dispatchers.IO) { repository.getWatchHistory() }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
             }
         }
@@ -344,9 +419,16 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleFavorite(item: MediaItem): Boolean {
-        val result = repository.toggleFavorite(item)
-        _favorites.value = repository.getFavorites()
-        return result
+        return try {
+            val result = repository.toggleFavorite(item)
+            viewModelScope.launch(Dispatchers.IO) {
+                _favorites.value = repository.getFavorites()
+            }
+            result
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
     }
 
     fun isFavorite(mediaId: String): Boolean {
@@ -366,42 +448,54 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             posterUrl = item.streamIcon,
             progress = 0.05f,
             status = DownloadStatus.DOWNLOADING,
-            fileSizeBytes = 1024L * 1024L * 750L, // 750MB
+            fileSizeBytes = 1024L * 1024L * 750L,
             streamUrl = item.streamUrl
         )
         val updated = _downloads.value + newDownload
-        repository.saveDownloads(updated)
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.saveDownloads(updated)
+        }
         _downloads.value = updated
 
-        // Simulate background download progress
+        // Simulate download progress
         viewModelScope.launch {
             for (step in 1..10) {
                 delay(1000)
-                val prog = step * 0.1f
-                val list = _downloads.value.map {
-                    if (it.mediaId == item.id) {
-                        it.copy(
-                            progress = prog,
-                            downloadedBytes = (it.fileSizeBytes * prog).toLong(),
-                            status = if (prog >= 1.0f) DownloadStatus.COMPLETED else DownloadStatus.DOWNLOADING
-                        )
-                    } else it
+                try {
+                    val prog = step * 0.1f
+                    val list = _downloads.value.map {
+                        if (it.mediaId == item.id) {
+                            it.copy(
+                                progress = prog,
+                                downloadedBytes = (it.fileSizeBytes * prog).toLong(),
+                                status = if (prog >= 1.0f) DownloadStatus.COMPLETED else DownloadStatus.DOWNLOADING
+                            )
+                        } else it
+                    }
+                    withContext(Dispatchers.IO) {
+                        repository.saveDownloads(list)
+                    }
+                    _downloads.value = list
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-                repository.saveDownloads(list)
-                _downloads.value = list
             }
         }
     }
 
     // Settings
     fun updateSettings(newSettings: UserSettings) {
-        repository.saveUserSettings(newSettings)
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.saveUserSettings(newSettings)
+        }
         _userSettings.value = newSettings
         playerWrapper.initPlayer(newSettings.bufferSize)
     }
 
     fun clearCache() {
-        repository.clearCache()
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.clearCache()
+        }
         _watchHistory.value = emptyList()
     }
 

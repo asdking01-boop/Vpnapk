@@ -7,16 +7,19 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 class XtreamClient {
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(12, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
+        .retryOnConnectionFailure(true)
         .addInterceptor { chain ->
             val request = chain.request().newBuilder()
                 .header("User-Agent", "KrasTV/2.0 (Android; SmartIPTV; ExoPlayer)")
@@ -46,28 +49,44 @@ class XtreamClient {
             val base = normalizeUrl(serverUrl)
             val apiUrl = "$base/player_api.php?username=$user&password=$pass"
             val request = Request.Builder().url(apiUrl).get().build()
-            val response = httpClient.newCall(request).execute()
 
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(Exception("HTTP Error ${response.code}: Check server URL"))
+            val body = httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(
+                        Exception("Server returned HTTP error ${response.code}. Please verify the URL.")
+                    )
+                }
+                response.body?.string().orEmpty()
             }
 
-            val body = response.body?.string().orEmpty()
-            if (body.isEmpty() || body == "[]" || body == "null") {
-                return@withContext Result.failure(Exception("Invalid server response"))
+            if (body.isBlank() || body == "[]" || body == "null") {
+                return@withContext Result.failure(
+                    Exception("Server returned an empty response. Please check server status.")
+                )
             }
 
-            val json = JSONObject(body)
+            val json = try {
+                JSONObject(body)
+            } catch (e: Exception) {
+                return@withContext Result.failure(
+                    Exception("Server response is not valid JSON. Please check server address.")
+                )
+            }
+
             if (!json.has("user_info")) {
-                return@withContext Result.failure(Exception("Server returned unrecognized format. Please verify credentials."))
+                return@withContext Result.failure(
+                    Exception("Unrecognized Xtream Codes response. Please verify credentials.")
+                )
             }
 
-            val userInfo = json.getJSONObject("user_info")
+            val userInfo = json.optJSONObject("user_info") ?: JSONObject()
             val authStatus = userInfo.optString("auth", "1")
             val status = userInfo.optString("status", "Active")
 
             if (authStatus == "0" || status.equals("Disabled", ignoreCase = true) || status.equals("Banned", ignoreCase = true)) {
-                return@withContext Result.failure(Exception("Account is $status or unauthorized"))
+                return@withContext Result.failure(
+                    Exception("Account authorization failed: $status")
+                )
             }
 
             val expDateRaw = userInfo.optString("exp_date", "")
@@ -86,8 +105,12 @@ class XtreamClient {
             )
 
             Result.success(account)
+        } catch (e: UnknownHostException) {
+            Result.failure(Exception("Cannot resolve host. Please check your internet connection or URL."))
+        } catch (e: SocketTimeoutException) {
+            Result.failure(Exception("Server connection timed out. Server might be down."))
         } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(Exception(e.message ?: "Connection error occurred"))
         }
     }
 
@@ -95,20 +118,31 @@ class XtreamClient {
         val list = mutableListOf<Category>()
         try {
             val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_live_categories"
-            val resp = httpClient.newCall(Request.Builder().url(url).build()).execute()
-            val body = resp.body?.string().orEmpty()
+            val request = Request.Builder().url(url).build()
+            val body = httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+            }
+
             if (body.startsWith("[")) {
                 val array = JSONArray(body)
                 for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    list.add(
-                        Category(
-                            categoryId = obj.optString("category_id"),
-                            categoryName = obj.optString("category_name", "Unknown"),
-                            parentId = obj.optInt("parent_id", 0),
-                            type = MediaType.LIVE
-                        )
-                    )
+                    try {
+                        val obj = array.optJSONObject(i) ?: continue
+                        val id = obj.optString("category_id")
+                        val name = obj.optString("category_name", "Unknown")
+                        if (id.isNotBlank()) {
+                            list.add(
+                                Category(
+                                    categoryId = id,
+                                    categoryName = name,
+                                    parentId = obj.optInt("parent_id", 0),
+                                    type = MediaType.LIVE
+                                )
+                            )
+                        }
+                    } catch (e: Exception) {
+                        // Skip individual malformed item
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -122,35 +156,43 @@ class XtreamClient {
         try {
             val catParam = if (!categoryId.isNullOrEmpty()) "&category_id=$categoryId" else ""
             val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_live_streams$catParam"
-            val resp = httpClient.newCall(Request.Builder().url(url).build()).execute()
-            val body = resp.body?.string().orEmpty()
+            val request = Request.Builder().url(url).build()
+            val body = httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+            }
+
             if (body.startsWith("[")) {
                 val array = JSONArray(body)
+                val base = normalizeUrl(account.serverUrl)
                 for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    val sId = obj.optInt("stream_id", 0)
-                    val name = obj.optString("name", "Channel $sId")
-                    val icon = obj.optString("stream_icon", "")
-                    val catId = obj.optString("category_id", "")
-                    val base = normalizeUrl(account.serverUrl)
-                    val streamUrl = "$base/live/${account.username}/${account.password}/$sId.m3u8"
+                    try {
+                        val obj = array.optJSONObject(i) ?: continue
+                        val sId = obj.optInt("stream_id", 0)
+                        if (sId <= 0) continue
+                        val name = obj.optString("name", "Channel $sId")
+                        val icon = obj.optString("stream_icon", "")
+                        val catId = obj.optString("category_id", "")
+                        val streamUrl = "$base/live/${account.username}/${account.password}/$sId.m3u8"
 
-                    list.add(
-                        MediaItem(
-                            id = "live_$sId",
-                            streamId = sId,
-                            name = name,
-                            title = name,
-                            type = MediaType.LIVE,
-                            streamIcon = icon,
-                            backdrop = icon,
-                            categoryId = catId,
-                            resolution = "FHD",
-                            quality = "Live",
-                            streamUrl = streamUrl,
-                            containerExtension = "m3u8"
+                        list.add(
+                            MediaItem(
+                                id = "live_$sId",
+                                streamId = sId,
+                                name = name,
+                                title = name,
+                                type = MediaType.LIVE,
+                                streamIcon = icon,
+                                backdrop = icon,
+                                categoryId = catId,
+                                resolution = "FHD",
+                                quality = "Live",
+                                streamUrl = streamUrl,
+                                containerExtension = "m3u8"
+                            )
                         )
-                    )
+                    } catch (e: Exception) {
+                        // Safe skip
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -163,20 +205,31 @@ class XtreamClient {
         val list = mutableListOf<Category>()
         try {
             val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_vod_categories"
-            val resp = httpClient.newCall(Request.Builder().url(url).build()).execute()
-            val body = resp.body?.string().orEmpty()
+            val request = Request.Builder().url(url).build()
+            val body = httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+            }
+
             if (body.startsWith("[")) {
                 val array = JSONArray(body)
                 for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    list.add(
-                        Category(
-                            categoryId = obj.optString("category_id"),
-                            categoryName = obj.optString("category_name", "Movies"),
-                            parentId = obj.optInt("parent_id", 0),
-                            type = MediaType.MOVIE
-                        )
-                    )
+                    try {
+                        val obj = array.optJSONObject(i) ?: continue
+                        val id = obj.optString("category_id")
+                        val name = obj.optString("category_name", "Movies")
+                        if (id.isNotBlank()) {
+                            list.add(
+                                Category(
+                                    categoryId = id,
+                                    categoryName = name,
+                                    parentId = obj.optInt("parent_id", 0),
+                                    type = MediaType.MOVIE
+                                )
+                            )
+                        }
+                    } catch (e: Exception) {
+                        // Safe skip
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -190,42 +243,50 @@ class XtreamClient {
         try {
             val catParam = if (!categoryId.isNullOrEmpty()) "&category_id=$categoryId" else ""
             val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_vod_streams$catParam"
-            val resp = httpClient.newCall(Request.Builder().url(url).build()).execute()
-            val body = resp.body?.string().orEmpty()
+            val request = Request.Builder().url(url).build()
+            val body = httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+            }
+
             if (body.startsWith("[")) {
                 val array = JSONArray(body)
+                val base = normalizeUrl(account.serverUrl)
                 for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    val sId = obj.optInt("stream_id", 0)
-                    val name = obj.optString("name", "Movie $sId")
-                    val icon = obj.optString("stream_icon", "")
-                    val catId = obj.optString("category_id", "")
-                    val ext = obj.optString("container_extension", "mp4")
-                    val ratingStr = obj.optString("rating", "7.5")
-                    val rating = ratingStr.toDoubleOrNull() ?: 7.0
-                    val year = obj.optString("year", "2024")
+                    try {
+                        val obj = array.optJSONObject(i) ?: continue
+                        val sId = obj.optInt("stream_id", 0)
+                        if (sId <= 0) continue
+                        val name = obj.optString("name", "Movie $sId")
+                        val icon = obj.optString("stream_icon", "")
+                        val catId = obj.optString("category_id", "")
+                        val ext = obj.optString("container_extension", "mp4").ifBlank { "mp4" }
+                        val ratingStr = obj.optString("rating", "7.5")
+                        val rating = ratingStr.toDoubleOrNull() ?: 7.0
+                        val year = obj.optString("year", "2024")
 
-                    val base = normalizeUrl(account.serverUrl)
-                    val streamUrl = "$base/movie/${account.username}/${account.password}/$sId.$ext"
+                        val streamUrl = "$base/movie/${account.username}/${account.password}/$sId.$ext"
 
-                    list.add(
-                        MediaItem(
-                            id = "vod_$sId",
-                            streamId = sId,
-                            name = name,
-                            title = name,
-                            type = MediaType.MOVIE,
-                            streamIcon = icon,
-                            backdrop = icon,
-                            categoryId = catId,
-                            rating = rating,
-                            year = year,
-                            resolution = if (rating > 8.0) "4K" else "FHD",
-                            quality = if (rating > 8.0) "HDR" else "HD",
-                            streamUrl = streamUrl,
-                            containerExtension = ext
+                        list.add(
+                            MediaItem(
+                                id = "vod_$sId",
+                                streamId = sId,
+                                name = name,
+                                title = name,
+                                type = MediaType.MOVIE,
+                                streamIcon = icon,
+                                backdrop = icon,
+                                categoryId = catId,
+                                rating = rating,
+                                year = year,
+                                resolution = if (rating > 8.0) "4K" else "FHD",
+                                quality = if (rating > 8.0) "HDR" else "HD",
+                                streamUrl = streamUrl,
+                                containerExtension = ext
+                            )
                         )
-                    )
+                    } catch (e: Exception) {
+                        // Safe skip
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -238,20 +299,31 @@ class XtreamClient {
         val list = mutableListOf<Category>()
         try {
             val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_series_categories"
-            val resp = httpClient.newCall(Request.Builder().url(url).build()).execute()
-            val body = resp.body?.string().orEmpty()
+            val request = Request.Builder().url(url).build()
+            val body = httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+            }
+
             if (body.startsWith("[")) {
                 val array = JSONArray(body)
                 for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    list.add(
-                        Category(
-                            categoryId = obj.optString("category_id"),
-                            categoryName = obj.optString("category_name", "Series"),
-                            parentId = obj.optInt("parent_id", 0),
-                            type = MediaType.SERIES
-                        )
-                    )
+                    try {
+                        val obj = array.optJSONObject(i) ?: continue
+                        val id = obj.optString("category_id")
+                        val name = obj.optString("category_name", "Series")
+                        if (id.isNotBlank()) {
+                            list.add(
+                                Category(
+                                    categoryId = id,
+                                    categoryName = name,
+                                    parentId = obj.optInt("parent_id", 0),
+                                    type = MediaType.SERIES
+                                )
+                            )
+                        }
+                    } catch (e: Exception) {
+                        // Safe skip
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -265,39 +337,47 @@ class XtreamClient {
         try {
             val catParam = if (!categoryId.isNullOrEmpty()) "&category_id=$categoryId" else ""
             val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_series$catParam"
-            val resp = httpClient.newCall(Request.Builder().url(url).build()).execute()
-            val body = resp.body?.string().orEmpty()
+            val request = Request.Builder().url(url).build()
+            val body = httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+            }
+
             if (body.startsWith("[")) {
                 val array = JSONArray(body)
                 for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    val sId = obj.optInt("series_id", 0)
-                    val name = obj.optString("name", "Series $sId")
-                    val cover = obj.optString("cover", "")
-                    val plot = obj.optString("plot", "")
-                    val catId = obj.optString("category_id", "")
-                    val ratingStr = obj.optString("rating", "8.0")
-                    val rating = ratingStr.toDoubleOrNull() ?: 8.0
-                    val releaseDate = obj.optString("releaseDate", "2024")
-                    val year = if (releaseDate.length >= 4) releaseDate.substring(0, 4) else "2024"
+                    try {
+                        val obj = array.optJSONObject(i) ?: continue
+                        val sId = obj.optInt("series_id", 0)
+                        if (sId <= 0) continue
+                        val name = obj.optString("name", "Series $sId")
+                        val cover = obj.optString("cover", "")
+                        val plot = obj.optString("plot", "")
+                        val catId = obj.optString("category_id", "")
+                        val ratingStr = obj.optString("rating", "8.0")
+                        val rating = ratingStr.toDoubleOrNull() ?: 8.0
+                        val releaseDate = obj.optString("releaseDate", "2024")
+                        val year = if (releaseDate.length >= 4) releaseDate.substring(0, 4) else "2024"
 
-                    list.add(
-                        MediaItem(
-                            id = "series_$sId",
-                            streamId = sId,
-                            name = name,
-                            title = name,
-                            type = MediaType.SERIES,
-                            streamIcon = cover,
-                            backdrop = cover,
-                            categoryId = catId,
-                            plot = plot,
-                            rating = rating,
-                            year = year,
-                            resolution = "4K",
-                            quality = "Dolby Atmos"
+                        list.add(
+                            MediaItem(
+                                id = "series_$sId",
+                                streamId = sId,
+                                name = name,
+                                title = name,
+                                type = MediaType.SERIES,
+                                streamIcon = cover,
+                                backdrop = cover,
+                                categoryId = catId,
+                                plot = plot,
+                                rating = rating,
+                                year = year,
+                                resolution = "4K",
+                                quality = "Dolby Atmos"
+                            )
                         )
-                    )
+                    } catch (e: Exception) {
+                        // Safe skip
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -309,11 +389,13 @@ class XtreamClient {
     suspend fun getSeriesDetails(account: Account, seriesId: Int): SeriesDetails? = withContext(Dispatchers.IO) {
         try {
             val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_series_info&series_id=$seriesId"
-            val resp = httpClient.newCall(Request.Builder().url(url).build()).execute()
-            val body = resp.body?.string().orEmpty()
+            val request = Request.Builder().url(url).build()
+            val body = httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+            }
             if (!body.startsWith("{")) return@withContext null
 
-            val json = JSONObject(body)
+            val json = try { JSONObject(body) } catch (e: Exception) { return@withContext null }
             val info = json.optJSONObject("info") ?: JSONObject()
             val seasonsJson = json.optJSONObject("episodes") ?: JSONObject()
 
@@ -337,31 +419,35 @@ class XtreamClient {
 
                 val epList = mutableListOf<Episode>()
                 for (j in 0 until epArray.length()) {
-                    val epObj = epArray.getJSONObject(j)
-                    val epId = epObj.optString("id")
-                    val epNum = epObj.optInt("episode_num", j + 1)
-                    val epTitle = epObj.optString("title", "Episode $epNum")
-                    val ext = epObj.optString("container_extension", "mp4")
-                    val epInfo = epObj.optJSONObject("info")
-                    val epPlot = epInfo?.optString("plot", "") ?: ""
-                    val duration = epInfo?.optInt("duration_secs", 2700) ?: 2700
+                    try {
+                        val epObj = epArray.optJSONObject(j) ?: continue
+                        val epId = epObj.optString("id", "${seriesId}_${seasonNum}_${j + 1}")
+                        val epNum = epObj.optInt("episode_num", j + 1)
+                        val epTitle = epObj.optString("title", "Episode $epNum")
+                        val ext = epObj.optString("container_extension", "mp4").ifBlank { "mp4" }
+                        val epInfo = epObj.optJSONObject("info")
+                        val epPlot = epInfo?.optString("plot", "") ?: ""
+                        val duration = epInfo?.optInt("duration_secs", 2700) ?: 2700
 
-                    val streamUrl = "$base/series/${account.username}/${account.password}/$epId.$ext"
+                        val streamUrl = "$base/series/${account.username}/${account.password}/$epId.$ext"
 
-                    epList.add(
-                        Episode(
-                            id = epId,
-                            episodeNum = epNum,
-                            title = epTitle,
-                            containerExtension = ext,
-                            plot = epPlot,
-                            durationSec = duration,
-                            rating = 8.0,
-                            streamUrl = streamUrl,
-                            seriesId = seriesId,
-                            seasonNumber = seasonNum
+                        epList.add(
+                            Episode(
+                                id = epId,
+                                episodeNum = epNum,
+                                title = epTitle,
+                                containerExtension = ext,
+                                plot = epPlot,
+                                durationSec = duration,
+                                rating = 8.0,
+                                streamUrl = streamUrl,
+                                seriesId = seriesId,
+                                seasonNumber = seasonNum
+                            )
                         )
-                    )
+                    } catch (e: Exception) {
+                        // Safe skip
+                    }
                 }
 
                 seasonsList.add(

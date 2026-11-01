@@ -1,18 +1,36 @@
 package com.example
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.compose.animation.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Scaffold
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
 import com.example.ui.components.BottomNavBar
@@ -43,6 +61,14 @@ class MainActivity : ComponentActivity() {
             }
 
             KrasTvTheme(accentColor = accentColor) {
+                val context = LocalContext.current
+                val crashPrefs = remember {
+                    context.getSharedPreferences(KrasApplication.PREFS_CRASH, Context.MODE_PRIVATE)
+                }
+                var crashReportText by remember {
+                    mutableStateOf(crashPrefs.getString(KrasApplication.KEY_CRASH_REPORT, null))
+                }
+
                 var isSplashActive by remember { mutableStateOf(true) }
                 var currentScreen by remember { mutableStateOf(NavScreen.HOME) }
                 var isSearchOpen by remember { mutableStateOf(false) }
@@ -80,6 +106,88 @@ class MainActivity : ComponentActivity() {
                         currentScreen != NavScreen.HOME -> currentScreen = NavScreen.HOME
                         else -> finish()
                     }
+                }
+
+                // Global Crash Report Dialog (Shown if app closed unexpectedly in a previous session)
+                if (crashReportText != null) {
+                    AlertDialog(
+                        onDismissRequest = {
+                            crashPrefs.edit().remove(KrasApplication.KEY_CRASH_REPORT).apply()
+                            crashReportText = null
+                        },
+                        title = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = "Crash Detected",
+                                    tint = KrasRedBright,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Crash Report Detected",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp
+                                )
+                            }
+                        },
+                        text = {
+                            Column {
+                                Text(
+                                    text = "Kras TV recovered from an unexpected error in the previous session. Diagnostic report:",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 240.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(0xFF0F0F0F))
+                                        .border(1.dp, GlassBorder, RoundedCornerShape(8.dp))
+                                        .padding(10.dp)
+                                        .verticalScroll(rememberScrollState())
+                                ) {
+                                    SelectionContainer {
+                                        Text(
+                                            text = crashReportText!!,
+                                            color = Color(0xFFFFB4AB),
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 10.sp,
+                                            lineHeight = 14.sp
+                                        )
+                                    }
+                                }
+                            }
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("Kras TV Crash Report", crashReportText))
+                                    Toast.makeText(context, "Crash log copied to clipboard", Toast.LENGTH_SHORT).show()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = KrasRed)
+                            ) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Copy", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = {
+                                    crashPrefs.edit().remove(KrasApplication.KEY_CRASH_REPORT).apply()
+                                    crashReportText = null
+                                }
+                            ) {
+                                Text("Dismiss", color = TextSecondary)
+                            }
+                        },
+                        containerColor = CinemaDark
+                    )
                 }
 
                 if (isSplashActive) {

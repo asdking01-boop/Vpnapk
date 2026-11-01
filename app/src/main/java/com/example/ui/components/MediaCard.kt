@@ -73,13 +73,29 @@ private fun PosterCard(
             .testTag("media_card_${item.id}")
     ) {
         // Poster Image
-        val imageUrl = item.streamIcon.ifEmpty { item.backdrop }
-        AsyncImage(
-            model = imageUrl,
-            contentDescription = item.name,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
-        )
+        val imageUrl = item.streamIcon.ifBlank { item.backdrop }.takeIf { it.isNotBlank() }
+        if (imageUrl != null) {
+            AsyncImage(
+                model = imageUrl,
+                contentDescription = item.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(CinemaCardElevated),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = item.name.firstOrNull()?.uppercase() ?: "K",
+                    color = KrasRedBright,
+                    fontSize = 36.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
 
         // Gradient scrim at bottom for text readability
         Box(
@@ -210,13 +226,29 @@ private fun WideCard(
             .clickable(onClick = onClick)
             .testTag("media_card_wide_${item.id}")
     ) {
-        val imageUrl = item.backdrop.ifEmpty { item.streamIcon }
-        AsyncImage(
-            model = imageUrl,
-            contentDescription = item.name,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
-        )
+        val imageUrl = item.backdrop.ifBlank { item.streamIcon }.takeIf { it.isNotBlank() }
+        if (imageUrl != null) {
+            AsyncImage(
+                model = imageUrl,
+                contentDescription = item.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(CinemaCardElevated),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = item.name.firstOrNull()?.uppercase() ?: "K",
+                    color = KrasRedBright,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
 
         Box(
             modifier = Modifier
@@ -344,12 +376,29 @@ private fun CompactCard(
                 .clip(RoundedCornerShape(8.dp))
                 .background(CinemaDark)
         ) {
-            AsyncImage(
-                model = item.backdrop.ifEmpty { item.streamIcon },
-                contentDescription = item.name,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
+            val imageUrl = item.backdrop.ifBlank { item.streamIcon }.takeIf { it.isNotBlank() }
+            if (imageUrl != null) {
+                AsyncImage(
+                    model = imageUrl,
+                    contentDescription = item.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(CinemaCardElevated),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = item.name.firstOrNull()?.uppercase() ?: "K",
+                        color = KrasRedBright,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
             Box(
                 modifier = Modifier
                     .size(24.dp)
@@ -443,13 +492,29 @@ private fun BillboardCard(
             .clickable(onClick = onClick)
             .testTag("media_card_billboard_${item.id}")
     ) {
-        val imageUrl = item.backdrop.ifEmpty { item.streamIcon }
-        AsyncImage(
-            model = imageUrl,
-            contentDescription = item.name,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
-        )
+        val imageUrl = item.backdrop.ifBlank { item.streamIcon }.takeIf { it.isNotBlank() }
+        if (imageUrl != null) {
+            AsyncImage(
+                model = imageUrl,
+                contentDescription = item.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(CinemaCardElevated),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = item.name.firstOrNull()?.uppercase() ?: "K",
+                    color = KrasRedBright,
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
 
         Box(
             modifier = Modifier

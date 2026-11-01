@@ -43,13 +43,21 @@ fun HeroBanner(
             .testTag("hero_banner")
     ) {
         // Hero Backdrop image
-        val bgUrl = item.backdrop.ifEmpty { item.streamIcon }
-        AsyncImage(
-            model = bgUrl,
-            contentDescription = item.name,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
-        )
+        val bgUrl = item.backdrop.ifBlank { item.streamIcon }.takeIf { it.isNotBlank() }
+        if (bgUrl != null) {
+            AsyncImage(
+                model = bgUrl,
+                contentDescription = item.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(CinemaCardElevated)
+            )
+        }
 
         // Triple Gradient Scrim (top bar gradient + bottom cinema blend)
         Box(

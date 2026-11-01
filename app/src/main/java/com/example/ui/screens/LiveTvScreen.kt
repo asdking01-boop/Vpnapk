@@ -204,12 +204,22 @@ fun LiveTvScreen(
                             .background(CinemaDark),
                         contentAlignment = Alignment.Center
                     ) {
-                        AsyncImage(
-                            model = ch.streamIcon.ifEmpty { ch.backdrop },
-                            contentDescription = ch.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        val chIcon = ch.streamIcon.ifBlank { ch.backdrop }.takeIf { it.isNotBlank() }
+                        if (chIcon != null) {
+                            AsyncImage(
+                                model = chIcon,
+                                contentDescription = ch.name,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Text(
+                                text = ch.name.firstOrNull()?.uppercase() ?: "TV",
+                                color = KrasRedBright,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                         Box(
                             modifier = Modifier
                                 .size(24.dp)
