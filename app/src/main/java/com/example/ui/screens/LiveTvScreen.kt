@@ -34,6 +34,8 @@ import com.example.data.model.MediaItem
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.theme.*
 
+import androidx.compose.foundation.lazy.rememberLazyListState
+
 @Composable
 fun LiveTvScreen(
     channels: List<MediaItem>,
@@ -41,19 +43,38 @@ fun LiveTvScreen(
     isFavorite: (String) -> Boolean,
     onToggleFavorite: (MediaItem) -> Unit,
     onChannelClick: (MediaItem) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    totalCount: Int = channels.size,
+    onLoadMore: (() -> Unit)? = null,
+    onFilterChanged: ((categoryId: String, query: String) -> Unit)? = null
 ) {
     var selectedCategoryId by remember { mutableStateOf("all") }
     var searchQuery by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
 
-    val filteredChannels = remember(channels, selectedCategoryId, searchQuery) {
-        channels.filter { ch ->
-            val matchCat = selectedCategoryId == "all" ||
-                    ch.categoryId == selectedCategoryId ||
-                    ch.categoryName.contains(selectedCategoryId, ignoreCase = true)
-            val matchSearch = searchQuery.isEmpty() ||
-                    ch.name.contains(searchQuery, ignoreCase = true)
-            matchCat && matchSearch
+    LaunchedEffect(selectedCategoryId, searchQuery) {
+        onFilterChanged?.invoke(selectedCategoryId, searchQuery)
+    }
+
+    val filteredChannels = remember(channels, selectedCategoryId, searchQuery, onFilterChanged) {
+        if (onFilterChanged != null) {
+            channels
+        } else {
+            channels.filter { ch ->
+                val matchCat = selectedCategoryId == "all" ||
+                        ch.categoryId == selectedCategoryId ||
+                        ch.categoryName.contains(selectedCategoryId, ignoreCase = true)
+                val matchSearch = searchQuery.isEmpty() ||
+                        ch.name.contains(searchQuery, ignoreCase = true)
+                matchCat && matchSearch
+            }
+        }
+    }
+
+    LaunchedEffect(listState.canScrollForward, filteredChannels.size) {
+        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        if (lastVisible >= filteredChannels.size - 6 && filteredChannels.isNotEmpty()) {
+            onLoadMore?.invoke()
         }
     }
 
@@ -167,7 +188,7 @@ fun LiveTvScreen(
                         .background(KrasRed)
                 )
                 Text(
-                    text = "${filteredChannels.size} Live Streams Online",
+                    text = "${totalCount.coerceAtLeast(filteredChannels.size)} Live Streams Online",
                     color = Color.White,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
@@ -177,6 +198,7 @@ fun LiveTvScreen(
 
         // Channels List
         LazyColumn(
+            state = listState,
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 90.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxSize()

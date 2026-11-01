@@ -177,6 +177,12 @@ class ExoPlayerWrapper(private val context: Context) {
         }
     }
 
+    fun stop() {
+        exoPlayer?.stop()
+        _isPlaying.value = false
+        _isBuffering.value = false
+    }
+
     fun release() {
         exoPlayer?.stop()
         exoPlayer?.release()

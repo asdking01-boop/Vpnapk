@@ -136,4 +136,57 @@ class ExampleRobolectricTest {
     repo.saveInterruptionFilter(null)
     assertNull(repo.getSavedInterruptionFilter())
   }
+
+  @Test
+  fun `room database batch insert and bounded query`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+
+    kotlinx.coroutines.runBlocking {
+      val testAccountId = "acc_batch_test"
+      val batch = (1..100).map { i ->
+        com.example.data.local.entity.MediaItemEntity(
+          id = "vod_$i",
+          accountId = testAccountId,
+          streamId = i,
+          name = "Movie $i",
+          title = "Movie $i",
+          type = "MOVIE",
+          posterUrl = "http://example.com/poster_$i.jpg",
+          backdropUrl = "",
+          categoryId = if (i % 2 == 0) "cat_action" else "cat_comedy",
+          categoryName = if (i % 2 == 0) "Action" else "Comedy",
+          rating = 5.0 + (i % 50) * 0.1,
+          year = "2024",
+          resolution = "4K",
+          quality = "HDR",
+          streamUrl = "http://example.com/movie/$i.mp4",
+          containerExtension = "mp4",
+          addedTimestamp = System.currentTimeMillis() + i
+        )
+      }
+
+      // Batch insert into Room
+      repo.insertMediaBatch(batch)
+
+      // Test bounded query
+      val topRated = repo.getTopRated(testAccountId, "MOVIE", limit = 10)
+      assertEquals(10, topRated.size)
+      assertTrue(topRated.first().rating >= topRated.last().rating)
+
+      // Test paged query
+      val page1 = repo.queryMediaPaged(testAccountId, "MOVIE", "all", "", 0.0, "All", limit = 20, offset = 0)
+      assertEquals(20, page1.size)
+
+      val page2 = repo.queryMediaPaged(testAccountId, "MOVIE", "all", "", 0.0, "All", limit = 20, offset = 20)
+      assertEquals(20, page2.size)
+      assertNotEquals(page1.first().id, page2.first().id)
+
+      // Test clear old rows
+      repo.clearOldRows(testAccountId, "MOVIE")
+      val afterClear = repo.getTopRated(testAccountId, "MOVIE", limit = 10)
+      assertEquals(0, afterClear.size)
+    }
+  }
 }
+

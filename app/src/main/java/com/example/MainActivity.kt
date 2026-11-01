@@ -103,6 +103,11 @@ class MainActivity : ComponentActivity() {
 
                 val nowPlayingItem by viewModel.nowPlayingItem.collectAsState()
                 val nowPlayingEpisode by viewModel.nowPlayingEpisode.collectAsState()
+                val syncProgress by viewModel.syncProgress.collectAsState()
+                val errorMessage by viewModel.errorMessage.collectAsState()
+                val totalMoviesCount by viewModel.totalMoviesCount.collectAsState()
+                val totalSeriesCount by viewModel.totalSeriesCount.collectAsState()
+                val totalLiveCount by viewModel.totalLiveCount.collectAsState()
 
                 // Play original cinematic intro sound on cold start launch only
                 LaunchedEffect(Unit) {
@@ -320,7 +325,12 @@ class MainActivity : ComponentActivity() {
                                     isFavorite = { id -> viewModel.isFavorite(id) },
                                     onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                                     onMovieClick = { movie -> viewModel.startPlayback(movie) },
-                                    cardStyle = userSettings.cardStyle
+                                    cardStyle = userSettings.cardStyle,
+                                    totalCount = totalMoviesCount,
+                                    onLoadMore = { viewModel.loadMoreMovies() },
+                                    onFilterChanged = { cat, q, rating, yr ->
+                                        viewModel.filterMovies(cat, q, rating, yr)
+                                    }
                                 )
 
                                 NavScreen.SERIES -> SeriesScreen(
@@ -332,7 +342,12 @@ class MainActivity : ComponentActivity() {
                                         viewModel.loadSeriesDetails(s)
                                         selectedSeriesForDetails = s
                                     },
-                                    cardStyle = userSettings.cardStyle
+                                    cardStyle = userSettings.cardStyle,
+                                    totalCount = totalSeriesCount,
+                                    onLoadMore = { viewModel.loadMoreSeries() },
+                                    onFilterChanged = { cat, q, rating, yr ->
+                                        viewModel.filterSeries(cat, q, rating, yr)
+                                    }
                                 )
 
                                 NavScreen.LIVE_TV -> LiveTvScreen(
@@ -340,7 +355,12 @@ class MainActivity : ComponentActivity() {
                                     categories = liveCategories,
                                     isFavorite = { id -> viewModel.isFavorite(id) },
                                     onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
-                                    onChannelClick = { channel -> viewModel.startPlayback(channel) }
+                                    onChannelClick = { channel -> viewModel.startPlayback(channel) },
+                                    totalCount = totalLiveCount,
+                                    onLoadMore = { viewModel.loadMoreLive() },
+                                    onFilterChanged = { cat, q ->
+                                        viewModel.filterLive(cat, q)
+                                    }
                                 )
 
                                 NavScreen.SETTINGS -> SettingsScreen(
@@ -353,6 +373,83 @@ class MainActivity : ComponentActivity() {
                                     onRemoveAccount = { accId -> viewModel.removeAccount(accId) },
                                     onClearCache = { viewModel.clearCache() }
                                 )
+                            }
+
+                            // Non-blocking sync progress indicator
+                            if (syncProgress != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .padding(bottom = 16.dp)
+                                        .clip(RoundedCornerShape(20.dp))
+                                        .background(Color(0xE6151515))
+                                        .border(1.dp, GlassBorder, RoundedCornerShape(20.dp))
+                                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        CircularProgressIndicator(
+                                            color = KrasRed,
+                                            strokeWidth = 2.dp,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = syncProgress!!,
+                                            color = Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Friendly Error banner with Retry
+                            if (errorMessage != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopCenter)
+                                        .statusBarsPadding()
+                                        .padding(top = 10.dp, start = 16.dp, end = 16.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(Color(0xF0200808))
+                                        .border(1.dp, KrasRed.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Warning,
+                                                contentDescription = "Error",
+                                                tint = KrasRedBright,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = errorMessage!!,
+                                                color = Color.White,
+                                                fontSize = 12.sp,
+                                                maxLines = 2
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        TextButton(
+                                            onClick = {
+                                                viewModel.clearErrorMessage()
+                                                viewModel.refreshContent()
+                                            },
+                                            colors = ButtonDefaults.textButtonColors(contentColor = KrasRedBright)
+                                        ) {
+                                            Text("Retry", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                        }
+                                    }
+                                }
                             }
                         }
 

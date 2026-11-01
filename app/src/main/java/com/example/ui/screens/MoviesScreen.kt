@@ -32,6 +32,9 @@ import com.example.data.model.WatchProgress
 import com.example.ui.components.MediaCard
 import com.example.ui.theme.*
 
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.rememberLazyListState
+
 @Composable
 fun MoviesScreen(
     movies: List<MediaItem>,
@@ -41,7 +44,10 @@ fun MoviesScreen(
     onToggleFavorite: (MediaItem) -> Unit,
     onMovieClick: (MediaItem) -> Unit,
     cardStyle: CardStyle,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    totalCount: Int = movies.size,
+    onLoadMore: (() -> Unit)? = null,
+    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String) -> Unit)? = null
 ) {
     var selectedCategoryId by remember { mutableStateOf("all") }
     var searchQuery by remember { mutableStateOf("") }
@@ -49,17 +55,46 @@ fun MoviesScreen(
     var selectedYear by remember { mutableStateOf("All") }
     var showFilterDialog by remember { mutableStateOf(false) }
 
-    val filteredMovies = remember(movies, selectedCategoryId, searchQuery, minRating, selectedYear) {
-        movies.filter { movie ->
-            val matchCategory = selectedCategoryId == "all" ||
-                    movie.categoryId == selectedCategoryId ||
-                    movie.categoryName.contains(selectedCategoryId, ignoreCase = true)
-            val matchSearch = searchQuery.isEmpty() ||
-                    movie.name.contains(searchQuery, ignoreCase = true) ||
-                    movie.genre.contains(searchQuery, ignoreCase = true)
-            val matchRating = movie.rating >= minRating
-            val matchYear = selectedYear == "All" || movie.year == selectedYear
-            matchCategory && matchSearch && matchRating && matchYear
+    val gridState = rememberLazyGridState()
+    val listState = rememberLazyListState()
+
+    // Trigger filter update when controls change
+    LaunchedEffect(selectedCategoryId, searchQuery, minRating, selectedYear) {
+        if (onFilterChanged != null) {
+            onFilterChanged(selectedCategoryId, searchQuery, minRating, selectedYear)
+        }
+    }
+
+    val filteredMovies = remember(movies, selectedCategoryId, searchQuery, minRating, selectedYear, onFilterChanged) {
+        if (onFilterChanged != null) {
+            movies // Already filtered by Room SQL query
+        } else {
+            movies.filter { movie ->
+                val matchCategory = selectedCategoryId == "all" ||
+                        movie.categoryId == selectedCategoryId ||
+                        movie.categoryName.contains(selectedCategoryId, ignoreCase = true)
+                val matchSearch = searchQuery.isEmpty() ||
+                        movie.name.contains(searchQuery, ignoreCase = true) ||
+                        movie.genre.contains(searchQuery, ignoreCase = true)
+                val matchRating = movie.rating >= minRating
+                val matchYear = selectedYear == "All" || movie.year == selectedYear
+                matchCategory && matchSearch && matchRating && matchYear
+            }
+        }
+    }
+
+    // Scroll pagination triggers
+    LaunchedEffect(gridState.canScrollForward, filteredMovies.size) {
+        val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        if (lastVisible >= filteredMovies.size - 6 && filteredMovies.isNotEmpty()) {
+            onLoadMore?.invoke()
+        }
+    }
+
+    LaunchedEffect(listState.canScrollForward, filteredMovies.size) {
+        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        if (lastVisible >= filteredMovies.size - 6 && filteredMovies.isNotEmpty()) {
+            onLoadMore?.invoke()
         }
     }
 
@@ -172,7 +207,7 @@ fun MoviesScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "${filteredMovies.size} Movies available",
+                text = "${totalCount.coerceAtLeast(filteredMovies.size)} Movies available",
                 color = TextSecondary,
                 fontSize = 12.sp
             )
@@ -216,6 +251,7 @@ fun MoviesScreen(
         } else {
             if (cardStyle == CardStyle.COMPACT) {
                 LazyColumn(
+                    state = listState,
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 90.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.fillMaxSize()
@@ -233,6 +269,7 @@ fun MoviesScreen(
                 }
             } else {
                 LazyVerticalGrid(
+                    state = gridState,
                     columns = GridCells.Adaptive(minSize = if (cardStyle == CardStyle.WIDE) 180.dp else 125.dp),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 90.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),

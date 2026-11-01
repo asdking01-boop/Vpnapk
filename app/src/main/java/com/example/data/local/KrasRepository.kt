@@ -2,8 +2,14 @@ package com.example.data.local
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.data.local.db.KrasDatabase
+import com.example.data.local.entity.CategoryEntity
+import com.example.data.local.entity.MediaItemEntity
 import com.example.data.model.*
 import com.example.data.sample.SampleData
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -11,6 +17,9 @@ class KrasRepository(context: Context) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("kras_tv_prefs", Context.MODE_PRIVATE)
+
+    private val db = KrasDatabase.getInstance(context)
+    val mediaDao = db.mediaDao()
 
     // --- Accounts ---
     fun getAccounts(): List<Account> {
@@ -148,11 +157,6 @@ class KrasRepository(context: Context) {
             )
             isAdded = true
         }
-        saveFavorites(list)
-        return isAdded
-    }
-
-    private fun saveFavorites(list: List<FavoriteItem>) {
         try {
             val array = JSONArray()
             for (fav in list) {
@@ -174,6 +178,11 @@ class KrasRepository(context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+        return isAdded
+    }
+
+    fun isFavorite(mediaId: String): Boolean {
+        return getFavorites().any { it.mediaId == mediaId }
     }
 
     // --- Watch History ---
@@ -208,23 +217,23 @@ class KrasRepository(context: Context) {
 
     fun saveWatchProgress(progress: WatchProgress) {
         val list = getWatchHistory().filter { it.mediaId != progress.mediaId }.toMutableList()
-        list.add(0, progress.copy(updatedAt = System.currentTimeMillis()))
+        list.add(0, progress)
+        val trimmed = list.take(50)
         try {
             val array = JSONArray()
-            // Keep at most 30 recent items
-            for (item in list.take(30)) {
+            for (wp in trimmed) {
                 val obj = JSONObject().apply {
-                    put("id", item.id)
-                    put("mediaId", item.mediaId)
-                    put("title", item.title)
-                    put("type", item.type.name)
-                    put("posterUrl", item.posterUrl)
-                    put("positionMs", item.positionMs)
-                    put("durationMs", item.durationMs)
-                    item.seasonNum?.let { put("seasonNum", it) }
-                    item.episodeNum?.let { put("episodeNum", it) }
-                    put("streamUrl", item.streamUrl)
-                    put("updatedAt", item.updatedAt)
+                    put("id", wp.id)
+                    put("mediaId", wp.mediaId)
+                    put("title", wp.title)
+                    put("type", wp.type.name)
+                    put("posterUrl", wp.posterUrl)
+                    put("positionMs", wp.positionMs)
+                    put("durationMs", wp.durationMs)
+                    if (wp.seasonNum != null) put("seasonNum", wp.seasonNum)
+                    if (wp.episodeNum != null) put("episodeNum", wp.episodeNum)
+                    put("streamUrl", wp.streamUrl)
+                    put("updatedAt", wp.updatedAt)
                 }
                 array.put(obj)
             }
@@ -249,10 +258,10 @@ class KrasRepository(context: Context) {
                         title = obj.getString("title"),
                         type = MediaType.valueOf(obj.getString("type")),
                         posterUrl = obj.optString("posterUrl", ""),
-                        progress = obj.optDouble("progress", 0.0).toFloat(),
-                        status = DownloadStatus.valueOf(obj.optString("status", "QUEUED")),
-                        fileSizeBytes = obj.optLong("fileSizeBytes", 0L),
-                        downloadedBytes = obj.optLong("downloadedBytes", 0L),
+                        status = DownloadStatus.valueOf(obj.getString("status")),
+                        progress = obj.getDouble("progress").toFloat(),
+                        downloadedBytes = obj.getLong("downloadedBytes"),
+                        fileSizeBytes = obj.getLong("fileSizeBytes"),
                         streamUrl = obj.optString("streamUrl", "")
                     )
                 )
@@ -263,21 +272,21 @@ class KrasRepository(context: Context) {
         return list
     }
 
-    fun saveDownloads(list: List<DownloadItem>) {
+    fun saveDownloads(downloads: List<DownloadItem>) {
         try {
             val array = JSONArray()
-            for (item in list) {
+            for (dl in downloads) {
                 val obj = JSONObject().apply {
-                    put("id", item.id)
-                    put("mediaId", item.mediaId)
-                    put("title", item.title)
-                    put("type", item.type.name)
-                    put("posterUrl", item.posterUrl)
-                    put("progress", item.progress)
-                    put("status", item.status.name)
-                    put("fileSizeBytes", item.fileSizeBytes)
-                    put("downloadedBytes", item.downloadedBytes)
-                    put("streamUrl", item.streamUrl)
+                    put("id", dl.id)
+                    put("mediaId", dl.mediaId)
+                    put("title", dl.title)
+                    put("type", dl.type.name)
+                    put("posterUrl", dl.posterUrl)
+                    put("status", dl.status.name)
+                    put("progress", dl.progress)
+                    put("downloadedBytes", dl.downloadedBytes)
+                    put("fileSizeBytes", dl.fileSizeBytes)
+                    put("streamUrl", dl.streamUrl)
                 }
                 array.put(obj)
             }
@@ -287,19 +296,15 @@ class KrasRepository(context: Context) {
         }
     }
 
-    // --- User Settings ---
+    // --- Settings ---
     fun getUserSettings(): UserSettings {
         return UserSettings(
             accentColorIndex = prefs.getInt("accentColorIndex", 0),
             blurIntensity = prefs.getString("blurIntensity", "Medium") ?: "Medium",
-            cardStyle = try {
-                CardStyle.valueOf(prefs.getString("cardStyle", "POSTER") ?: "POSTER")
-            } catch (e: Exception) { CardStyle.POSTER },
+            cardStyle = CardStyle.valueOf(prefs.getString("cardStyle", CardStyle.POSTER.name) ?: CardStyle.POSTER.name),
             defaultQuality = prefs.getString("defaultQuality", "Auto") ?: "Auto",
             bufferSize = prefs.getString("bufferSize", "Large") ?: "Large",
-            defaultAspectRatio = try {
-                AspectRatioMode.valueOf(prefs.getString("defaultAspectRatio", "FIT") ?: "FIT")
-            } catch (e: Exception) { AspectRatioMode.FIT },
+            defaultAspectRatio = AspectRatioMode.valueOf(prefs.getString("defaultAspectRatio", AspectRatioMode.FIT.name) ?: AspectRatioMode.FIT.name),
             language = prefs.getString("language", "English") ?: "English",
             parentalPin = prefs.getString("parentalPin", "") ?: "",
             parentalEnabled = prefs.getBoolean("parentalEnabled", false),
@@ -336,6 +341,73 @@ class KrasRepository(context: Context) {
         }
     }
 
+    // --- Room Database Batch Operations ---
+
+    suspend fun insertMediaBatch(items: List<MediaItemEntity>) = withContext(Dispatchers.IO) {
+        mediaDao.insertAll(items)
+    }
+
+    suspend fun clearOldRows(accountId: String, type: String) = withContext(Dispatchers.IO) {
+        mediaDao.deleteByAccountAndType(accountId, type)
+    }
+
+    suspend fun clearAllMedia() = withContext(Dispatchers.IO) {
+        mediaDao.clearAll()
+    }
+
+    suspend fun getTopRated(accountId: String, type: String, limit: Int = 20): List<MediaItem> = withContext(Dispatchers.IO) {
+        mediaDao.getTopRated(accountId, type, limit).map { it.toMediaItem() }
+    }
+
+    suspend fun getRecentlyAdded(accountId: String, limit: Int = 20): List<MediaItem> = withContext(Dispatchers.IO) {
+        mediaDao.getRecentlyAdded(accountId, limit).map { it.toMediaItem() }
+    }
+
+    suspend fun getByCategory(accountId: String, type: String, categoryId: String, limit: Int = 15): List<MediaItem> = withContext(Dispatchers.IO) {
+        mediaDao.getByCategory(accountId, type, categoryId, limit).map { it.toMediaItem() }
+    }
+
+    suspend fun queryMediaPaged(
+        accountId: String,
+        type: String,
+        categoryId: String,
+        query: String,
+        minRating: Double,
+        year: String,
+        limit: Int,
+        offset: Int
+    ): List<MediaItem> = withContext(Dispatchers.IO) {
+        mediaDao.queryMediaPaged(accountId, type, categoryId, query, minRating, year, limit, offset).map { it.toMediaItem() }
+    }
+
+    suspend fun countMedia(
+        accountId: String,
+        type: String,
+        categoryId: String,
+        query: String,
+        minRating: Double,
+        year: String
+    ): Int = withContext(Dispatchers.IO) {
+        mediaDao.countMedia(accountId, type, categoryId, query, minRating, year)
+    }
+
+    suspend fun getItemsByIds(ids: List<String>): List<MediaItem> = withContext(Dispatchers.IO) {
+        mediaDao.getItemsByIds(ids).map { it.toMediaItem() }
+    }
+
+    suspend fun searchAll(accountId: String, query: String): List<MediaItem> = withContext(Dispatchers.IO) {
+        mediaDao.searchAll(accountId, query).map { it.toMediaItem() }
+    }
+
+    suspend fun saveCategories(accountId: String, type: MediaType, categories: List<CategoryEntity>) = withContext(Dispatchers.IO) {
+        mediaDao.deleteCategoriesByAccountAndType(accountId, type.name)
+        mediaDao.insertCategories(categories)
+    }
+
+    suspend fun getCategories(accountId: String, type: MediaType): List<Category> = withContext(Dispatchers.IO) {
+        mediaDao.getCategories(accountId, type.name).map { it.toCategory() }
+    }
+
     fun clearCache() {
         prefs.edit().remove("watch_history")
             .remove("cached_movies")
@@ -345,116 +417,82 @@ class KrasRepository(context: Context) {
             .remove("cached_series_cats")
             .remove("cached_live_cats")
             .apply()
+        runBlocking(Dispatchers.IO) {
+            try {
+                mediaDao.clearAll()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
-    // --- Cached Home Content ---
+    // --- Compatibility Methods (Backed by Room without giant JSON strings) ---
+
     fun cacheMediaList(key: String, items: List<MediaItem>) {
-        try {
-            val array = JSONArray()
-            for (item in items) {
-                val obj = JSONObject().apply {
-                    put("id", item.id)
-                    put("streamId", item.streamId)
-                    put("name", item.name)
-                    put("title", item.title)
-                    put("type", item.type.name)
-                    put("streamIcon", item.streamIcon)
-                    put("backdrop", item.backdrop)
-                    put("categoryId", item.categoryId)
-                    put("categoryName", item.categoryName)
-                    put("rating", item.rating)
-                    put("year", item.year)
-                    put("resolution", item.resolution)
-                    put("quality", item.quality)
-                    put("plot", item.plot)
-                    put("genre", item.genre)
-                    put("duration", item.duration)
-                    put("streamUrl", item.streamUrl)
-                    put("containerExtension", item.containerExtension)
-                    put("addedTimestamp", item.addedTimestamp)
-                }
-                array.put(obj)
+        val account = getActiveAccount()
+        val type = when {
+            key.contains("movie", ignoreCase = true) -> MediaType.MOVIE
+            key.contains("series", ignoreCase = true) -> MediaType.SERIES
+            else -> MediaType.LIVE
+        }
+        val entities = items.map { MediaItemEntity.fromMediaItem(it, account.id) }
+        runBlocking(Dispatchers.IO) {
+            try {
+                mediaDao.deleteByAccountAndType(account.id, type.name)
+                mediaDao.insertAll(entities)
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-            prefs.edit().putString(key, array.toString()).apply()
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
     fun getCachedMediaList(key: String): List<MediaItem> {
-        val jsonStr = prefs.getString(key, null) ?: return emptyList()
-        val list = mutableListOf<MediaItem>()
-        try {
-            val array = JSONArray(jsonStr)
-            for (i in 0 until array.length()) {
-                val obj = array.getJSONObject(i)
-                list.add(
-                    MediaItem(
-                        id = obj.getString("id"),
-                        streamId = obj.optInt("streamId", 0),
-                        name = obj.getString("name"),
-                        title = obj.optString("title", obj.getString("name")),
-                        type = MediaType.valueOf(obj.getString("type")),
-                        streamIcon = obj.optString("streamIcon", ""),
-                        backdrop = obj.optString("backdrop", ""),
-                        categoryId = obj.optString("categoryId", ""),
-                        categoryName = obj.optString("categoryName", ""),
-                        rating = obj.optDouble("rating", 0.0),
-                        year = obj.optString("year", ""),
-                        resolution = obj.optString("resolution", "HD"),
-                        quality = obj.optString("quality", "HD"),
-                        plot = obj.optString("plot", ""),
-                        genre = obj.optString("genre", ""),
-                        duration = obj.optString("duration", ""),
-                        streamUrl = obj.optString("streamUrl", ""),
-                        containerExtension = obj.optString("containerExtension", "mp4"),
-                        addedTimestamp = obj.optLong("addedTimestamp", System.currentTimeMillis())
-                    )
-                )
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        val account = getActiveAccount()
+        val type = when {
+            key.contains("movie", ignoreCase = true) -> "MOVIE"
+            key.contains("series", ignoreCase = true) -> "SERIES"
+            else -> "LIVE"
         }
-        return list
+        return runBlocking(Dispatchers.IO) {
+            try {
+                mediaDao.getTopRated(account.id, type, 50).map { it.toMediaItem() }
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
     }
 
     fun cacheCategories(key: String, categories: List<Category>) {
-        try {
-            val array = JSONArray()
-            for (cat in categories) {
-                val obj = JSONObject().apply {
-                    put("categoryId", cat.categoryId)
-                    put("categoryName", cat.categoryName)
-                    put("parentId", cat.parentId)
-                    put("type", cat.type.name)
-                }
-                array.put(obj)
+        val account = getActiveAccount()
+        val type = when {
+            key.contains("movie", ignoreCase = true) -> MediaType.MOVIE
+            key.contains("series", ignoreCase = true) -> MediaType.SERIES
+            else -> MediaType.LIVE
+        }
+        val entities = categories.map { CategoryEntity.fromCategory(it, account.id) }
+        runBlocking(Dispatchers.IO) {
+            try {
+                mediaDao.deleteCategoriesByAccountAndType(account.id, type.name)
+                mediaDao.insertCategories(entities)
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-            prefs.edit().putString(key, array.toString()).apply()
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
     fun getCachedCategories(key: String): List<Category> {
-        val jsonStr = prefs.getString(key, null) ?: return emptyList()
-        val list = mutableListOf<Category>()
-        try {
-            val array = JSONArray(jsonStr)
-            for (i in 0 until array.length()) {
-                val obj = array.getJSONObject(i)
-                list.add(
-                    Category(
-                        categoryId = obj.getString("categoryId"),
-                        categoryName = obj.getString("categoryName"),
-                        parentId = obj.optInt("parentId", 0),
-                        type = MediaType.valueOf(obj.getString("type"))
-                    )
-                )
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        val account = getActiveAccount()
+        val type = when {
+            key.contains("movie", ignoreCase = true) -> "MOVIE"
+            key.contains("series", ignoreCase = true) -> "SERIES"
+            else -> "LIVE"
         }
-        return list
+        return runBlocking(Dispatchers.IO) {
+            try {
+                mediaDao.getCategories(account.id, type).map { it.toCategory() }
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
     }
 }

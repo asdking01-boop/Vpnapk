@@ -27,6 +27,7 @@ import com.example.data.model.CardStyle
 import com.example.data.model.Category
 import com.example.data.model.MediaItem
 import com.example.ui.components.MediaCard
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import com.example.ui.theme.*
 
 @Composable
@@ -37,20 +38,39 @@ fun SeriesScreen(
     onToggleFavorite: (MediaItem) -> Unit,
     onSeriesClick: (MediaItem) -> Unit,
     cardStyle: CardStyle,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    totalCount: Int = seriesList.size,
+    onLoadMore: (() -> Unit)? = null,
+    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String) -> Unit)? = null
 ) {
     var selectedCategoryId by remember { mutableStateOf("all") }
     var searchQuery by remember { mutableStateOf("") }
+    val gridState = rememberLazyGridState()
 
-    val filteredSeries = remember(seriesList, selectedCategoryId, searchQuery) {
-        seriesList.filter { s ->
-            val matchCat = selectedCategoryId == "all" ||
-                    s.categoryId == selectedCategoryId ||
-                    s.categoryName.contains(selectedCategoryId, ignoreCase = true)
-            val matchSearch = searchQuery.isEmpty() ||
-                    s.name.contains(searchQuery, ignoreCase = true) ||
-                    s.genre.contains(searchQuery, ignoreCase = true)
-            matchCat && matchSearch
+    LaunchedEffect(selectedCategoryId, searchQuery) {
+        onFilterChanged?.invoke(selectedCategoryId, searchQuery, 0.0, "All")
+    }
+
+    val filteredSeries = remember(seriesList, selectedCategoryId, searchQuery, onFilterChanged) {
+        if (onFilterChanged != null) {
+            seriesList
+        } else {
+            seriesList.filter { s ->
+                val matchCat = selectedCategoryId == "all" ||
+                        s.categoryId == selectedCategoryId ||
+                        s.categoryName.contains(selectedCategoryId, ignoreCase = true)
+                val matchSearch = searchQuery.isEmpty() ||
+                        s.name.contains(searchQuery, ignoreCase = true) ||
+                        s.genre.contains(searchQuery, ignoreCase = true)
+                matchCat && matchSearch
+            }
+        }
+    }
+
+    LaunchedEffect(gridState.canScrollForward, filteredSeries.size) {
+        val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        if (lastVisible >= filteredSeries.size - 6 && filteredSeries.isNotEmpty()) {
+            onLoadMore?.invoke()
         }
     }
 
@@ -134,7 +154,7 @@ fun SeriesScreen(
 
         // Count
         Text(
-            text = "${filteredSeries.size} Shows available",
+            text = "${totalCount.coerceAtLeast(filteredSeries.size)} Shows available",
             color = TextSecondary,
             fontSize = 12.sp,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
@@ -142,6 +162,7 @@ fun SeriesScreen(
 
         // Grid
         LazyVerticalGrid(
+            state = gridState,
             columns = GridCells.Adaptive(minSize = 130.dp),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 90.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),

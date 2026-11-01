@@ -1,12 +1,18 @@
 package com.example.data.api
 
+import android.util.JsonReader
+import android.util.JsonToken
+import com.example.data.local.entity.CategoryEntity
+import com.example.data.local.entity.MediaItemEntity
 import com.example.data.model.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.InputStreamReader
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
@@ -14,9 +20,9 @@ import java.util.concurrent.TimeUnit
 class XtreamClient {
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(12, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .retryOnConnectionFailure(true)
@@ -114,35 +120,83 @@ class XtreamClient {
         }
     }
 
-    suspend fun getLiveCategories(account: Account): List<Category> = withContext(Dispatchers.IO) {
-        val list = mutableListOf<Category>()
-        try {
-            val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_live_categories"
-            val request = Request.Builder().url(url).build()
-            val body = httpClient.newCall(request).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-            }
+    // --- Streamed Category Parsing with JsonReader ---
+    suspend fun fetchCategories(
+        account: Account,
+        type: MediaType
+    ): List<CategoryEntity> = withContext(Dispatchers.IO) {
+        val action = when (type) {
+            MediaType.LIVE -> "get_live_categories"
+            MediaType.MOVIE -> "get_vod_categories"
+            MediaType.SERIES -> "get_series_categories"
+        }
+        val defaultName = when (type) {
+            MediaType.LIVE -> "Live TV"
+            MediaType.MOVIE -> "Movies"
+            MediaType.SERIES -> "Series"
+        }
+        val list = mutableListOf<CategoryEntity>()
+        val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=$action"
+        val request = Request.Builder().url(url).build()
 
-            if (body.startsWith("[")) {
-                val array = JSONArray(body)
-                for (i in 0 until array.length()) {
-                    try {
-                        val obj = array.optJSONObject(i) ?: continue
-                        val id = obj.optString("category_id")
-                        val name = obj.optString("category_name", "Unknown")
-                        if (id.isNotBlank()) {
-                            list.add(
-                                Category(
-                                    categoryId = id,
-                                    categoryName = name,
-                                    parentId = obj.optInt("parent_id", 0),
-                                    type = MediaType.LIVE
+        try {
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext emptyList()
+                val inputStream = response.body?.byteStream() ?: return@withContext emptyList()
+                val reader = JsonReader(InputStreamReader(inputStream, "UTF-8"))
+
+                if (reader.peek() == JsonToken.BEGIN_ARRAY) {
+                    reader.beginArray()
+                    while (reader.hasNext()) {
+                        if (reader.peek() == JsonToken.BEGIN_OBJECT) {
+                            reader.beginObject()
+                            var id = ""
+                            var name = defaultName
+                            var parentId = 0
+                            while (reader.hasNext()) {
+                                val field = reader.nextName()
+                                if (reader.peek() == JsonToken.NULL) {
+                                    reader.nextNull()
+                                    continue
+                                }
+                                when (field) {
+                                    "category_id" -> {
+                                        id = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt().toString()
+                                        } else {
+                                            reader.nextString()
+                                        }
+                                    }
+                                    "category_name" -> name = reader.nextString()
+                                    "parent_id" -> {
+                                        parentId = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt()
+                                        } else {
+                                            reader.nextString().toIntOrNull() ?: 0
+                                        }
+                                    }
+                                    else -> reader.skipValue()
+                                }
+                            }
+                            reader.endObject()
+
+                            if (id.isNotBlank()) {
+                                list.add(
+                                    CategoryEntity(
+                                        id = "${account.id}_${type.name}_$id",
+                                        accountId = account.id,
+                                        categoryId = id,
+                                        categoryName = name,
+                                        parentId = parentId,
+                                        type = type.name
+                                    )
                                 )
-                            )
+                            }
+                        } else {
+                            reader.skipValue()
                         }
-                    } catch (e: Exception) {
-                        // Skip individual malformed item
                     }
+                    reader.endArray()
                 }
             }
         } catch (e: Exception) {
@@ -151,241 +205,362 @@ class XtreamClient {
         list
     }
 
-    suspend fun getLiveStreams(account: Account, categoryId: String? = null): List<MediaItem> = withContext(Dispatchers.IO) {
-        val list = mutableListOf<MediaItem>()
+    // --- Streamed Live Channels Parsing (No giant strings in RAM) ---
+    suspend fun streamLiveStreams(
+        account: Account,
+        batchSize: Int = 500,
+        onBatch: suspend (List<MediaItemEntity>) -> Unit
+    ): Int = withContext(Dispatchers.IO) {
+        val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_live_streams"
+        val request = Request.Builder().url(url).build()
+        val base = normalizeUrl(account.serverUrl)
+        var totalCount = 0
+        val batch = ArrayList<MediaItemEntity>(batchSize)
+
         try {
-            val catParam = if (!categoryId.isNullOrEmpty()) "&category_id=$categoryId" else ""
-            val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_live_streams$catParam"
-            val request = Request.Builder().url(url).build()
-            val body = httpClient.newCall(request).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-            }
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext 0
+                val inputStream = response.body?.byteStream() ?: return@withContext 0
+                val reader = JsonReader(InputStreamReader(inputStream, "UTF-8"))
 
-            if (body.startsWith("[")) {
-                val array = JSONArray(body)
-                val base = normalizeUrl(account.serverUrl)
-                for (i in 0 until array.length()) {
-                    try {
-                        val obj = array.optJSONObject(i) ?: continue
-                        val sId = obj.optInt("stream_id", 0)
-                        if (sId <= 0) continue
-                        val name = obj.optString("name", "Channel $sId")
-                        val icon = obj.optString("stream_icon", "")
-                        val catId = obj.optString("category_id", "")
-                        val streamUrl = "$base/live/${account.username}/${account.password}/$sId.m3u8"
+                if (reader.peek() == JsonToken.BEGIN_ARRAY) {
+                    reader.beginArray()
+                    while (reader.hasNext()) {
+                        if (reader.peek() == JsonToken.BEGIN_OBJECT) {
+                            reader.beginObject()
+                            var streamId = 0
+                            var name = ""
+                            var streamIcon = ""
+                            var categoryId = ""
 
-                        list.add(
-                            MediaItem(
-                                id = "live_$sId",
-                                streamId = sId,
-                                name = name,
-                                title = name,
-                                type = MediaType.LIVE,
-                                streamIcon = icon,
-                                backdrop = icon,
-                                categoryId = catId,
-                                resolution = "FHD",
-                                quality = "Live",
-                                streamUrl = streamUrl,
-                                containerExtension = "m3u8"
-                            )
-                        )
-                    } catch (e: Exception) {
-                        // Safe skip
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        list
-    }
+                            while (reader.hasNext()) {
+                                val field = reader.nextName()
+                                if (reader.peek() == JsonToken.NULL) {
+                                    reader.nextNull()
+                                    continue
+                                }
+                                when (field) {
+                                    "stream_id" -> {
+                                        streamId = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt()
+                                        } else {
+                                            reader.nextString().toIntOrNull() ?: 0
+                                        }
+                                    }
+                                    "name" -> name = reader.nextString()
+                                    "stream_icon" -> streamIcon = reader.nextString()
+                                    "category_id" -> {
+                                        categoryId = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt().toString()
+                                        } else {
+                                            reader.nextString()
+                                        }
+                                    }
+                                    else -> reader.skipValue()
+                                }
+                            }
+                            reader.endObject()
 
-    suspend fun getVodCategories(account: Account): List<Category> = withContext(Dispatchers.IO) {
-        val list = mutableListOf<Category>()
-        try {
-            val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_vod_categories"
-            val request = Request.Builder().url(url).build()
-            val body = httpClient.newCall(request).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-            }
-
-            if (body.startsWith("[")) {
-                val array = JSONArray(body)
-                for (i in 0 until array.length()) {
-                    try {
-                        val obj = array.optJSONObject(i) ?: continue
-                        val id = obj.optString("category_id")
-                        val name = obj.optString("category_name", "Movies")
-                        if (id.isNotBlank()) {
-                            list.add(
-                                Category(
-                                    categoryId = id,
-                                    categoryName = name,
-                                    parentId = obj.optInt("parent_id", 0),
-                                    type = MediaType.MOVIE
+                            if (streamId > 0) {
+                                val channelName = name.ifBlank { "Channel $streamId" }
+                                val streamUrl = "$base/live/${account.username}/${account.password}/$streamId.m3u8"
+                                batch.add(
+                                    MediaItemEntity(
+                                        id = "live_$streamId",
+                                        accountId = account.id,
+                                        streamId = streamId,
+                                        name = channelName,
+                                        title = channelName,
+                                        type = "LIVE",
+                                        posterUrl = streamIcon,
+                                        backdropUrl = streamIcon,
+                                        categoryId = categoryId,
+                                        categoryName = "",
+                                        rating = 8.0,
+                                        year = "2024",
+                                        resolution = "FHD",
+                                        quality = "Live",
+                                        streamUrl = streamUrl,
+                                        containerExtension = "m3u8",
+                                        addedTimestamp = System.currentTimeMillis()
+                                    )
                                 )
-                            )
+                                totalCount++
+
+                                if (batch.size >= batchSize) {
+                                    onBatch(batch.toList())
+                                    batch.clear()
+                                    yield() // Free memory and cooperative dispatching
+                                }
+                            }
+                        } else {
+                            reader.skipValue()
                         }
-                    } catch (e: Exception) {
-                        // Safe skip
                     }
+                    reader.endArray()
                 }
+            }
+            if (batch.isNotEmpty()) {
+                onBatch(batch.toList())
+                batch.clear()
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        list
+        totalCount
     }
 
-    suspend fun getVodStreams(account: Account, categoryId: String? = null): List<MediaItem> = withContext(Dispatchers.IO) {
-        val list = mutableListOf<MediaItem>()
+    // --- Streamed Movies Parsing (No giant strings in RAM) ---
+    suspend fun streamVodStreams(
+        account: Account,
+        batchSize: Int = 500,
+        onBatch: suspend (List<MediaItemEntity>) -> Unit
+    ): Int = withContext(Dispatchers.IO) {
+        val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_vod_streams"
+        val request = Request.Builder().url(url).build()
+        val base = normalizeUrl(account.serverUrl)
+        var totalCount = 0
+        val batch = ArrayList<MediaItemEntity>(batchSize)
+
         try {
-            val catParam = if (!categoryId.isNullOrEmpty()) "&category_id=$categoryId" else ""
-            val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_vod_streams$catParam"
-            val request = Request.Builder().url(url).build()
-            val body = httpClient.newCall(request).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-            }
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext 0
+                val inputStream = response.body?.byteStream() ?: return@withContext 0
+                val reader = JsonReader(InputStreamReader(inputStream, "UTF-8"))
 
-            if (body.startsWith("[")) {
-                val array = JSONArray(body)
-                val base = normalizeUrl(account.serverUrl)
-                for (i in 0 until array.length()) {
-                    try {
-                        val obj = array.optJSONObject(i) ?: continue
-                        val sId = obj.optInt("stream_id", 0)
-                        if (sId <= 0) continue
-                        val name = obj.optString("name", "Movie $sId")
-                        val icon = obj.optString("stream_icon", "")
-                        val catId = obj.optString("category_id", "")
-                        val ext = obj.optString("container_extension", "mp4").ifBlank { "mp4" }
-                        val ratingStr = obj.optString("rating", "7.5")
-                        val rating = ratingStr.toDoubleOrNull() ?: 7.0
-                        val year = obj.optString("year", "2024")
+                if (reader.peek() == JsonToken.BEGIN_ARRAY) {
+                    reader.beginArray()
+                    while (reader.hasNext()) {
+                        if (reader.peek() == JsonToken.BEGIN_OBJECT) {
+                            reader.beginObject()
+                            var streamId = 0
+                            var name = ""
+                            var streamIcon = ""
+                            var categoryId = ""
+                            var containerExt = "mp4"
+                            var rating = 7.0
+                            var year = "2024"
+                            var addedTime = System.currentTimeMillis()
 
-                        val streamUrl = "$base/movie/${account.username}/${account.password}/$sId.$ext"
+                            while (reader.hasNext()) {
+                                val field = reader.nextName()
+                                if (reader.peek() == JsonToken.NULL) {
+                                    reader.nextNull()
+                                    continue
+                                }
+                                when (field) {
+                                    "stream_id" -> {
+                                        streamId = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt()
+                                        } else {
+                                            reader.nextString().toIntOrNull() ?: 0
+                                        }
+                                    }
+                                    "name" -> name = reader.nextString()
+                                    "stream_icon" -> streamIcon = reader.nextString()
+                                    "category_id" -> {
+                                        categoryId = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt().toString()
+                                        } else {
+                                            reader.nextString()
+                                        }
+                                    }
+                                    "container_extension" -> {
+                                        val ext = reader.nextString().trim()
+                                        if (ext.isNotBlank()) containerExt = ext
+                                    }
+                                    "rating" -> {
+                                        rating = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextDouble()
+                                        } else {
+                                            reader.nextString().toDoubleOrNull() ?: 7.0
+                                        }
+                                    }
+                                    "year" -> {
+                                        year = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt().toString()
+                                        } else {
+                                            reader.nextString()
+                                        }
+                                    }
+                                    "added" -> {
+                                        addedTime = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextLong() * 1000L
+                                        } else {
+                                            reader.nextString().toLongOrNull()?.let { it * 1000L } ?: System.currentTimeMillis()
+                                        }
+                                    }
+                                    else -> reader.skipValue()
+                                }
+                            }
+                            reader.endObject()
 
-                        list.add(
-                            MediaItem(
-                                id = "vod_$sId",
-                                streamId = sId,
-                                name = name,
-                                title = name,
-                                type = MediaType.MOVIE,
-                                streamIcon = icon,
-                                backdrop = icon,
-                                categoryId = catId,
-                                rating = rating,
-                                year = year,
-                                resolution = if (rating > 8.0) "4K" else "FHD",
-                                quality = if (rating > 8.0) "HDR" else "HD",
-                                streamUrl = streamUrl,
-                                containerExtension = ext
-                            )
-                        )
-                    } catch (e: Exception) {
-                        // Safe skip
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        list
-    }
-
-    suspend fun getSeriesCategories(account: Account): List<Category> = withContext(Dispatchers.IO) {
-        val list = mutableListOf<Category>()
-        try {
-            val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_series_categories"
-            val request = Request.Builder().url(url).build()
-            val body = httpClient.newCall(request).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-            }
-
-            if (body.startsWith("[")) {
-                val array = JSONArray(body)
-                for (i in 0 until array.length()) {
-                    try {
-                        val obj = array.optJSONObject(i) ?: continue
-                        val id = obj.optString("category_id")
-                        val name = obj.optString("category_name", "Series")
-                        if (id.isNotBlank()) {
-                            list.add(
-                                Category(
-                                    categoryId = id,
-                                    categoryName = name,
-                                    parentId = obj.optInt("parent_id", 0),
-                                    type = MediaType.SERIES
+                            if (streamId > 0) {
+                                val movieName = name.ifBlank { "Movie $streamId" }
+                                val streamUrl = "$base/movie/${account.username}/${account.password}/$streamId.$containerExt"
+                                batch.add(
+                                    MediaItemEntity(
+                                        id = "vod_$streamId",
+                                        accountId = account.id,
+                                        streamId = streamId,
+                                        name = movieName,
+                                        title = movieName,
+                                        type = "MOVIE",
+                                        posterUrl = streamIcon,
+                                        backdropUrl = streamIcon,
+                                        categoryId = categoryId,
+                                        categoryName = "",
+                                        rating = rating,
+                                        year = year.ifBlank { "2024" },
+                                        resolution = if (rating > 8.0) "4K" else "FHD",
+                                        quality = if (rating > 8.0) "HDR" else "HD",
+                                        streamUrl = streamUrl,
+                                        containerExtension = containerExt,
+                                        addedTimestamp = addedTime
+                                    )
                                 )
-                            )
+                                totalCount++
+
+                                if (batch.size >= batchSize) {
+                                    onBatch(batch.toList())
+                                    batch.clear()
+                                    yield() // Free memory and cooperative dispatching
+                                }
+                            }
+                        } else {
+                            reader.skipValue()
                         }
-                    } catch (e: Exception) {
-                        // Safe skip
                     }
+                    reader.endArray()
                 }
+            }
+            if (batch.isNotEmpty()) {
+                onBatch(batch.toList())
+                batch.clear()
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        list
+        totalCount
     }
 
-    suspend fun getSeries(account: Account, categoryId: String? = null): List<MediaItem> = withContext(Dispatchers.IO) {
-        val list = mutableListOf<MediaItem>()
+    // --- Streamed Series Parsing (No giant strings in RAM) ---
+    suspend fun streamSeries(
+        account: Account,
+        batchSize: Int = 500,
+        onBatch: suspend (List<MediaItemEntity>) -> Unit
+    ): Int = withContext(Dispatchers.IO) {
+        val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_series"
+        val request = Request.Builder().url(url).build()
+        var totalCount = 0
+        val batch = ArrayList<MediaItemEntity>(batchSize)
+
         try {
-            val catParam = if (!categoryId.isNullOrEmpty()) "&category_id=$categoryId" else ""
-            val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_series$catParam"
-            val request = Request.Builder().url(url).build()
-            val body = httpClient.newCall(request).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-            }
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext 0
+                val inputStream = response.body?.byteStream() ?: return@withContext 0
+                val reader = JsonReader(InputStreamReader(inputStream, "UTF-8"))
 
-            if (body.startsWith("[")) {
-                val array = JSONArray(body)
-                for (i in 0 until array.length()) {
-                    try {
-                        val obj = array.optJSONObject(i) ?: continue
-                        val sId = obj.optInt("series_id", 0)
-                        if (sId <= 0) continue
-                        val name = obj.optString("name", "Series $sId")
-                        val cover = obj.optString("cover", "")
-                        val plot = obj.optString("plot", "")
-                        val catId = obj.optString("category_id", "")
-                        val ratingStr = obj.optString("rating", "8.0")
-                        val rating = ratingStr.toDoubleOrNull() ?: 8.0
-                        val releaseDate = obj.optString("releaseDate", "2024")
-                        val year = if (releaseDate.length >= 4) releaseDate.substring(0, 4) else "2024"
+                if (reader.peek() == JsonToken.BEGIN_ARRAY) {
+                    reader.beginArray()
+                    while (reader.hasNext()) {
+                        if (reader.peek() == JsonToken.BEGIN_OBJECT) {
+                            reader.beginObject()
+                            var seriesId = 0
+                            var name = ""
+                            var cover = ""
+                            var categoryId = ""
+                            var rating = 8.0
+                            var year = "2024"
 
-                        list.add(
-                            MediaItem(
-                                id = "series_$sId",
-                                streamId = sId,
-                                name = name,
-                                title = name,
-                                type = MediaType.SERIES,
-                                streamIcon = cover,
-                                backdrop = cover,
-                                categoryId = catId,
-                                plot = plot,
-                                rating = rating,
-                                year = year,
-                                resolution = "4K",
-                                quality = "Dolby Atmos"
-                            )
-                        )
-                    } catch (e: Exception) {
-                        // Safe skip
+                            while (reader.hasNext()) {
+                                val field = reader.nextName()
+                                if (reader.peek() == JsonToken.NULL) {
+                                    reader.nextNull()
+                                    continue
+                                }
+                                when (field) {
+                                    "series_id" -> {
+                                        seriesId = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt()
+                                        } else {
+                                            reader.nextString().toIntOrNull() ?: 0
+                                        }
+                                    }
+                                    "name" -> name = reader.nextString()
+                                    "cover" -> cover = reader.nextString()
+                                    "category_id" -> {
+                                        categoryId = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt().toString()
+                                        } else {
+                                            reader.nextString()
+                                        }
+                                    }
+                                    "rating" -> {
+                                        rating = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextDouble()
+                                        } else {
+                                            reader.nextString().toDoubleOrNull() ?: 8.0
+                                        }
+                                    }
+                                    "releaseDate" -> {
+                                        val rDate = reader.nextString()
+                                        year = if (rDate.length >= 4) rDate.substring(0, 4) else "2024"
+                                    }
+                                    else -> reader.skipValue()
+                                }
+                            }
+                            reader.endObject()
+
+                            if (seriesId > 0) {
+                                val seriesName = name.ifBlank { "Series $seriesId" }
+                                batch.add(
+                                    MediaItemEntity(
+                                        id = "series_$seriesId",
+                                        accountId = account.id,
+                                        streamId = seriesId,
+                                        name = seriesName,
+                                        title = seriesName,
+                                        type = "SERIES",
+                                        posterUrl = cover,
+                                        backdropUrl = cover,
+                                        categoryId = categoryId,
+                                        categoryName = "",
+                                        rating = rating,
+                                        year = year,
+                                        resolution = "4K",
+                                        quality = "Dolby Atmos",
+                                        streamUrl = "",
+                                        containerExtension = "mp4",
+                                        addedTimestamp = System.currentTimeMillis()
+                                    )
+                                )
+                                totalCount++
+
+                                if (batch.size >= batchSize) {
+                                    onBatch(batch.toList())
+                                    batch.clear()
+                                    yield() // Free memory and cooperative dispatching
+                                }
+                            }
+                        } else {
+                            reader.skipValue()
+                        }
                     }
+                    reader.endArray()
                 }
+            }
+            if (batch.isNotEmpty()) {
+                onBatch(batch.toList())
+                batch.clear()
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        list
+        totalCount
     }
 
+    // --- On-Demand Series Details (Fetched per series, not for the whole catalog) ---
     suspend fun getSeriesDetails(account: Account, seriesId: Int): SeriesDetails? = withContext(Dispatchers.IO) {
         try {
             val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_series_info&series_id=$seriesId"
