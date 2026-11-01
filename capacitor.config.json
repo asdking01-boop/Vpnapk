@@ -1,7 +1,0 @@
-{
-  "appId": "com.kras.tv",
-  "appName": "Kras TV",
-  "webDir": "dist",
-  "server": { "androidScheme": "http", "cleartext": true },
-  "plugins": { "CapacitorHttp": { "enabled": true } }
-}
