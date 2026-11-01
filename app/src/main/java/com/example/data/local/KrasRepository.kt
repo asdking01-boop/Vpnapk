@@ -323,6 +323,124 @@ class KrasRepository(context: Context) {
     }
 
     fun clearCache() {
-        prefs.edit().remove("watch_history").apply()
+        prefs.edit().remove("watch_history")
+            .remove("cached_movies")
+            .remove("cached_series")
+            .remove("cached_live")
+            .remove("cached_movie_cats")
+            .remove("cached_series_cats")
+            .remove("cached_live_cats")
+            .apply()
+    }
+
+    // --- Cached Home Content ---
+    fun cacheMediaList(key: String, items: List<MediaItem>) {
+        try {
+            val array = JSONArray()
+            for (item in items) {
+                val obj = JSONObject().apply {
+                    put("id", item.id)
+                    put("streamId", item.streamId)
+                    put("name", item.name)
+                    put("title", item.title)
+                    put("type", item.type.name)
+                    put("streamIcon", item.streamIcon)
+                    put("backdrop", item.backdrop)
+                    put("categoryId", item.categoryId)
+                    put("categoryName", item.categoryName)
+                    put("rating", item.rating)
+                    put("year", item.year)
+                    put("resolution", item.resolution)
+                    put("quality", item.quality)
+                    put("plot", item.plot)
+                    put("genre", item.genre)
+                    put("duration", item.duration)
+                    put("streamUrl", item.streamUrl)
+                    put("containerExtension", item.containerExtension)
+                    put("addedTimestamp", item.addedTimestamp)
+                }
+                array.put(obj)
+            }
+            prefs.edit().putString(key, array.toString()).apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun getCachedMediaList(key: String): List<MediaItem> {
+        val jsonStr = prefs.getString(key, null) ?: return emptyList()
+        val list = mutableListOf<MediaItem>()
+        try {
+            val array = JSONArray(jsonStr)
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                list.add(
+                    MediaItem(
+                        id = obj.getString("id"),
+                        streamId = obj.optInt("streamId", 0),
+                        name = obj.getString("name"),
+                        title = obj.optString("title", obj.getString("name")),
+                        type = MediaType.valueOf(obj.getString("type")),
+                        streamIcon = obj.optString("streamIcon", ""),
+                        backdrop = obj.optString("backdrop", ""),
+                        categoryId = obj.optString("categoryId", ""),
+                        categoryName = obj.optString("categoryName", ""),
+                        rating = obj.optDouble("rating", 0.0),
+                        year = obj.optString("year", ""),
+                        resolution = obj.optString("resolution", "HD"),
+                        quality = obj.optString("quality", "HD"),
+                        plot = obj.optString("plot", ""),
+                        genre = obj.optString("genre", ""),
+                        duration = obj.optString("duration", ""),
+                        streamUrl = obj.optString("streamUrl", ""),
+                        containerExtension = obj.optString("containerExtension", "mp4"),
+                        addedTimestamp = obj.optLong("addedTimestamp", System.currentTimeMillis())
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return list
+    }
+
+    fun cacheCategories(key: String, categories: List<Category>) {
+        try {
+            val array = JSONArray()
+            for (cat in categories) {
+                val obj = JSONObject().apply {
+                    put("categoryId", cat.categoryId)
+                    put("categoryName", cat.categoryName)
+                    put("parentId", cat.parentId)
+                    put("type", cat.type.name)
+                }
+                array.put(obj)
+            }
+            prefs.edit().putString(key, array.toString()).apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun getCachedCategories(key: String): List<Category> {
+        val jsonStr = prefs.getString(key, null) ?: return emptyList()
+        val list = mutableListOf<Category>()
+        try {
+            val array = JSONArray(jsonStr)
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                list.add(
+                    Category(
+                        categoryId = obj.getString("categoryId"),
+                        categoryName = obj.getString("categoryName"),
+                        parentId = obj.optInt("parentId", 0),
+                        type = MediaType.valueOf(obj.getString("type"))
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return list
     }
 }

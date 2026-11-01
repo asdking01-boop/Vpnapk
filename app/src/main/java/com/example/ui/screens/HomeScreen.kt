@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -20,8 +21,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.*
 import com.example.ui.components.HeroBanner
+import com.example.ui.components.HeroBannerSkeleton
 import com.example.ui.components.MediaCard
 import com.example.ui.components.MediaRow
+import com.example.ui.components.MediaRowSkeleton
 import com.example.ui.theme.CinemaBlack
 import com.example.ui.theme.KrasRed
 
@@ -38,6 +41,7 @@ fun HomeScreen(
     onAccountClick: () -> Unit,
     onRefreshClick: () -> Unit,
     isRefreshing: Boolean,
+    isLoading: Boolean,
     cardStyle: CardStyle,
     modifier: Modifier = Modifier
 ) {
@@ -64,15 +68,18 @@ fun HomeScreen(
     var selectedQuickFilter by remember { mutableStateOf("All") }
     val quickFilters = listOf("All", "Movies", "Series", "Live TV")
 
+    val isContentEmpty = movies.isEmpty() && series.isEmpty() && liveStreams.isEmpty()
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .background(CinemaBlack)
             .testTag("home_screen")
     ) {
-        // 1. Hero Banner
-        if (heroItem != null) {
-            item {
+        // 1. Hero Banner: ALWAYS rendered at top (identical 440.dp layout with statusBarsPadding)
+        // If data is loaded, render actual HeroBanner; if loading/empty, render HeroBannerSkeleton.
+        item {
+            if (heroItem != null) {
                 HeroBanner(
                     item = heroItem,
                     onPlayClick = { onMediaClick(heroItem) },
@@ -82,10 +89,15 @@ fun HomeScreen(
                     onSearchClick = onSearchClick,
                     onAccountClick = onAccountClick
                 )
+            } else {
+                HeroBannerSkeleton(
+                    onSearchClick = onSearchClick,
+                    onAccountClick = onAccountClick
+                )
             }
         }
 
-        // 2. Quick Filter Chips & Refresh Button
+        // 2. Quick Filter Chips & Refresh Button (ALWAYS in normal position below the hero banner)
         item {
             Row(
                 modifier = Modifier
@@ -107,6 +119,7 @@ fun HomeScreen(
                                     if (isSelected) MaterialTheme.colorScheme.primary
                                     else Color.White.copy(alpha = 0.1f)
                                 )
+                                .clickable { selectedQuickFilter = filter }
                                 .padding(horizontal = 14.dp, vertical = 6.dp)
                         ) {
                             Text(
@@ -155,62 +168,79 @@ fun HomeScreen(
             }
         }
 
-        // 4. Recently Added (20 Latest Items)
-        if (recentlyAdded.isNotEmpty() && selectedQuickFilter == "All") {
+        // 4. Rows or Loading Skeletons
+        if (isContentEmpty && isLoading) {
+            // Render shimmering skeleton rows while loading
             item {
-                MediaRow(
-                    title = "Recently Added",
-                    items = recentlyAdded,
-                    onItemClick = onMediaClick,
-                    cardStyle = cardStyle,
-                    onToggleFavorite = onToggleFavorite,
-                    isFavorite = isFavorite,
-                    watchHistory = watchHistory
-                )
+                MediaRowSkeleton(title = "Recently Added", cardStyle = cardStyle)
             }
-        }
-
-        // 5. Trending Movies
-        if (movies.isNotEmpty() && (selectedQuickFilter == "All" || selectedQuickFilter == "Movies")) {
             item {
-                MediaRow(
-                    title = "Trending Movies",
-                    items = movies.sortedByDescending { it.rating },
-                    onItemClick = onMediaClick,
-                    cardStyle = cardStyle,
-                    onToggleFavorite = onToggleFavorite,
-                    isFavorite = isFavorite,
-                    watchHistory = watchHistory
-                )
+                MediaRowSkeleton(title = "Trending Movies", cardStyle = cardStyle)
             }
-        }
-
-        // 6. Popular TV Series
-        if (series.isNotEmpty() && (selectedQuickFilter == "All" || selectedQuickFilter == "Series")) {
             item {
-                MediaRow(
-                    title = "Popular TV Series",
-                    items = series,
-                    onItemClick = onMediaClick,
-                    cardStyle = cardStyle,
-                    onToggleFavorite = onToggleFavorite,
-                    isFavorite = isFavorite,
-                    watchHistory = watchHistory
-                )
+                MediaRowSkeleton(title = "Popular TV Series", cardStyle = cardStyle)
             }
-        }
-
-        // 7. Top Live Channels
-        if (liveStreams.isNotEmpty() && (selectedQuickFilter == "All" || selectedQuickFilter == "Live TV")) {
             item {
-                MediaRow(
-                    title = "Top Live Channels",
-                    items = liveStreams,
-                    onItemClick = onMediaClick,
-                    cardStyle = CardStyle.WIDE,
-                    onToggleFavorite = onToggleFavorite,
-                    isFavorite = isFavorite
-                )
+                MediaRowSkeleton(title = "Top Live Channels", cardStyle = CardStyle.WIDE)
+            }
+        } else {
+            // Recently Added (20 Latest Items)
+            if (recentlyAdded.isNotEmpty() && selectedQuickFilter == "All") {
+                item {
+                    MediaRow(
+                        title = "Recently Added",
+                        items = recentlyAdded,
+                        onItemClick = onMediaClick,
+                        cardStyle = cardStyle,
+                        onToggleFavorite = onToggleFavorite,
+                        isFavorite = isFavorite,
+                        watchHistory = watchHistory
+                    )
+                }
+            }
+
+            // Trending Movies
+            if (movies.isNotEmpty() && (selectedQuickFilter == "All" || selectedQuickFilter == "Movies")) {
+                item {
+                    MediaRow(
+                        title = "Trending Movies",
+                        items = movies.sortedByDescending { it.rating },
+                        onItemClick = onMediaClick,
+                        cardStyle = cardStyle,
+                        onToggleFavorite = onToggleFavorite,
+                        isFavorite = isFavorite,
+                        watchHistory = watchHistory
+                    )
+                }
+            }
+
+            // Popular TV Series
+            if (series.isNotEmpty() && (selectedQuickFilter == "All" || selectedQuickFilter == "Series")) {
+                item {
+                    MediaRow(
+                        title = "Popular TV Series",
+                        items = series,
+                        onItemClick = onMediaClick,
+                        cardStyle = cardStyle,
+                        onToggleFavorite = onToggleFavorite,
+                        isFavorite = isFavorite,
+                        watchHistory = watchHistory
+                    )
+                }
+            }
+
+            // Top Live Channels
+            if (liveStreams.isNotEmpty() && (selectedQuickFilter == "All" || selectedQuickFilter == "Live TV")) {
+                item {
+                    MediaRow(
+                        title = "Top Live Channels",
+                        items = liveStreams,
+                        onItemClick = onMediaClick,
+                        cardStyle = CardStyle.WIDE,
+                        onToggleFavorite = onToggleFavorite,
+                        isFavorite = isFavorite
+                    )
+                }
             }
         }
 

@@ -183,6 +183,7 @@ class MainActivity : ComponentActivity() {
                                     onAccountClick = { isLoginOpen = true },
                                     onRefreshClick = { viewModel.refreshContent() },
                                     isRefreshing = isRefreshing,
+                                    isLoading = isLoading,
                                     cardStyle = userSettings.cardStyle
                                 )
 

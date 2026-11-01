@@ -66,4 +66,26 @@ class ExampleRobolectricTest {
     assertTrue(history.any { it.mediaId == "item_1" })
     assertEquals(0.5f, history.first { it.mediaId == "item_1" }.progressFraction, 0.01f)
   }
+
+  @Test
+  fun `repository media caching for instant launch`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+
+    val item = com.example.data.model.MediaItem(
+      id = "cached_m1",
+      streamId = 501,
+      name = "Matrix Resurrections",
+      title = "Matrix Resurrections",
+      type = MediaType.MOVIE,
+      rating = 8.5,
+      year = "2024"
+    )
+    repo.cacheMediaList("cached_movies", listOf(item))
+
+    val cached = repo.getCachedMediaList("cached_movies")
+    assertEquals(1, cached.size)
+    assertEquals("cached_m1", cached[0].id)
+    assertEquals("Matrix Resurrections", cached[0].name)
+  }
 }

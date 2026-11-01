@@ -108,7 +108,38 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             // Initialize player with buffer setting
             playerWrapper.initPlayer(_userSettings.value.bufferSize)
 
-            loadContentForAccount(active)
+            // 1. Immediately restore cached home content from disk so it appears with 0ms delay:
+            val cachedMovies = repository.getCachedMediaList("cached_movies")
+            val cachedSeries = repository.getCachedMediaList("cached_series")
+            val cachedLive = repository.getCachedMediaList("cached_live")
+            val cachedMovieCats = repository.getCachedCategories("cached_movie_cats")
+            val cachedSeriesCats = repository.getCachedCategories("cached_series_cats")
+            val cachedLiveCats = repository.getCachedCategories("cached_live_cats")
+
+            val hasCache = cachedMovies.isNotEmpty() || cachedSeries.isNotEmpty() || cachedLive.isNotEmpty()
+            if (hasCache) {
+                _movies.value = cachedMovies
+                _series.value = cachedSeries
+                _liveStreams.value = cachedLive
+                if (cachedMovieCats.isNotEmpty()) _movieCategories.value = cachedMovieCats
+                if (cachedSeriesCats.isNotEmpty()) _seriesCategories.value = cachedSeriesCats
+                if (cachedLiveCats.isNotEmpty()) _liveCategories.value = cachedLiveCats
+                _isLoading.value = false
+            } else if (active.isDemo) {
+                // If demo account and nothing cached yet, immediately display SampleData
+                _liveCategories.value = SampleData.liveCategories
+                _liveStreams.value = SampleData.sampleLiveStreams
+                _movieCategories.value = SampleData.movieCategories
+                _movies.value = SampleData.sampleMovies
+                _seriesCategories.value = SampleData.seriesCategories
+                _series.value = SampleData.sampleSeries
+                _isLoading.value = false
+            } else {
+                _isLoading.value = true
+            }
+
+            // 2. Refresh from server in background
+            loadContentForAccount(active, isBackgroundRefresh = hasCache)
         }
     }
 
@@ -165,13 +196,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         val active = _activeAccount.value ?: return
         viewModelScope.launch {
             _isRefreshing.value = true
-            loadContentForAccount(active)
+            loadContentForAccount(active, isBackgroundRefresh = true)
             _isRefreshing.value = false
         }
     }
 
-    private suspend fun loadContentForAccount(account: Account) {
-        _isLoading.value = true
+    private suspend fun loadContentForAccount(account: Account, isBackgroundRefresh: Boolean = false) {
+        if (!isBackgroundRefresh) {
+            _isLoading.value = true
+        }
         _errorMessage.value = null
 
         if (account.isDemo) {
@@ -182,6 +215,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             _movies.value = SampleData.sampleMovies
             _seriesCategories.value = SampleData.seriesCategories
             _series.value = SampleData.sampleSeries
+
+            // Persist to cache
+            repository.cacheMediaList("cached_movies", SampleData.sampleMovies)
+            repository.cacheMediaList("cached_series", SampleData.sampleSeries)
+            repository.cacheMediaList("cached_live", SampleData.sampleLiveStreams)
+            repository.cacheCategories("cached_movie_cats", SampleData.movieCategories)
+            repository.cacheCategories("cached_series_cats", SampleData.seriesCategories)
+            repository.cacheCategories("cached_live_cats", SampleData.liveCategories)
+
             _isLoading.value = false
             return
         }
@@ -195,21 +237,38 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             val seriesCats = apiClient.getSeriesCategories(account)
             val seriesItems = apiClient.getSeries(account)
 
-            _liveCategories.value = if (liveCats.isNotEmpty()) liveCats else SampleData.liveCategories
-            _liveStreams.value = if (liveItems.isNotEmpty()) liveItems else SampleData.sampleLiveStreams
-            _movieCategories.value = if (vodCats.isNotEmpty()) vodCats else SampleData.movieCategories
-            _movies.value = if (vodItems.isNotEmpty()) vodItems else SampleData.sampleMovies
-            _seriesCategories.value = if (seriesCats.isNotEmpty()) seriesCats else SampleData.seriesCategories
-            _series.value = if (seriesItems.isNotEmpty()) seriesItems else SampleData.sampleSeries
+            val finalLiveCats = if (liveCats.isNotEmpty()) liveCats else SampleData.liveCategories
+            val finalLiveItems = if (liveItems.isNotEmpty()) liveItems else SampleData.sampleLiveStreams
+            val finalVodCats = if (vodCats.isNotEmpty()) vodCats else SampleData.movieCategories
+            val finalMovies = if (vodItems.isNotEmpty()) vodItems else SampleData.sampleMovies
+            val finalSeriesCats = if (seriesCats.isNotEmpty()) seriesCats else SampleData.seriesCategories
+            val finalSeries = if (seriesItems.isNotEmpty()) seriesItems else SampleData.sampleSeries
+
+            _liveCategories.value = finalLiveCats
+            _liveStreams.value = finalLiveItems
+            _movieCategories.value = finalVodCats
+            _movies.value = finalMovies
+            _seriesCategories.value = finalSeriesCats
+            _series.value = finalSeries
+
+            // Cache for instant display on next launch
+            repository.cacheMediaList("cached_movies", finalMovies)
+            repository.cacheMediaList("cached_series", finalSeries)
+            repository.cacheMediaList("cached_live", finalLiveItems)
+            repository.cacheCategories("cached_movie_cats", finalVodCats)
+            repository.cacheCategories("cached_series_cats", finalSeriesCats)
+            repository.cacheCategories("cached_live_cats", finalLiveCats)
         } catch (e: Exception) {
             _errorMessage.value = "Failed to fetch from server: ${e.message}"
-            // Fallback to sample data so app continues running
-            _liveCategories.value = SampleData.liveCategories
-            _liveStreams.value = SampleData.sampleLiveStreams
-            _movieCategories.value = SampleData.movieCategories
-            _movies.value = SampleData.sampleMovies
-            _seriesCategories.value = SampleData.seriesCategories
-            _series.value = SampleData.sampleSeries
+            // Fallback to sample data if no cached data
+            if (_movies.value.isEmpty()) {
+                _liveCategories.value = SampleData.liveCategories
+                _liveStreams.value = SampleData.sampleLiveStreams
+                _movieCategories.value = SampleData.movieCategories
+                _movies.value = SampleData.sampleMovies
+                _seriesCategories.value = SampleData.seriesCategories
+                _series.value = SampleData.sampleSeries
+            }
         } finally {
             _isLoading.value = false
         }
