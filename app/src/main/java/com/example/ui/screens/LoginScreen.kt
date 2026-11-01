@@ -30,6 +30,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.Account
+import com.example.ui.components.KrasLogo
 import com.example.ui.theme.*
 
 @Composable
@@ -84,32 +85,18 @@ fun LoginScreen(
             item {
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // Brand Emblem
-                Box(
-                    modifier = Modifier
-                        .size(68.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(
-                            Brush.linearGradient(
-                                colors = listOf(KrasRedBright, KrasRed, Color(0xFF8B0000))
-                            )
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "K",
-                        color = Color.White,
-                        fontSize = 44.sp,
-                        fontWeight = FontWeight.Black
-                    )
-                }
+                // Kras TV Wordmark
+                KrasLogo(
+                    height = 42.dp,
+                    modifier = Modifier.testTag("login_brand_logo")
+                )
 
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "Sign in to Kras TV",
+                    text = "Sign In",
                     color = Color.White,
-                    fontSize = 24.sp,
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.Bold
                 )
 

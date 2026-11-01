@@ -26,6 +26,7 @@ import com.example.data.model.Account
 import com.example.data.model.AspectRatioMode
 import com.example.data.model.CardStyle
 import com.example.data.model.UserSettings
+import com.example.ui.components.KrasLogo
 import com.example.ui.theme.*
 
 @Composable
@@ -506,17 +507,9 @@ fun SettingsScreen(
             onDismissRequest = { showAboutDialog = false },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(KrasRed),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("K", color = Color.White, fontWeight = FontWeight.Black, fontSize = 20.sp)
-                    }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text("Kras TV v2.4", color = Color.White, fontWeight = FontWeight.Bold)
+                    KrasLogo(height = 24.dp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("v2.4", color = TextSecondary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
             },
             text = {

@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.R
+import com.example.ui.components.KrasLogo
 import com.example.ui.theme.CinemaBlack
 import com.example.ui.theme.KrasRed
 import com.example.ui.theme.KrasRedBright
@@ -292,122 +293,74 @@ fun SplashScreen(
         val currentTransX = deltaX * (1f - s)
         val currentTransY = deltaY * (1f - s)
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
+        // Canonical Kras TV Wordmark: The SAME K animates from center down to its final slot
+        KrasLogo(
+            height = 36.dp,
             modifier = Modifier
                 .align(Alignment.Center)
-                .padding(horizontal = 16.dp)
-        ) {
-            // 1. THE K: The ONLY K element in the entire animation.
-            // Sized to exactly match the font cap-height of the adjacent letters.
-            Box(
-                modifier = Modifier
-                    .size(width = 30.dp, height = 36.dp)
-                    .onGloballyPositioned { kCoords ->
-                        val pos = kCoords.positionInRoot()
-                        kSlotCenter = Offset(
-                            pos.x + kCoords.size.width / 2f,
-                            pos.y + kCoords.size.height / 2f
-                        )
-                        isMeasured = true
-                    }
-                    .graphicsLayer {
-                        scaleX = currentKScale
-                        scaleY = currentKScale
-                        translationX = currentTransX
-                        translationY = currentTransY
-                        this.alpha = if (isMeasured) kAlpha.value else 0f
-                        compositingStrategy = CompositingStrategy.Offscreen
-                    }
-                    .drawWithContent {
-                        // Draw K letter shape from vector drawable
-                        drawContent()
-
-                        // Specular light sweep strictly clipped to the K letter shape (BlendMode.SrcIn)
-                        val sp = sweepProgress.value
-                        if (sp > 0f && sp < 1f) {
-                            val w = size.width
-                            val h = size.height
-                            val travel = (sp * (w * 2.8f)) - (w * 0.9f)
-                            val beamWidth = w * 0.45f
-                            drawRect(
-                                brush = Brush.linearGradient(
-                                    colors = listOf(
-                                        Color.Transparent,
-                                        Color.White.copy(alpha = 0.35f),
-                                        Color.White.copy(alpha = 0.95f),
-                                        Color.White.copy(alpha = 0.35f),
-                                        Color.Transparent
-                                    ),
-                                    start = Offset(travel, 0f),
-                                    end = Offset(travel + beamWidth, h)
+                .padding(horizontal = 16.dp),
+            kModifier = Modifier
+                .graphicsLayer {
+                    scaleX = currentKScale
+                    scaleY = currentKScale
+                    translationX = currentTransX
+                    translationY = currentTransY
+                    this.alpha = if (isMeasured) kAlpha.value else 0f
+                    compositingStrategy = CompositingStrategy.Offscreen
+                }
+                .drawWithContent {
+                    drawContent()
+                    val sp = sweepProgress.value
+                    if (sp > 0f && sp < 1f) {
+                        val w = size.width
+                        val h = size.height
+                        val travel = (sp * (w * 2.8f)) - (w * 0.9f)
+                        val beamWidth = w * 0.45f
+                        drawRect(
+                            brush = Brush.linearGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    Color.White.copy(alpha = 0.35f),
+                                    Color.White.copy(alpha = 0.95f),
+                                    Color.White.copy(alpha = 0.35f),
+                                    Color.Transparent
                                 ),
-                                blendMode = BlendMode.SrcIn
-                            )
-                        }
+                                start = Offset(travel, 0f),
+                                end = Offset(travel + beamWidth, h)
+                            ),
+                            blendMode = BlendMode.SrcIn
+                        )
                     }
-            ) {
-                SharedGlassK(modifier = Modifier.fillMaxSize())
+                },
+            onKPositioned = { kCoords ->
+                val pos = kCoords.positionInRoot()
+                kSlotCenter = Offset(
+                    pos.x + kCoords.size.width / 2f,
+                    pos.y + kCoords.size.height / 2f
+                )
+                isMeasured = true
+            },
+            letterAlphaProvider = { ch ->
+                when (ch) {
+                    'R' -> letterRAlpha.value
+                    'A' -> letterAAlpha.value
+                    'S' -> letterSAlpha.value
+                    'T' -> letterTAlpha.value
+                    'V' -> letterVAlpha.value
+                    else -> 0f
+                }
+            },
+            letterOffsetProvider = { ch ->
+                when (ch) {
+                    'R' -> letterROffset.value
+                    'A' -> letterAOffset.value
+                    'S' -> letterSOffset.value
+                    'T' -> letterTOffset.value
+                    'V' -> letterVOffset.value
+                    else -> 0f
+                }
             }
-
-            Spacer(modifier = Modifier.width(4.dp))
-
-            // 2. Letters "RAS TV": Initially measured with alpha=0, then revealed letter by letter
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                SplashLetter(text = "R", alpha = letterRAlpha.value, offsetY = letterROffset.value)
-                SplashLetter(text = "A", alpha = letterAAlpha.value, offsetY = letterAOffset.value)
-                SplashLetter(text = "S", alpha = letterSAlpha.value, offsetY = letterSOffset.value)
-                Spacer(modifier = Modifier.width(10.dp))
-                SplashLetter(text = "T", alpha = letterTAlpha.value, offsetY = letterTOffset.value)
-                SplashLetter(text = "V", alpha = letterVAlpha.value, offsetY = letterVOffset.value)
-            }
-        }
-    }
-}
-
-/**
- * Directly renders the EXACT vector drawable "ic_kras_k" via Android Native VectorDrawable.
- * Automatically fits the K glyph (viewport X: 32..76.5, Y: 27..81) to the canvas bounds
- * so there is zero empty padding around the letter, aligning perfectly with surrounding letters.
- */
-@Composable
-fun SharedGlassK(
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    val kDrawable = remember(context) {
-        ContextCompat.getDrawable(context, R.drawable.ic_kras_k)
-    }
-
-    Canvas(modifier = modifier) {
-        kDrawable?.let { drawable ->
-            // Vector native viewport is 108 x 108.
-            // The K glyph main body is in [32..76.5] (width 44.5), Y in [27..81] (height 54).
-            val glyphLeft = 32f
-            val glyphTop = 27f
-            val glyphWidth = 44.5f
-            val glyphHeight = 54f
-
-            val scaleX = size.width / glyphWidth
-            val scaleY = size.height / glyphHeight
-            val scale = minOf(scaleX, scaleY)
-
-            val drawnW = 108f * scale
-            val drawnH = 108f * scale
-            val offsetX = (size.width - glyphWidth * scale) / 2f - glyphLeft * scale
-            val offsetY = (size.height - glyphHeight * scale) / 2f - glyphTop * scale
-
-            drawable.setBounds(0, 0, drawnW.toInt(), drawnH.toInt())
-            drawIntoCanvas { canvas ->
-                canvas.save()
-                canvas.translate(offsetX, offsetY)
-                drawable.draw(canvas.nativeCanvas)
-                canvas.restore()
-            }
-        }
+        )
     }
 }
 
@@ -475,48 +428,4 @@ private fun RibbonLightStreaks(
             }
         }
     }
-}
-
-/**
- * Individual letter of "KRAS TV" in glossy red with soft glow, fade, and slight rise.
- */
-@Composable
-private fun SplashLetter(
-    text: String,
-    alpha: Float,
-    offsetY: Float,
-    modifier: Modifier = Modifier
-) {
-    val glossyRedBrush = remember {
-        Brush.verticalGradient(
-            colors = listOf(
-                Color(0xFFFF3A44),
-                KrasRedBright,
-                KrasRed,
-                Color(0xFF7A0409)
-            )
-        )
-    }
-
-    Text(
-        text = text,
-        style = TextStyle(
-            brush = glossyRedBrush,
-            fontSize = 42.sp,
-            fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.SansSerif,
-            letterSpacing = 2.sp,
-            platformStyle = PlatformTextStyle(includeFontPadding = false),
-            shadow = Shadow(
-                color = KrasRed.copy(alpha = 0.5f),
-                offset = Offset(0f, 2f),
-                blurRadius = 8f
-            )
-        ),
-        modifier = modifier
-            .graphicsLayer {
-                this.alpha = alpha
-                this.translationY = offsetY
-            }
-    )
 }

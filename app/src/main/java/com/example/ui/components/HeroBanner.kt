@@ -83,43 +83,11 @@ fun HeroBanner(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Bold red 'K' brand logo + Title
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(KrasRed)
-                        .padding(2.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "K",
-                        color = Color.White,
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Black
-                    )
-                }
-                Column {
-                    Text(
-                        text = "KRAS TV",
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        letterSpacing = 2.sp
-                    )
-                    Text(
-                        text = "PREMIUM CINEMA",
-                        color = KrasRedBright,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
-                    )
-                }
-            }
+            // Kras TV canonical wordmark (no red square, no subtitle)
+            KrasLogo(
+                height = 28.dp,
+                modifier = Modifier.testTag("hero_brand_logo")
+            )
 
             // Top Action Icons (Search, Accounts)
             Row(
