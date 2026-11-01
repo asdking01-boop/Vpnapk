@@ -150,7 +150,8 @@ data class UserSettings(
     val language: String = "English", // English, Arabic
     val parentalPin: String = "",
     val parentalEnabled: Boolean = false,
-    val playIntroSound: Boolean = true
+    val playIntroSound: Boolean = true,
+    val silenceNotificationsWhileWatching: Boolean = false
 )
 
 // Xtream Codes API DTOs

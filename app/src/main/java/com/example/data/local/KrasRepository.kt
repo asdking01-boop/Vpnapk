@@ -303,7 +303,8 @@ class KrasRepository(context: Context) {
             language = prefs.getString("language", "English") ?: "English",
             parentalPin = prefs.getString("parentalPin", "") ?: "",
             parentalEnabled = prefs.getBoolean("parentalEnabled", false),
-            playIntroSound = prefs.getBoolean("playIntroSound", true)
+            playIntroSound = prefs.getBoolean("playIntroSound", true),
+            silenceNotificationsWhileWatching = prefs.getBoolean("silenceNotificationsWhileWatching", false)
         )
     }
 
@@ -319,7 +320,20 @@ class KrasRepository(context: Context) {
             putString("parentalPin", settings.parentalPin)
             putBoolean("parentalEnabled", settings.parentalEnabled)
             putBoolean("playIntroSound", settings.playIntroSound)
+            putBoolean("silenceNotificationsWhileWatching", settings.silenceNotificationsWhileWatching)
         }.apply()
+    }
+
+    fun getSavedInterruptionFilter(): Int? {
+        return if (prefs.contains("saved_dnd_filter")) prefs.getInt("saved_dnd_filter", -1) else null
+    }
+
+    fun saveInterruptionFilter(filter: Int?) {
+        if (filter != null) {
+            prefs.edit().putInt("saved_dnd_filter", filter).apply()
+        } else {
+            prefs.edit().remove("saved_dnd_filter").apply()
+        }
     }
 
     fun clearCache() {

@@ -16,16 +16,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.model.Account
 import com.example.data.model.AspectRatioMode
 import com.example.data.model.CardStyle
 import com.example.data.model.UserSettings
+import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.KrasLogo
 import com.example.ui.theme.*
 
@@ -41,10 +46,34 @@ fun SettingsScreen(
     onClearCache: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
     var showPinDialog by remember { mutableStateOf(false) }
     var enteredPin by remember { mutableStateOf("") }
     var showAboutDialog by remember { mutableStateOf(false) }
+    var showDndPermissionDialog by remember { mutableStateOf(false) }
     var cacheClearedFeedback by remember { mutableStateOf(false) }
+
+    // Re-check DND permission when returning from system settings screen
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                if (PlayerImmersiveHelper.isDndPermissionGranted(context)) {
+                    if (showDndPermissionDialog) {
+                        showDndPermissionDialog = false
+                        onUpdateSettings(userSettings.copy(silenceNotificationsWhileWatching = true))
+                    }
+                } else if (userSettings.silenceNotificationsWhileWatching) {
+                    onUpdateSettings(userSettings.copy(silenceNotificationsWhileWatching = false))
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     val accentColors = listOf(
         Pair("Kras Red", KrasRed),
@@ -317,6 +346,47 @@ fun SettingsScreen(
                             }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(2.dp))
+
+                    // Silence notifications while watching (Do Not Disturb)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(
+                                text = "Silence notifications while watching",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "Automatically turns on Do Not Disturb during playback and restores your previous setting when closing the player",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = userSettings.silenceNotificationsWhileWatching,
+                            onCheckedChange = { enable ->
+                                if (enable) {
+                                    if (PlayerImmersiveHelper.isDndPermissionGranted(context)) {
+                                        onUpdateSettings(userSettings.copy(silenceNotificationsWhileWatching = true))
+                                    } else {
+                                        showDndPermissionDialog = true
+                                    }
+                                } else {
+                                    onUpdateSettings(userSettings.copy(silenceNotificationsWhileWatching = false))
+                                }
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = KrasRed,
+                                checkedTrackColor = KrasRedDark
+                            )
+                        )
+                    }
                 }
             }
         }
@@ -536,6 +606,63 @@ fun SettingsScreen(
                 }
             },
             containerColor = CinemaDark
+        )
+    }
+
+    // Do Not Disturb Permission Explanatory Dialog
+    if (showDndPermissionDialog) {
+        AlertDialog(
+            onDismissRequest = { showDndPermissionDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.NotificationsOff,
+                        contentDescription = "Do Not Disturb",
+                        tint = KrasRedBright,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Do Not Disturb Permission",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 17.sp
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "To automatically silence incoming calls, notifications, and banners while watching movies, series, or live TV, Kras TV needs permission to control Do Not Disturb mode.",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+                    Text(
+                        text = "Your previous notification settings will always be restored as soon as you exit the player. Tap \"Open Settings\" to grant permission in Android System Settings.",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        PlayerImmersiveHelper.openDndSettings(context)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = KrasRed)
+                ) {
+                    Text("Open Settings", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDndPermissionDialog = false }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            },
+            containerColor = CinemaDark,
+            shape = RoundedCornerShape(16.dp)
         )
     }
 }

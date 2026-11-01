@@ -31,8 +31,11 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.res.Configuration
+import com.example.data.local.KrasRepository
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
+import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.BottomNavBar
 import com.example.ui.components.NavScreen
 import com.example.ui.screens.*
@@ -50,6 +53,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Restore any interrupted Do Not Disturb state from a previous session
+        PlayerImmersiveHelper.restoreDnd(this, KrasRepository(this))
 
         val isColdStart = (savedInstanceState == null && !hasColdStarted)
         hasColdStarted = true
@@ -216,6 +222,7 @@ class MainActivity : ComponentActivity() {
                         mediaItem = nowPlayingItem!!,
                         episode = nowPlayingEpisode,
                         playerWrapper = viewModel.playerWrapper,
+                        userSettings = userSettings,
                         onClose = { viewModel.stopPlayback() },
                         liveChannels = liveStreams,
                         onSwitchChannel = { channel ->
@@ -377,6 +384,27 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && viewModel.nowPlayingItem.value != null) {
+            PlayerImmersiveHelper.enterImmersiveMode(this)
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        if (!isInPictureInPictureMode && viewModel.nowPlayingItem.value != null) {
+            PlayerImmersiveHelper.enterImmersiveMode(this)
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (viewModel.nowPlayingItem.value != null) {
+            PlayerImmersiveHelper.enterImmersiveMode(this)
         }
     }
 }

@@ -14,6 +14,11 @@ class KrasApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         setupGlobalCrashHandler()
+        try {
+            com.example.player.PlayerImmersiveHelper.restoreDnd(applicationContext, com.example.data.local.KrasRepository(applicationContext))
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun setupGlobalCrashHandler() {
@@ -48,6 +53,12 @@ class KrasApplication : Application() {
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
+                try {
+                    com.example.player.PlayerImmersiveHelper.restoreDnd(applicationContext, com.example.data.local.KrasRepository(applicationContext))
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+
                 if (defaultHandler != null) {
                     defaultHandler.uncaughtException(thread, throwable)
                 } else {

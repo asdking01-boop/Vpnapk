@@ -3,6 +3,7 @@ package com.example.ui.screens
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import androidx.annotation.OptIn
 import androidx.compose.animation.*
@@ -26,16 +27,22 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.example.data.local.KrasRepository
 import com.example.data.model.*
 import com.example.player.ExoPlayerWrapper
+import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.theme.*
 import kotlinx.coroutines.delay
@@ -46,6 +53,7 @@ fun PlayerScreen(
     mediaItem: MediaItem,
     episode: Episode?,
     playerWrapper: ExoPlayerWrapper,
+    userSettings: UserSettings = UserSettings(),
     onClose: () -> Unit,
     liveChannels: List<MediaItem>,
     onSwitchChannel: (MediaItem) -> Unit,
@@ -54,13 +62,48 @@ fun PlayerScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
+    val view = LocalView.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val repository = remember { KrasRepository(context) }
 
-    // Screen Wake Lock while playing
+    // Immersive Fullscreen & Do Not Disturb management while playing
     DisposableEffect(Unit) {
-        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        PlayerImmersiveHelper.enterImmersiveMode(activity)
+        if (userSettings.silenceNotificationsWhileWatching) {
+            PlayerImmersiveHelper.enableDndIfAllowed(context, repository)
+        }
         onDispose {
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            PlayerImmersiveHelper.exitImmersiveMode(activity)
+            if (userSettings.silenceNotificationsWhileWatching) {
+                PlayerImmersiveHelper.restoreDnd(context, repository)
+            }
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    // Re-apply immersive fullscreen on Window Focus change (e.g. returning to app, after PiP, dialog dismiss)
+    DisposableEffect(view) {
+        val listener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+            if (hasFocus) {
+                PlayerImmersiveHelper.enterImmersiveMode(activity)
+            }
+        }
+        view.viewTreeObserver.addOnWindowFocusChangeListener(listener)
+        onDispose {
+            view.viewTreeObserver.removeOnWindowFocusChangeListener(listener)
+        }
+    }
+
+    // Re-apply immersive fullscreen on Lifecycle ON_RESUME
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                PlayerImmersiveHelper.enterImmersiveMode(activity)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -71,7 +114,7 @@ fun PlayerScreen(
     val errorMessage by playerWrapper.errorMessage.collectAsState()
 
     var controlsVisible by remember { mutableStateOf(true) }
-    var currentAspectRatio by remember { mutableStateOf(AspectRatioMode.FIT) }
+    var currentAspectRatio by remember { mutableStateOf(userSettings.defaultAspectRatio) }
     var playbackSpeed by remember { mutableStateOf(1.0f) }
     var isLandscapeLocked by remember { mutableStateOf(false) }
 
@@ -200,6 +243,7 @@ fun PlayerScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .displayCutoutPadding()
                         .statusBarsPadding()
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -280,6 +324,7 @@ fun PlayerScreen(
                             } else {
                                 ActivityInfo.SCREEN_ORIENTATION_SENSOR
                             }
+                            PlayerImmersiveHelper.enterImmersiveMode(activity)
                         }) {
                             Icon(
                                 imageVector = if (isLandscapeLocked) Icons.Default.ScreenRotation else Icons.Default.ScreenLockRotation,
@@ -366,6 +411,7 @@ fun PlayerScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.BottomCenter)
+                        .displayCutoutPadding()
                         .navigationBarsPadding()
                         .padding(horizontal = 16.dp, vertical = 10.dp)
                 ) {

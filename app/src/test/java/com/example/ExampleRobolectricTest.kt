@@ -107,4 +107,33 @@ class ExampleRobolectricTest {
     prefs.edit().remove(KrasApplication.KEY_CRASH_REPORT).commit()
     assertNull(prefs.getString(KrasApplication.KEY_CRASH_REPORT, null))
   }
+
+  @Test
+  fun `user settings silence notifications persistence`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+
+    val initial = repo.getUserSettings()
+    assertFalse(initial.silenceNotificationsWhileWatching)
+
+    val updated = initial.copy(silenceNotificationsWhileWatching = true)
+    repo.saveUserSettings(updated)
+
+    val reloaded = repo.getUserSettings()
+    assertTrue(reloaded.silenceNotificationsWhileWatching)
+  }
+
+  @Test
+  fun `interruption filter state persistence and restoration`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+
+    assertNull(repo.getSavedInterruptionFilter())
+
+    repo.saveInterruptionFilter(1) // NotificationManager.INTERRUPTION_FILTER_ALL
+    assertEquals(1, repo.getSavedInterruptionFilter())
+
+    repo.saveInterruptionFilter(null)
+    assertNull(repo.getSavedInterruptionFilter())
+  }
 }
