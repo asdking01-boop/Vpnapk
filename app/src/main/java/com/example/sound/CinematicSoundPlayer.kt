@@ -12,16 +12,37 @@ import kotlin.math.sin
 
 object CinematicSoundPlayer {
 
+    @Volatile
+    private var activeTrack: AudioTrack? = null
+
+    fun stop() {
+        try {
+            activeTrack?.let { track ->
+                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                    track.stop()
+                }
+                track.release()
+            }
+        } catch (e: Exception) {
+            // Ignore
+        } finally {
+            activeTrack = null
+        }
+    }
+
     suspend fun playCinematicIntro() {
         withContext(Dispatchers.IO) {
             try {
+                // Ensure any previous track is stopped
+                stop()
+
                 val sampleRate = 44100
-                val durationSec = 1.6
+                val durationSec = 2.2
                 val totalSamples = (sampleRate * durationSec).toInt()
                 val buffer = ShortArray(totalSamples)
 
                 val random = Random(42)
-                val impactTimeSec = 0.35
+                val impactTimeSec = 0.50
                 val impactSample = (sampleRate * impactTimeSec).toInt()
 
                 var noiseFilterState = 0.0
@@ -30,34 +51,34 @@ object CinematicSoundPlayer {
                     val t = i.toDouble() / sampleRate
                     var sampleVal = 0.0
 
-                    // 1. Whoosh / Riser: 0.0s to 0.45s
-                    if (t <= 0.45) {
-                        val riserProgress = (t / 0.45).coerceIn(0.0, 1.0)
+                    // 1. Rising Whoosh: 0.0s to 0.55s (synchronized with K zoom-in)
+                    if (t <= 0.55) {
+                        val riserProgress = (t / 0.55).coerceIn(0.0, 1.0)
                         val riserVol = riserProgress * riserProgress // exponential crescendo
-                        // Frequency sweep from 80Hz to 600Hz
-                        val currentFreq = 80.0 + 520.0 * riserProgress
+                        // Frequency sweep from 70Hz to 650Hz
+                        val currentFreq = 70.0 + 580.0 * riserProgress
                         val sineRiser = sin(2.0 * PI * currentFreq * t)
 
-                        // Filtered noise for wind/whoosh texture
+                        // Filtered noise for wind/air rushing texture
                         val rawNoise = (random.nextDouble() * 2.0 - 1.0)
-                        val filterCoeff = 0.08 + 0.25 * riserProgress
+                        val filterCoeff = 0.07 + 0.28 * riserProgress
                         noiseFilterState += filterCoeff * (rawNoise - noiseFilterState)
 
-                        sampleVal += (sineRiser * 0.4 + noiseFilterState * 0.6) * riserVol * 12000.0
+                        sampleVal += (sineRiser * 0.45 + noiseFilterState * 0.55) * riserVol * 14000.0
                     }
 
-                    // 2. Cinematic Boom / Sub-bass impact: 0.35s to 1.6s
+                    // 2. Cinematic Boom & Resonant Sub-bass: 0.50s to 2.2s (synchronized with light sweep & ribbon beams)
                     if (i >= impactSample) {
                         val boomT = (i - impactSample).toDouble() / sampleRate
-                        // Heavy sub-bass pitch drop: starts at 85Hz dropping to 42Hz
-                        val freq = 42.0 + 43.0 * exp(-boomT * 6.0)
+                        // Heavy sub-bass pitch drop: starts at 90Hz dropping to 38Hz
+                        val freq = 38.0 + 52.0 * exp(-boomT * 5.5)
                         val subBass = sin(2.0 * PI * freq * boomT)
-                        val bodyHarmonic = sin(2.0 * PI * (freq * 2.0) * boomT) * 0.35
-                        val midTexture = sin(2.0 * PI * (freq * 3.5) * boomT) * 0.15
+                        val bodyHarmonic = sin(2.0 * PI * (freq * 2.0) * boomT) * 0.38
+                        val midTexture = sin(2.0 * PI * (freq * 3.5) * boomT) * 0.16
 
                         // Exponential decay envelope
-                        val boomEnvelope = exp(-boomT * 2.8)
-                        val boomSound = (subBass + bodyHarmonic + midTexture) * boomEnvelope * 26000.0
+                        val boomEnvelope = exp(-boomT * 2.2)
+                        val boomSound = (subBass + bodyHarmonic + midTexture) * boomEnvelope * 28000.0
                         sampleVal += boomSound
                     }
 
@@ -86,12 +107,20 @@ object CinematicSoundPlayer {
                     .build()
 
                 audioTrack.write(buffer, 0, totalSamples)
+                activeTrack = audioTrack
                 audioTrack.play()
 
                 // Release after playing
                 kotlinx.coroutines.delay((durationSec * 1000).toLong() + 200)
-                audioTrack.stop()
-                audioTrack.release()
+                if (activeTrack == audioTrack) {
+                    try {
+                        audioTrack.stop()
+                        audioTrack.release()
+                    } catch (e: Exception) {
+                        // Ignore
+                    }
+                    activeTrack = null
+                }
             } catch (e: Exception) {
                 // Graceful fallback if device audio cannot initialize
                 e.printStackTrace()

@@ -41,11 +41,18 @@ import com.example.viewmodel.KrasViewModel
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        private var hasColdStarted = false
+    }
+
     private val viewModel: KrasViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        val isColdStart = (savedInstanceState == null && !hasColdStarted)
+        hasColdStarted = true
 
         setContent {
             val userSettings by viewModel.userSettings.collectAsState()
@@ -69,7 +76,7 @@ class MainActivity : ComponentActivity() {
                     mutableStateOf(crashPrefs.getString(KrasApplication.KEY_CRASH_REPORT, null))
                 }
 
-                var isSplashActive by remember { mutableStateOf(true) }
+                var isSplashActive by remember { mutableStateOf(isColdStart) }
                 var currentScreen by remember { mutableStateOf(NavScreen.HOME) }
                 var isSearchOpen by remember { mutableStateOf(false) }
                 var isLoginOpen by remember { mutableStateOf(false) }
@@ -91,9 +98,11 @@ class MainActivity : ComponentActivity() {
                 val nowPlayingItem by viewModel.nowPlayingItem.collectAsState()
                 val nowPlayingEpisode by viewModel.nowPlayingEpisode.collectAsState()
 
-                // Play original cinematic intro sound on launch
+                // Play original cinematic intro sound on cold start launch only
                 LaunchedEffect(Unit) {
-                    viewModel.playIntroSoundIfEnabled()
+                    if (isSplashActive) {
+                        viewModel.playIntroSoundIfEnabled()
+                    }
                 }
 
                 // Android Back Handling
@@ -192,7 +201,9 @@ class MainActivity : ComponentActivity() {
 
                 if (isSplashActive) {
                     SplashScreen(
+                        isLoading = isLoading,
                         onSplashFinished = {
+                            viewModel.stopIntroSound()
                             isSplashActive = false
                             if (activeAccount == null) {
                                 isLoginOpen = true

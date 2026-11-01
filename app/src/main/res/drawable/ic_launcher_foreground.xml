@@ -5,42 +5,150 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Subtle glow behind the K -->
-    <path
-        android:pathData="M54,54m-28,0a28,28 0 1,0 56,0a28,28 0 1,0 -56,0">
+
+    <!-- 1. Soft Red Shadow Underneath -->
+    <group
+        android:translateY="3"
+        android:translateX="0">
+        <!-- Stem shadow -->
+        <path
+            android:pathData="M38,28 L40,28 C43.3,28 46,30.7 46,34 L46,74 C46,77.3 43.3,80 40,80 L38,80 C34.7,80 32,77.3 32,74 L32,34 C32,30.7 34.7,28 38,28 Z"
+            android:fillColor="#50E50914" />
+        <!-- Top diagonal shadow -->
+        <path
+            android:pathData="M43,51 L66,29 C68.5,26.5 72.5,26.5 75,29 C77.5,31.5 77.5,35.5 75,38 L54,59 Z"
+            android:fillColor="#50E50914" />
+        <!-- Bottom diagonal shadow -->
+        <path
+            android:pathData="M46,47 L69,73 C71.5,75.8 71.2,80 68.3,82.4 C65.6,84.7 61.5,84.4 59,81.5 L38,57 Z"
+            android:fillColor="#50E50914" />
+    </group>
+
+    <!-- 2. Main Glass Body of K with deep red gradient (#FF2E38 -> #E50914 -> #B20710) -->
+    <!-- Vertical rounded stem -->
+    <path android:pathData="M38,27 L40,27 C43.3,27 46,29.7 46,33 L46,75 C46,78.3 43.3,81 40,81 L38,81 C34.7,81 32,78.3 32,75 L32,33 C32,29.7 34.7,27 38,27 Z">
         <aapt:attr name="android:fillColor">
             <gradient
-                android:centerX="54"
-                android:centerY="54"
-                android:gradientRadius="28"
-                android:type="radial">
-                <item android:offset="0.0" android:color="#4DE50914" />
-                <item android:offset="1.0" android:color="#00E50914" />
+                android:startX="32"
+                android:startY="27"
+                android:endX="46"
+                android:endY="81"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF3A44" />
+                <item android:offset="0.45" android:color="#E50914" />
+                <item android:offset="1.0" android:color="#A0050C" />
             </gradient>
         </aapt:attr>
     </path>
 
-    <!-- Stem of K -->
-    <path
-        android:pathData="M32,24 L44,24 L44,84 L32,84 Z"
-        android:fillColor="#B20710" />
-    <path
-        android:pathData="M32,24 L35,24 L35,84 L32,84 Z"
-        android:fillColor="#FF4D56" />
+    <!-- Upper diagonal arm with glass gradient -->
+    <path android:pathData="M42,50 L65,28 C67.5,25.5 71.5,25.5 74,28 C76.5,30.5 76.5,34.5 74,37 L53,58 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="42"
+                android:startY="27"
+                android:endX="76"
+                android:endY="58"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF4D56" />
+                <item android:offset="0.5" android:color="#E50914" />
+                <item android:offset="1.0" android:color="#8E040A" />
+            </gradient>
+        </aapt:attr>
+    </path>
 
-    <!-- Upper diagonal arm of K -->
-    <path
-        android:pathData="M42,54 L63,24 L77,24 L53,60 Z"
-        android:fillColor="#E50914" />
+    <!-- Lower diagonal arm with glass gradient -->
+    <path android:pathData="M46,46 L69,72 C71.5,74.8 71.2,79 68.3,81.4 C65.6,83.7 61.5,83.4 59,80.5 L38,56 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="38"
+                android:startY="46"
+                android:endX="71"
+                android:endY="83"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#E50914" />
+                <item android:offset="0.6" android:color="#B20710" />
+                <item android:offset="1.0" android:color="#780307" />
+            </gradient>
+        </aapt:attr>
+    </path>
 
-    <!-- Lower diagonal arm of K -->
+    <!-- 3. Soft White Highlight along Top-Left Edge (Glass Specular) -->
+    <!-- Stem top-left highlight -->
     <path
-        android:pathData="M47,53 L78,84 L63,84 L39,59 Z"
-        android:fillColor="#FF232D" />
+        android:pathData="M34,34 C34,30.5 36.5,28.5 39,28.5 L40,28.5 C37,28.5 35,31 35,34 L35,74 C35,76 35.5,77 36,78 C34.5,77 34,75.5 34,74 Z"
+        android:fillColor="#70FFFFFF" />
 
-    <!-- Highlight bevel edge -->
+    <!-- Stem top cap soft glass sheen -->
+    <path android:pathData="M38,27.5 L40,27.5 C42.8,27.5 45,29.7 45,32.5 L45,46 C40,43 36,46 33,48 L33,32.5 C33,29.7 35.2,27.5 38,27.5 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="33"
+                android:startY="27"
+                android:endX="45"
+                android:endY="48"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#55FFFFFF" />
+                <item android:offset="0.8" android:color="#10FFFFFF" />
+                <item android:offset="1.0" android:color="#00FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Upper arm top-edge light highlight -->
     <path
-        android:pathData="M42,54 L63,24 L66,24 L45,54 Z"
-        android:fillColor="#FFFFFF"
-        android:fillAlpha="0.3" />
+        android:pathData="M44,48 L65,28.5 C67.2,26.3 70.8,26.3 73,28.5 C71,27.5 68,27.5 66,29.5 L46,49.5 Z"
+        android:fillColor="#80FFFFFF" />
+
+    <!-- 4. Subtle Inner Glow and Rim Stroke on Stem -->
+    <path
+        android:pathData="M38,27 L40,27 C43.3,27 46,29.7 46,33 L46,75 C46,78.3 43.3,81 40,81 L38,81 C34.7,81 32,78.3 32,75 L32,33 C32,29.7 34.7,27 38,27 Z"
+        android:strokeWidth="0.8">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="32"
+                android:startY="27"
+                android:endX="46"
+                android:endY="81"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#90FFFFFF" />
+                <item android:offset="0.5" android:color="#30FFFFFF" />
+                <item android:offset="1.0" android:color="#15FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Rim Stroke on Upper Diagonal -->
+    <path
+        android:pathData="M42,50 L65,28 C67.5,25.5 71.5,25.5 74,28 C76.5,30.5 76.5,34.5 74,37 L53,58 Z"
+        android:strokeWidth="0.8">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="42"
+                android:startY="28"
+                android:endX="74"
+                android:endY="58"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#80FFFFFF" />
+                <item android:offset="1.0" android:color="#20FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Rim Stroke on Lower Diagonal -->
+    <path
+        android:pathData="M46,46 L69,72 C71.5,74.8 71.2,79 68.3,81.4 C65.6,83.7 61.5,83.4 59,80.5 L38,56 Z"
+        android:strokeWidth="0.8">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="38"
+                android:startY="46"
+                android:endX="71"
+                android:endY="83"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#50FFFFFF" />
+                <item android:offset="1.0" android:color="#15FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
 </vector>

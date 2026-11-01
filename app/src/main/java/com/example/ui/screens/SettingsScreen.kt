@@ -242,8 +242,8 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column {
-                            Text("Cinematic Intro Sound", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                            Text("Plays original whoosh/boom on launch", color = TextSecondary, fontSize = 11.sp)
+                            Text("Play intro sound", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            Text("Plays original cinematic boom/whoosh on launch", color = TextSecondary, fontSize = 11.sp)
                         }
                         Switch(
                             checked = userSettings.playIntroSound,

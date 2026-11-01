@@ -102,6 +102,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun stopIntroSound() {
+        CinematicSoundPlayer.stop()
+    }
+
     private fun loadInitialData() {
         viewModelScope.launch {
             try {
