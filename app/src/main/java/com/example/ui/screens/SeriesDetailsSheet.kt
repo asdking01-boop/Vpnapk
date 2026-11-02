@@ -165,7 +165,11 @@ fun SeriesDetailsSheet(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            ResolutionBadge(resolution = "4K UHD")
+                            ResolutionBadge(
+                                resolution = details.quality.ifBlank {
+                                    seriesItem.quality.ifBlank { seriesItem.resolution }
+                                }
+                            )
                             Text(
                                 text = "★ ${String.format("%.1f", details.rating)}",
                                 color = RatingYellow,
@@ -345,14 +349,24 @@ fun SeriesDetailsSheet(
 
                         // Episode details
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "${ep.episodeNum}. ${ep.title}",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = "${ep.episodeNum}. ${ep.title}",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                val epBadge = ep.quality.ifBlank {
+                                    details.quality.ifBlank { seriesItem.quality.ifBlank { seriesItem.resolution } }
+                                }
+                                ResolutionBadge(resolution = epBadge)
+                            }
                             if (ep.plot.isNotEmpty()) {
                                 Text(
                                     text = ep.plot,

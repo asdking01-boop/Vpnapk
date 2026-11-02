@@ -7,18 +7,36 @@ import androidx.media3.common.MediaItem as Media3Item
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import com.example.data.local.QualityDetector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.roundToInt
+
+data class VideoQualityVariant(
+    val label: String,        // "Auto", "1080p", "720p", "480p", etc.
+    val height: Int,          // 0 for Auto
+    val width: Int = 0,
+    val frameRate: Float = 0f,
+    val bitrate: Int = 0,
+    val groupIndex: Int = -1,
+    val trackIndex: Int = -1
+)
 
 @OptIn(UnstableApi::class)
 class ExoPlayerWrapper(private val context: Context) {
 
     val trackSelector = DefaultTrackSelector(context)
+
+    // Callback invoked whenever real video height/tracks are detected during playback
+    var onRealQualityDetected: ((String) -> Unit)? = null
 
     // Configurable buffer load control
     fun createLoadControl(bufferSizeSetting: String): DefaultLoadControl {
@@ -56,8 +74,28 @@ class ExoPlayerWrapper(private val context: Context) {
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage = _errorMessage.asStateFlow()
 
+    // Real detected video info for player overlay (e.g., "1080p 50 FPS")
+    private val _realResolutionOverlay = MutableStateFlow("")
+    val realResolutionOverlay = _realResolutionOverlay.asStateFlow()
+
+    // Real detected canonical quality badge (e.g., "FHD | HEVC | 50 FPS")
+    private val _detectedQualityBadge = MutableStateFlow("")
+    val detectedQualityBadge = _detectedQualityBadge.asStateFlow()
+
+    // Available HLS/manifest video quality variants ("Auto", "1080p", "720p", "480p", etc.)
+    private val autoVariant = VideoQualityVariant(label = "Auto", height = 0)
+    private val _availableVideoVariants = MutableStateFlow(listOf(autoVariant))
+    val availableVideoVariants = _availableVideoVariants.asStateFlow()
+
+    private val _selectedVideoVariant = MutableStateFlow(autoVariant)
+    val selectedVideoVariant = _selectedVideoVariant.asStateFlow()
+
     private var retryCount = 0
     private var lastMediaUrl: String? = null
+    private var currentVideoHeight = 0
+    private var currentFrameRate = 0f
+    private var currentVideoCodec = ""
+    private var currentAudioChannels = 0
 
     fun getPlayer(): ExoPlayer {
         if (exoPlayer == null) {
@@ -87,6 +125,7 @@ class ExoPlayerWrapper(private val context: Context) {
                         _duration.value = player.duration.coerceAtLeast(0L)
                         _errorMessage.value = null
                         retryCount = 0
+                        inspectPlayerFormatsAndNotify(player)
                     }
                     Player.STATE_ENDED -> {
                         _isBuffering.value = false
@@ -100,6 +139,25 @@ class ExoPlayerWrapper(private val context: Context) {
 
             override fun onIsPlayingChanged(playing: Boolean) {
                 _isPlaying.value = playing
+            }
+
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                try {
+                    if (videoSize.height > 0) {
+                        currentVideoHeight = videoSize.height
+                        inspectPlayerFormatsAndNotify(player)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                try {
+                    extractTracksAndVariants(player, tracks)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -119,9 +177,177 @@ class ExoPlayerWrapper(private val context: Context) {
         return player
     }
 
+    private fun extractTracksAndVariants(player: ExoPlayer, tracks: Tracks) {
+        try {
+            val variantsByHeight = LinkedHashMap<Int, VideoQualityVariant>()
+            var selectedTrackHeight = 0
+            var selectedTrackFps = 0f
+            var selectedCodec = ""
+            var selectedAudioCh = 0
+
+            tracks.groups.forEachIndexed { groupIndex, group ->
+                when (group.type) {
+                    C.TRACK_TYPE_VIDEO -> {
+                        for (trackIndex in 0 until group.length) {
+                            val format = group.getTrackFormat(trackIndex)
+                            val h = format.height
+                            val w = format.width
+                            val fps = if (format.frameRate > 0f) format.frameRate else 0f
+                            val br = if (format.bitrate > 0) format.bitrate else 0
+
+                            if (h > 0) {
+                                val label = "${h}p"
+                                val existing = variantsByHeight[h]
+                                if (existing == null || br > existing.bitrate) {
+                                    variantsByHeight[h] = VideoQualityVariant(
+                                        label = label,
+                                        height = h,
+                                        width = w,
+                                        frameRate = fps,
+                                        bitrate = br,
+                                        groupIndex = groupIndex,
+                                        trackIndex = trackIndex
+                                    )
+                                }
+                            }
+
+                            if (group.isTrackSelected(trackIndex)) {
+                                if (h > 0) selectedTrackHeight = h
+                                if (fps > 0f) selectedTrackFps = fps
+                                val mime = format.sampleMimeType.orEmpty()
+                                val codecs = format.codecs.orEmpty()
+                                selectedCodec = "$mime $codecs".trim()
+                            }
+                        }
+                    }
+                    C.TRACK_TYPE_AUDIO -> {
+                        for (trackIndex in 0 until group.length) {
+                            if (group.isTrackSelected(trackIndex)) {
+                                val format = group.getTrackFormat(trackIndex)
+                                if (format.channelCount > 0) {
+                                    selectedAudioCh = format.channelCount
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            val sortedVariants = variantsByHeight.values.sortedByDescending { it.height }
+            _availableVideoVariants.value = listOf(autoVariant) + sortedVariants
+
+            if (selectedTrackHeight > 0) currentVideoHeight = selectedTrackHeight
+            if (selectedTrackFps > 0f) currentFrameRate = selectedTrackFps
+            if (selectedCodec.isNotBlank()) currentVideoCodec = selectedCodec
+            if (selectedAudioCh > 0) currentAudioChannels = selectedAudioCh
+
+            inspectPlayerFormatsAndNotify(player)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun inspectPlayerFormatsAndNotify(player: ExoPlayer) {
+        try {
+            val vFormat = player.videoFormat
+            val aFormat = player.audioFormat
+
+            val height = when {
+                player.videoSize.height > 0 -> player.videoSize.height
+                vFormat != null && vFormat.height > 0 -> vFormat.height
+                else -> currentVideoHeight
+            }
+            if (height <= 0) return
+            currentVideoHeight = height
+
+            val fps = when {
+                vFormat != null && vFormat.frameRate > 0f -> vFormat.frameRate
+                else -> currentFrameRate
+            }
+            if (fps > 0f) currentFrameRate = fps
+
+            val codecStr = if (vFormat != null) {
+                "${vFormat.sampleMimeType.orEmpty()} ${vFormat.codecs.orEmpty()}".trim()
+            } else {
+                currentVideoCodec
+            }
+            if (codecStr.isNotBlank()) currentVideoCodec = codecStr
+
+            val audioCh = if (aFormat != null && aFormat.channelCount > 0) {
+                aFormat.channelCount
+            } else {
+                currentAudioChannels
+            }
+            if (audioCh > 0) currentAudioChannels = audioCh
+
+            val overlayText = QualityDetector.formatPlayerResolutionOverlay(height, fps)
+            _realResolutionOverlay.value = overlayText
+
+            // Also ensure current height is present in availableVideoVariants if stream is progressive
+            if (_availableVideoVariants.value.size <= 1 && height > 0) {
+                val singleVariant = VideoQualityVariant(
+                    label = "${height}p",
+                    height = height,
+                    width = player.videoSize.width,
+                    frameRate = fps
+                )
+                _availableVideoVariants.value = listOf(autoVariant, singleVariant)
+            }
+
+            val canonicalQuality = QualityDetector.buildFromRealSpecs(
+                height = height,
+                frameRate = fps,
+                codecOrMime = codecStr,
+                audioChannels = audioCh
+            )
+            if (canonicalQuality.isNotBlank()) {
+                _detectedQualityBadge.value = canonicalQuality
+                onRealQualityDetected?.invoke(canonicalQuality)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun selectVideoQuality(variant: VideoQualityVariant) {
+        try {
+            _selectedVideoVariant.value = variant
+            val player = exoPlayer ?: return
+            val builder = trackSelector.parameters.buildUpon()
+            if (variant.height <= 0 || variant.label.equals("Auto", ignoreCase = true)) {
+                builder.clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+                builder.clearVideoSizeConstraints()
+            } else {
+                builder.clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+                val groups = player.currentTracks.groups
+                val targetGroup = groups.getOrNull(variant.groupIndex)
+                if (targetGroup != null && targetGroup.type == C.TRACK_TYPE_VIDEO &&
+                    variant.trackIndex in 0 until targetGroup.length
+                ) {
+                    builder.setOverrideForType(
+                        TrackSelectionOverride(targetGroup.mediaTrackGroup, listOf(variant.trackIndex))
+                    )
+                } else {
+                    builder.setMaxVideoSize(Int.MAX_VALUE, variant.height)
+                }
+            }
+            trackSelector.setParameters(builder)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     fun play(url: String, startPositionMs: Long = 0L) {
         lastMediaUrl = url
         retryCount = 0
+        currentVideoHeight = 0
+        currentFrameRate = 0f
+        currentVideoCodec = ""
+        currentAudioChannels = 0
+        _realResolutionOverlay.value = ""
+        _detectedQualityBadge.value = ""
+        _availableVideoVariants.value = listOf(autoVariant)
+        _selectedVideoVariant.value = autoVariant
         _errorMessage.value = null
         _isBuffering.value = true
 

@@ -6,7 +6,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.KrasApplication
 import com.example.data.api.XtreamClient
+import com.example.data.local.ChannelNameNormalizer
 import com.example.data.local.KrasRepository
+import com.example.data.local.QualityDetector
 import com.example.data.local.entity.CategoryEntity
 import com.example.data.local.entity.MediaItemEntity
 import com.example.data.model.*
@@ -61,6 +63,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     val series = _series.asStateFlow()
     val totalSeriesCount = MutableStateFlow(0)
 
+    // Room-backed global search results
+    private val _searchResults = MutableStateFlow<List<MediaItem>>(emptyList())
+    val searchResults = _searchResults.asStateFlow()
+    private var currentSearchQuery = ""
+
     // Active Series Details (loaded on demand)
     private val _currentSeriesDetails = MutableStateFlow<SeriesDetails?>(null)
     val currentSeriesDetails = _currentSeriesDetails.asStateFlow()
@@ -109,6 +116,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private var movieQueryFilter = ""
     private var movieRatingFilter = 0.0
     private var movieYearFilter = "All"
+    private var movieQualityFilter = "All"
+    private var movieSortByQuality = false
     private var isMoviesLoadingMore = false
 
     private var seriesPage = 0
@@ -116,16 +125,23 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private var seriesQueryFilter = ""
     private var seriesRatingFilter = 0.0
     private var seriesYearFilter = "All"
+    private var seriesQualityFilter = "All"
+    private var seriesSortByQuality = false
     private var isSeriesLoadingMore = false
 
     private var livePage = 0
     private var liveCatFilter = "all"
     private var liveQueryFilter = ""
+    private var liveQualityFilter = "All"
+    private var liveSortByQuality = false
     private var isLiveLoadingMore = false
 
     private val pageSize = 40
 
     init {
+        playerWrapper.onRealQualityDetected = { realQuality ->
+            onRealPlaybackQualityDetected(realQuality)
+        }
         loadInitialData()
     }
 
@@ -148,10 +164,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadInitialData() {
         viewModelScope.launch {
             try {
+                val currentOrder = _userSettings.value.liveChannelOrder
                 val (loadedAccounts, active, favs, history, dlList) = withContext(Dispatchers.IO) {
                     val accs = repository.getAccounts()
                     val act = repository.getActiveAccount()
-                    val f = repository.getFavorites()
+                    val f = repository.getFavorites(currentOrder)
                     val h = repository.getWatchHistory()
                     val d = repository.getDownloads()
                     Tuple5(accs, act, f, h, d)
@@ -184,19 +201,58 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun loadInitialPagesFromRoom(account: Account) = withContext(Dispatchers.IO) {
         try {
+            val order = _userSettings.value.liveChannelOrder
             val movieCats = repository.getCategories(account.id, MediaType.MOVIE)
             val seriesCats = repository.getCategories(account.id, MediaType.SERIES)
             val liveCats = repository.getCategories(account.id, MediaType.LIVE)
 
-            val initialMovies = repository.queryMediaPaged(account.id, "MOVIE", "all", "", 0.0, "All", pageSize, 0)
-            val initialSeries = repository.queryMediaPaged(account.id, "SERIES", "all", "", 0.0, "All", pageSize, 0)
-            val initialLive = repository.queryMediaPaged(account.id, "LIVE", "all", "", 0.0, "All", pageSize, 0)
+            val mLimit = (moviePage + 1) * pageSize
+            val sLimit = (seriesPage + 1) * pageSize
+            val lLimit = (livePage + 1) * pageSize
 
-            val mCount = repository.countMedia(account.id, "MOVIE", "all", "", 0.0, "All")
-            val sCount = repository.countMedia(account.id, "SERIES", "all", "", 0.0, "All")
-            val lCount = repository.countMedia(account.id, "LIVE", "all", "", 0.0, "All")
+            val initialMovies = repository.queryMediaPaged(
+                accountId = account.id,
+                type = "MOVIE",
+                categoryId = movieCatFilter,
+                query = movieQueryFilter,
+                minRating = movieRatingFilter,
+                year = movieYearFilter,
+                limit = mLimit,
+                offset = 0,
+                qualityFilter = movieQualityFilter,
+                sortByQuality = movieSortByQuality
+            )
+            val initialSeries = repository.queryMediaPaged(
+                accountId = account.id,
+                type = "SERIES",
+                categoryId = seriesCatFilter,
+                query = seriesQueryFilter,
+                minRating = seriesRatingFilter,
+                year = seriesYearFilter,
+                limit = sLimit,
+                offset = 0,
+                qualityFilter = seriesQualityFilter,
+                sortByQuality = seriesSortByQuality
+            )
+            val initialLive = repository.queryMediaPaged(
+                accountId = account.id,
+                type = "LIVE",
+                categoryId = liveCatFilter,
+                query = liveQueryFilter,
+                minRating = 0.0,
+                year = "All",
+                limit = lLimit,
+                offset = 0,
+                liveChannelOrder = order,
+                qualityFilter = liveQualityFilter,
+                sortByQuality = liveSortByQuality
+            )
 
-            if (initialMovies.isNotEmpty() || initialSeries.isNotEmpty() || initialLive.isNotEmpty()) {
+            val mCount = repository.countMedia(account.id, "MOVIE", movieCatFilter, movieQueryFilter, movieRatingFilter, movieYearFilter, movieQualityFilter)
+            val sCount = repository.countMedia(account.id, "SERIES", seriesCatFilter, seriesQueryFilter, seriesRatingFilter, seriesYearFilter, seriesQualityFilter)
+            val lCount = repository.countMedia(account.id, "LIVE", liveCatFilter, liveQueryFilter, 0.0, "All", liveQualityFilter)
+
+            if (initialMovies.isNotEmpty() || initialSeries.isNotEmpty() || initialLive.isNotEmpty() || mCount > 0 || sCount > 0 || lCount > 0) {
                 _movieCategories.value = movieCats
                 _seriesCategories.value = seriesCats
                 _liveCategories.value = liveCats
@@ -210,6 +266,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _liveStreams.value = initialLive
                 totalLiveCount.value = lCount
 
+                _favorites.value = repository.getFavorites(order)
+
                 _isLoading.value = false
             } else if (account.isDemo) {
                 loadDemoDataFallback()
@@ -222,9 +280,13 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadDemoDataFallback() {
+        val sortedLive = ChannelNameNormalizer.sortMediaItems(
+            SampleData.sampleLiveStreams,
+            _userSettings.value.liveChannelOrder
+        )
         _liveCategories.value = SampleData.liveCategories
-        _liveStreams.value = SampleData.sampleLiveStreams
-        totalLiveCount.value = SampleData.sampleLiveStreams.size
+        _liveStreams.value = sortedLive
+        totalLiveCount.value = sortedLive.size
 
         _movieCategories.value = SampleData.movieCategories
         _movies.value = SampleData.sampleMovies
@@ -336,16 +398,22 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         movieQueryFilter = ""
         movieRatingFilter = 0.0
         movieYearFilter = "All"
+        movieQualityFilter = "All"
+        movieSortByQuality = false
 
         seriesPage = 0
         seriesCatFilter = "all"
         seriesQueryFilter = ""
         seriesRatingFilter = 0.0
         seriesYearFilter = "All"
+        seriesQualityFilter = "All"
+        seriesSortByQuality = false
 
         livePage = 0
         liveCatFilter = "all"
         liveQueryFilter = ""
+        liveQualityFilter = "All"
+        liveSortByQuality = false
     }
 
     // --- Core Memory-Safe Batch Syncing ---
@@ -359,10 +427,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
             if (account.isDemo) {
                 try {
-                    // Populate Room with Demo Sample Data
-                    val movieEntities = SampleData.sampleMovies.map { MediaItemEntity.fromMediaItem(it, account.id) }
-                    val seriesEntities = SampleData.sampleSeries.map { MediaItemEntity.fromMediaItem(it, account.id) }
-                    val liveEntities = SampleData.sampleLiveStreams.map { MediaItemEntity.fromMediaItem(it, account.id) }
+                    // Populate Room with Demo Sample Data (with groupKey, seq, groupOrder, serverOrder)
+                    val movieEntities = MediaItemEntity.fromMediaItemList(SampleData.sampleMovies, account.id)
+                    val seriesEntities = MediaItemEntity.fromMediaItemList(SampleData.sampleSeries, account.id)
+                    val liveEntities = MediaItemEntity.fromMediaItemList(SampleData.sampleLiveStreams, account.id)
 
                     val movieCatEntities = SampleData.movieCategories.map { CategoryEntity.fromCategory(it, account.id) }
                     val seriesCatEntities = SampleData.seriesCategories.map { CategoryEntity.fromCategory(it, account.id) }
@@ -405,11 +473,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     _liveCategories.value = liveCats.map { it.toCategory() }
                 }
 
+                val movieCatMap = movieCats.associate { it.categoryId to it.categoryName }
+                val seriesCatMap = seriesCats.associate { it.categoryId to it.categoryName }
+                val liveCatMap = liveCats.associate { it.categoryId to it.categoryName }
+
                 // Step 2: Stream Live Channels in 500-item Batches (Clearing old rows first)
                 _syncProgress.value = "Syncing Live Channels..."
                 repository.clearOldRows(account.id, "LIVE")
                 var totalLiveParsed = 0
-                apiClient.streamLiveStreams(account, batchSize = 500) { batch ->
+                apiClient.streamLiveStreams(account, categoryMap = liveCatMap, batchSize = 500) { batch ->
                     repository.insertMediaBatch(batch)
                     totalLiveParsed += batch.size
                     _syncProgress.value = "Live Channels synced: $totalLiveParsed"
@@ -419,7 +491,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _syncProgress.value = "Syncing Movies..."
                 repository.clearOldRows(account.id, "MOVIE")
                 var totalMoviesParsed = 0
-                apiClient.streamVodStreams(account, batchSize = 500) { batch ->
+                apiClient.streamVodStreams(account, categoryMap = movieCatMap, batchSize = 500) { batch ->
                     repository.insertMediaBatch(batch)
                     totalMoviesParsed += batch.size
                     _syncProgress.value = "Movies synced: $totalMoviesParsed"
@@ -429,7 +501,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _syncProgress.value = "Syncing Series..."
                 repository.clearOldRows(account.id, "SERIES")
                 var totalSeriesParsed = 0
-                apiClient.streamSeries(account, batchSize = 500) { batch ->
+                apiClient.streamSeries(account, categoryMap = seriesCatMap, batchSize = 500) { batch ->
                     repository.insertMediaBatch(batch)
                     totalSeriesParsed += batch.size
                     _syncProgress.value = "Series synced: $totalSeriesParsed"
@@ -483,15 +555,28 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         categoryId: String = movieCatFilter,
         query: String = movieQueryFilter,
         minRating: Double = movieRatingFilter,
-        year: String = movieYearFilter
+        year: String = movieYearFilter,
+        qualityFilter: String = movieQualityFilter,
+        sortByQuality: Boolean = movieSortByQuality
     ) {
+        val isSameFilter = categoryId == movieCatFilter &&
+                query == movieQueryFilter &&
+                minRating == movieRatingFilter &&
+                year == movieYearFilter &&
+                qualityFilter == movieQualityFilter &&
+                sortByQuality == movieSortByQuality
+        if (!isSameFilter) {
+            moviePage = 0
+        }
         movieCatFilter = categoryId
         movieQueryFilter = query
         movieRatingFilter = minRating
         movieYearFilter = year
-        moviePage = 0
+        movieQualityFilter = qualityFilter
+        movieSortByQuality = sortByQuality
 
         val account = _activeAccount.value ?: return
+        val limitToFetch = (moviePage + 1) * pageSize
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val paged = repository.queryMediaPaged(
@@ -501,8 +586,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     query = query,
                     minRating = minRating,
                     year = year,
-                    limit = pageSize,
-                    offset = 0
+                    limit = limitToFetch,
+                    offset = 0,
+                    qualityFilter = qualityFilter,
+                    sortByQuality = sortByQuality
                 )
                 val count = repository.countMedia(
                     accountId = account.id,
@@ -510,7 +597,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     categoryId = categoryId,
                     query = query,
                     minRating = minRating,
-                    year = year
+                    year = year,
+                    qualityFilter = qualityFilter
                 )
                 _movies.value = paged
                 totalMoviesCount.value = count
@@ -537,11 +625,13 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     minRating = movieRatingFilter,
                     year = movieYearFilter,
                     limit = pageSize,
-                    offset = nextPage * pageSize
+                    offset = nextPage * pageSize,
+                    qualityFilter = movieQualityFilter,
+                    sortByQuality = movieSortByQuality
                 )
                 if (more.isNotEmpty()) {
                     moviePage = nextPage
-                    _movies.value = _movies.value + more
+                    _movies.value = (_movies.value + more).distinctBy { it.id }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -556,15 +646,28 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         categoryId: String = seriesCatFilter,
         query: String = seriesQueryFilter,
         minRating: Double = seriesRatingFilter,
-        year: String = seriesYearFilter
+        year: String = seriesYearFilter,
+        qualityFilter: String = seriesQualityFilter,
+        sortByQuality: Boolean = seriesSortByQuality
     ) {
+        val isSameFilter = categoryId == seriesCatFilter &&
+                query == seriesQueryFilter &&
+                minRating == seriesRatingFilter &&
+                year == seriesYearFilter &&
+                qualityFilter == seriesQualityFilter &&
+                sortByQuality == seriesSortByQuality
+        if (!isSameFilter) {
+            seriesPage = 0
+        }
         seriesCatFilter = categoryId
         seriesQueryFilter = query
         seriesRatingFilter = minRating
         seriesYearFilter = year
-        seriesPage = 0
+        seriesQualityFilter = qualityFilter
+        seriesSortByQuality = sortByQuality
 
         val account = _activeAccount.value ?: return
+        val limitToFetch = (seriesPage + 1) * pageSize
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val paged = repository.queryMediaPaged(
@@ -574,8 +677,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     query = query,
                     minRating = minRating,
                     year = year,
-                    limit = pageSize,
-                    offset = 0
+                    limit = limitToFetch,
+                    offset = 0,
+                    qualityFilter = qualityFilter,
+                    sortByQuality = sortByQuality
                 )
                 val count = repository.countMedia(
                     accountId = account.id,
@@ -583,7 +688,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     categoryId = categoryId,
                     query = query,
                     minRating = minRating,
-                    year = year
+                    year = year,
+                    qualityFilter = qualityFilter
                 )
                 _series.value = paged
                 totalSeriesCount.value = count
@@ -610,11 +716,13 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     minRating = seriesRatingFilter,
                     year = seriesYearFilter,
                     limit = pageSize,
-                    offset = nextPage * pageSize
+                    offset = nextPage * pageSize,
+                    qualityFilter = seriesQualityFilter,
+                    sortByQuality = seriesSortByQuality
                 )
                 if (more.isNotEmpty()) {
                     seriesPage = nextPage
-                    _series.value = _series.value + more
+                    _series.value = (_series.value + more).distinctBy { it.id }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -627,13 +735,25 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     // --- Pagination and Filtering for Live TV Screen ---
     fun filterLive(
         categoryId: String = liveCatFilter,
-        query: String = liveQueryFilter
+        query: String = liveQueryFilter,
+        qualityFilter: String = liveQualityFilter,
+        sortByQuality: Boolean = liveSortByQuality
     ) {
+        val isSameFilter = categoryId == liveCatFilter &&
+                query == liveQueryFilter &&
+                qualityFilter == liveQualityFilter &&
+                sortByQuality == liveSortByQuality
+        if (!isSameFilter) {
+            livePage = 0
+        }
         liveCatFilter = categoryId
         liveQueryFilter = query
-        livePage = 0
+        liveQualityFilter = qualityFilter
+        liveSortByQuality = sortByQuality
 
         val account = _activeAccount.value ?: return
+        val order = _userSettings.value.liveChannelOrder
+        val limitToFetch = (livePage + 1) * pageSize
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val paged = repository.queryMediaPaged(
@@ -643,8 +763,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     query = query,
                     minRating = 0.0,
                     year = "All",
-                    limit = pageSize,
-                    offset = 0
+                    limit = limitToFetch,
+                    offset = 0,
+                    liveChannelOrder = order,
+                    qualityFilter = qualityFilter,
+                    sortByQuality = sortByQuality
                 )
                 val count = repository.countMedia(
                     accountId = account.id,
@@ -652,7 +775,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     categoryId = categoryId,
                     query = query,
                     minRating = 0.0,
-                    year = "All"
+                    year = "All",
+                    qualityFilter = qualityFilter
                 )
                 _liveStreams.value = paged
                 totalLiveCount.value = count
@@ -668,6 +792,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         if (_liveStreams.value.size >= totalLiveCount.value) return
 
         isLiveLoadingMore = true
+        val order = _userSettings.value.liveChannelOrder
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val nextPage = livePage + 1
@@ -679,16 +804,95 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     minRating = 0.0,
                     year = "All",
                     limit = pageSize,
-                    offset = nextPage * pageSize
+                    offset = nextPage * pageSize,
+                    liveChannelOrder = order,
+                    qualityFilter = liveQualityFilter,
+                    sortByQuality = liveSortByQuality
                 )
                 if (more.isNotEmpty()) {
                     livePage = nextPage
-                    _liveStreams.value = _liveStreams.value + more
+                    _liveStreams.value = (_liveStreams.value + more).distinctBy { it.id }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
                 isLiveLoadingMore = false
+            }
+        }
+    }
+
+    fun refreshLiveChannelsOrder() {
+        val account = _activeAccount.value ?: return
+        val order = _userSettings.value.liveChannelOrder
+        val limitToFetch = (livePage + 1) * pageSize
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val paged = repository.queryMediaPaged(
+                    accountId = account.id,
+                    type = "LIVE",
+                    categoryId = liveCatFilter,
+                    query = liveQueryFilter,
+                    minRating = 0.0,
+                    year = "All",
+                    limit = limitToFetch,
+                    offset = 0,
+                    liveChannelOrder = order,
+                    qualityFilter = liveQualityFilter,
+                    sortByQuality = liveSortByQuality
+                )
+                val count = repository.countMedia(
+                    accountId = account.id,
+                    type = "LIVE",
+                    categoryId = liveCatFilter,
+                    query = liveQueryFilter,
+                    minRating = 0.0,
+                    year = "All",
+                    qualityFilter = liveQualityFilter
+                )
+                _liveStreams.value = paged
+                totalLiveCount.value = count
+                _favorites.value = repository.getFavorites(order)
+                if (currentSearchQuery.isNotBlank()) {
+                    _searchResults.value = repository.searchAll(account.id, currentSearchQuery, order)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // --- Global Room Search (Ordered with LiveChannelOrder) ---
+    fun performSearch(query: String) {
+        currentSearchQuery = query
+        val account = _activeAccount.value ?: return
+        val order = _userSettings.value.liveChannelOrder
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (query.isBlank()) {
+                    val combined = _movies.value + _series.value +
+                            ChannelNameNormalizer.sortMediaItems(_liveStreams.value, order)
+                    _searchResults.value = combined.distinctBy { it.id }
+                } else {
+                    val roomResults = repository.searchAll(account.id, query, order)
+                    if (roomResults.isNotEmpty()) {
+                        _searchResults.value = roomResults
+                    } else {
+                        val fallback = (_movies.value + _series.value + _liveStreams.value).filter { item ->
+                            item.name.contains(query, ignoreCase = true) ||
+                                    item.genre.contains(query, ignoreCase = true) ||
+                                    item.plot.contains(query, ignoreCase = true) ||
+                                    item.categoryName.contains(query, ignoreCase = true)
+                        }
+                        val moviesAndSeries = fallback.filter { it.type != MediaType.LIVE }
+                        val liveOnly = ChannelNameNormalizer.sortMediaItems(
+                            fallback.filter { it.type == MediaType.LIVE },
+                            order
+                        )
+                        _searchResults.value = (moviesAndSeries + liveOnly).distinctBy { it.id }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
@@ -703,6 +907,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     val details = apiClient.getSeriesDetails(active, seriesItem.streamId)
                     if (details != null) {
                         _currentSeriesDetails.value = details
+                        if (details.quality.isNotBlank()) {
+                            applyDetectedQualityToItem(seriesItem.id, details.quality)
+                        }
                         _isLoading.value = false
                         return@launch
                     }
@@ -728,6 +935,98 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
         playerWrapper.play(urlToPlay, startPos)
         startPositionTracker()
+
+        // Step 2b: For movies, also check get_vod_info in background for video width/height/codec/framerate
+        val active = _activeAccount.value
+        if (mediaItem.type == MediaType.MOVIE && active != null && !active.isDemo) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val vodQuality = apiClient.getVodVideoInfo(
+                        account = active,
+                        vodId = mediaItem.streamId,
+                        fallbackQuality = mediaItem.quality.ifBlank { mediaItem.resolution }
+                    )
+                    if (!vodQuality.isNullOrBlank() && playerWrapper.detectedQualityBadge.value.isBlank()) {
+                        applyDetectedQualityToItem(mediaItem.id, vodQuality)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    private fun onRealPlaybackQualityDetected(realQuality: String) {
+        val currentItem = _nowPlayingItem.value ?: return
+        if (realQuality.isBlank()) return
+
+        // Merge with existing extra tags (e.g. HEVC, 5.1) if realQuality only had height/FPS from onVideoSizeChanged
+        val newParsed = QualityDetector.parseStoredQuality(realQuality)
+        val existingParsed = QualityDetector.parseStoredQuality(currentItem.quality.ifBlank { currentItem.resolution })
+
+        val mergedExtras = mutableListOf<String>()
+        if ("HEVC" in newParsed.extraTags || "HEVC" in existingParsed.extraTags) {
+            mergedExtras.add("HEVC")
+        }
+        val fpsTag = newParsed.extraTags.firstOrNull { it.endsWith("FPS") }
+            ?: existingParsed.extraTags.firstOrNull { it.endsWith("FPS") }
+        if (fpsTag != null) {
+            mergedExtras.add(fpsTag)
+        }
+        if ("5.1" in newParsed.extraTags || "5.1" in existingParsed.extraTags) {
+            mergedExtras.add("5.1")
+        }
+
+        val finalQuality = QualityDetector.ParsedQuality(
+            badge = newParsed.badge.ifBlank { existingParsed.badge },
+            extraTags = mergedExtras
+        ).toStorageString()
+
+        if (finalQuality.isNotBlank()) {
+            applyDetectedQualityToItem(currentItem.id, finalQuality)
+        }
+    }
+
+    private fun applyDetectedQualityToItem(itemId: String, updatedQuality: String) {
+        if (itemId.isBlank() || updatedQuality.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // Save in Room (and favorites preference if present)
+                repository.updateMediaQuality(itemId, updatedQuality)
+
+                // Update in-memory StateFlows so the badge updates everywhere immediately
+                _nowPlayingItem.value?.let { current ->
+                    if (current.id == itemId) {
+                        _nowPlayingItem.value = current.copy(quality = updatedQuality, resolution = updatedQuality)
+                    }
+                }
+                if (_liveStreams.value.any { it.id == itemId }) {
+                    _liveStreams.value = _liveStreams.value.map {
+                        if (it.id == itemId) it.copy(quality = updatedQuality, resolution = updatedQuality) else it
+                    }
+                }
+                if (_movies.value.any { it.id == itemId }) {
+                    _movies.value = _movies.value.map {
+                        if (it.id == itemId) it.copy(quality = updatedQuality, resolution = updatedQuality) else it
+                    }
+                }
+                if (_series.value.any { it.id == itemId }) {
+                    _series.value = _series.value.map {
+                        if (it.id == itemId) it.copy(quality = updatedQuality, resolution = updatedQuality) else it
+                    }
+                }
+                if (_searchResults.value.any { it.id == itemId }) {
+                    _searchResults.value = _searchResults.value.map {
+                        if (it.id == itemId) it.copy(quality = updatedQuality, resolution = updatedQuality) else it
+                    }
+                }
+                if (_favorites.value.any { it.mediaId == itemId }) {
+                    _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     private fun startPositionTracker() {
@@ -774,9 +1073,36 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- Favorites ---
     fun toggleFavorite(item: MediaItem) {
+        val order = _userSettings.value.liveChannelOrder
         viewModelScope.launch(Dispatchers.IO) {
             repository.toggleFavorite(item)
-            _favorites.value = repository.getFavorites()
+            _favorites.value = repository.getFavorites(order)
+            if (liveCatFilter == "favorites") {
+                val account = _activeAccount.value ?: return@launch
+                val limitToFetch = (livePage + 1) * pageSize
+                _liveStreams.value = repository.queryMediaPaged(
+                    accountId = account.id,
+                    type = "LIVE",
+                    categoryId = "favorites",
+                    query = liveQueryFilter,
+                    minRating = 0.0,
+                    year = "All",
+                    limit = limitToFetch,
+                    offset = 0,
+                    liveChannelOrder = order,
+                    qualityFilter = liveQualityFilter,
+                    sortByQuality = liveSortByQuality
+                )
+                totalLiveCount.value = repository.countMedia(
+                    accountId = account.id,
+                    type = "LIVE",
+                    categoryId = "favorites",
+                    query = liveQueryFilter,
+                    minRating = 0.0,
+                    year = "All",
+                    qualityFilter = liveQualityFilter
+                )
+            }
         }
     }
 
@@ -836,11 +1162,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- Settings & Cache ---
     fun updateSettings(newSettings: UserSettings) {
+        val orderChanged = _userSettings.value.liveChannelOrder != newSettings.liveChannelOrder
+        _userSettings.value = newSettings
         viewModelScope.launch(Dispatchers.IO) {
             repository.saveUserSettings(newSettings)
         }
-        _userSettings.value = newSettings
         playerWrapper.initPlayer(newSettings.bufferSize)
+        if (orderChanged) {
+            refreshLiveChannelsOrder()
+        }
     }
 
     fun clearCache() {

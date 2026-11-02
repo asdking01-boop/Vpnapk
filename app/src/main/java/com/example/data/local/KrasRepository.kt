@@ -106,25 +106,47 @@ class KrasRepository(context: Context) {
     }
 
     // --- Favorites ---
-    fun getFavorites(): List<FavoriteItem> {
+    private fun getFavoritesRaw(): List<FavoriteItem> {
         val jsonStr = prefs.getString("favorites_list", null) ?: return emptyList()
         val list = mutableListOf<FavoriteItem>()
+        val tracker = ChannelNameNormalizer.ChannelGroupingTracker()
         try {
             val array = JSONArray(jsonStr)
             for (i in 0 until array.length()) {
                 val obj = array.getJSONObject(i)
+                val title = obj.getString("title")
+                val computed = tracker.nextChannel(title)
+                val savedGroupKey = obj.optString("groupKey", "").ifEmpty { computed.groupKey }
+                val savedSeq = if (obj.has("seq")) obj.optInt("seq", computed.seq) else computed.seq
+                val savedGroupOrder = if (obj.has("groupOrder") && obj.optInt("groupOrder", -1) >= 0) {
+                    obj.optInt("groupOrder", computed.groupOrder)
+                } else {
+                    computed.groupOrder
+                }
+                val savedServerOrder = if (obj.has("serverOrder") && obj.optInt("serverOrder", -1) >= 0) {
+                    obj.optInt("serverOrder", computed.serverOrder)
+                } else {
+                    computed.serverOrder
+                }
                 list.add(
                     FavoriteItem(
                         id = obj.getString("id"),
                         mediaId = obj.getString("mediaId"),
                         type = MediaType.valueOf(obj.getString("type")),
-                        title = obj.getString("title"),
+                        title = title,
                         posterUrl = obj.optString("posterUrl", ""),
                         rating = obj.optDouble("rating", 0.0),
                         year = obj.optString("year", ""),
                         categoryName = obj.optString("categoryName", ""),
                         streamUrl = obj.optString("streamUrl", ""),
-                        timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                        timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
+                        groupKey = savedGroupKey,
+                        seq = savedSeq,
+                        groupOrder = savedGroupOrder,
+                        serverOrder = savedServerOrder,
+                        quality = obj.optString("quality", "").ifBlank {
+                            QualityDetector.detectFromNameAndCategory(title, obj.optString("categoryName", ""))
+                        }
                     )
                 )
             }
@@ -134,14 +156,23 @@ class KrasRepository(context: Context) {
         return list
     }
 
+    fun getFavorites(order: LiveChannelOrder = getUserSettings().liveChannelOrder): List<FavoriteItem> {
+        val raw = getFavoritesRaw()
+        return ChannelNameNormalizer.sortFavorites(raw, order)
+    }
+
     fun toggleFavorite(item: MediaItem): Boolean {
-        val list = getFavorites().toMutableList()
+        val list = getFavoritesRaw().toMutableList()
         val existing = list.find { it.mediaId == item.id }
         val isAdded: Boolean
         if (existing != null) {
             list.remove(existing)
             isAdded = false
         } else {
+            val norm = ChannelNameNormalizer.normalize(item.name)
+            val resolvedQuality = item.quality.ifBlank { item.resolution }.ifBlank {
+                QualityDetector.detectFromNameAndCategory(item.name, item.categoryName)
+            }
             list.add(
                 FavoriteItem(
                     id = java.util.UUID.randomUUID().toString(),
@@ -152,14 +183,39 @@ class KrasRepository(context: Context) {
                     rating = item.rating,
                     year = item.year,
                     categoryName = item.categoryName,
-                    streamUrl = item.streamUrl
+                    streamUrl = item.streamUrl,
+                    groupKey = item.groupKey.ifBlank { norm.groupKey },
+                    seq = if (item.groupKey.isNotBlank()) item.seq else norm.seq,
+                    groupOrder = item.groupOrder,
+                    serverOrder = item.serverOrder,
+                    quality = resolvedQuality
                 )
             )
             isAdded = true
         }
+        // Recompute groupOrder/serverOrder across the raw favorite list if needed
+        val tracker = ChannelNameNormalizer.ChannelGroupingTracker()
+        val updatedList = list.map { fav ->
+            val computed = tracker.nextChannel(fav.title)
+            if (fav.groupOrder == 0 && fav.serverOrder == 0) {
+                fav.copy(
+                    groupKey = computed.groupKey,
+                    seq = computed.seq,
+                    groupOrder = computed.groupOrder,
+                    serverOrder = computed.serverOrder
+                )
+            } else {
+                fav
+            }
+        }
+        saveFavoritesList(updatedList)
+        return isAdded
+    }
+
+    private fun saveFavoritesList(updatedList: List<FavoriteItem>) {
         try {
             val array = JSONArray()
-            for (fav in list) {
+            for (fav in updatedList) {
                 val obj = JSONObject().apply {
                     put("id", fav.id)
                     put("mediaId", fav.mediaId)
@@ -171,6 +227,11 @@ class KrasRepository(context: Context) {
                     put("categoryName", fav.categoryName)
                     put("streamUrl", fav.streamUrl)
                     put("timestamp", fav.timestamp)
+                    put("groupKey", fav.groupKey)
+                    put("seq", fav.seq)
+                    put("groupOrder", fav.groupOrder)
+                    put("serverOrder", fav.serverOrder)
+                    put("quality", fav.quality)
                 }
                 array.put(obj)
             }
@@ -178,11 +239,10 @@ class KrasRepository(context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return isAdded
     }
 
     fun isFavorite(mediaId: String): Boolean {
-        return getFavorites().any { it.mediaId == mediaId }
+        return getFavoritesRaw().any { it.mediaId == mediaId }
     }
 
     // --- Watch History ---
@@ -298,6 +358,13 @@ class KrasRepository(context: Context) {
 
     // --- Settings ---
     fun getUserSettings(): UserSettings {
+        val orderName = prefs.getString("liveChannelOrder", LiveChannelOrder.SMART.name) ?: LiveChannelOrder.SMART.name
+        val liveOrder = try {
+            LiveChannelOrder.valueOf(orderName)
+        } catch (e: Exception) {
+            LiveChannelOrder.SMART
+        }
+
         return UserSettings(
             accentColorIndex = prefs.getInt("accentColorIndex", 0),
             blurIntensity = prefs.getString("blurIntensity", "Medium") ?: "Medium",
@@ -309,7 +376,8 @@ class KrasRepository(context: Context) {
             parentalPin = prefs.getString("parentalPin", "") ?: "",
             parentalEnabled = prefs.getBoolean("parentalEnabled", false),
             playIntroSound = prefs.getBoolean("playIntroSound", true),
-            silenceNotificationsWhileWatching = prefs.getBoolean("silenceNotificationsWhileWatching", false)
+            silenceNotificationsWhileWatching = prefs.getBoolean("silenceNotificationsWhileWatching", false),
+            liveChannelOrder = liveOrder
         )
     }
 
@@ -326,6 +394,7 @@ class KrasRepository(context: Context) {
             putBoolean("parentalEnabled", settings.parentalEnabled)
             putBoolean("playIntroSound", settings.playIntroSound)
             putBoolean("silenceNotificationsWhileWatching", settings.silenceNotificationsWhileWatching)
+            putString("liveChannelOrder", settings.liveChannelOrder.name)
         }.apply()
     }
 
@@ -344,7 +413,61 @@ class KrasRepository(context: Context) {
     // --- Room Database Batch Operations ---
 
     suspend fun insertMediaBatch(items: List<MediaItemEntity>) = withContext(Dispatchers.IO) {
-        mediaDao.insertAll(items)
+        if (items.isEmpty()) return@withContext
+        val needsOrderComputation = items.size > 1 && items.all { it.serverOrder == 0 && it.groupOrder == 0 }
+        val tracker = if (needsOrderComputation) ChannelNameNormalizer.ChannelGroupingTracker() else null
+
+        val processed = items.map { item ->
+            val canonicalQuality = MediaItemEntity.computeCanonicalQuality(
+                name = item.name,
+                categoryName = item.categoryName,
+                explicitQuality = item.quality,
+                explicitResolution = item.resolution
+            )
+            if (tracker != null) {
+                val info = tracker.nextChannel(item.name)
+                item.copy(
+                    groupKey = info.groupKey,
+                    seq = info.seq,
+                    groupOrder = info.groupOrder,
+                    serverOrder = info.serverOrder,
+                    quality = canonicalQuality,
+                    resolution = canonicalQuality
+                )
+            } else if (item.groupKey.isEmpty()) {
+                val norm = ChannelNameNormalizer.normalize(item.name)
+                item.copy(
+                    groupKey = norm.groupKey,
+                    seq = norm.seq,
+                    quality = canonicalQuality,
+                    resolution = canonicalQuality
+                )
+            } else if (item.quality != canonicalQuality || item.resolution != canonicalQuality) {
+                item.copy(
+                    quality = canonicalQuality,
+                    resolution = canonicalQuality
+                )
+            } else {
+                item
+            }
+        }
+        mediaDao.insertAll(processed)
+    }
+
+    suspend fun updateMediaQuality(id: String, quality: String) = withContext(Dispatchers.IO) {
+        if (id.isBlank() || quality.isBlank()) return@withContext
+        try {
+            mediaDao.updateMediaQuality(id, quality)
+            val favs = getFavoritesRaw()
+            if (favs.any { it.mediaId == id }) {
+                val updatedFavs = favs.map { fav ->
+                    if (fav.mediaId == id) fav.copy(quality = quality) else fav
+                }
+                saveFavoritesList(updatedFavs)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     suspend fun clearOldRows(accountId: String, type: String) = withContext(Dispatchers.IO) {
@@ -356,7 +479,11 @@ class KrasRepository(context: Context) {
     }
 
     suspend fun getTopRated(accountId: String, type: String, limit: Int = 20): List<MediaItem> = withContext(Dispatchers.IO) {
-        mediaDao.getTopRated(accountId, type, limit).map { it.toMediaItem() }
+        if (type.equals("LIVE", ignoreCase = true)) {
+            queryMediaPaged(accountId, "LIVE", "all", "", 0.0, "All", limit, 0)
+        } else {
+            mediaDao.getTopRated(accountId, type, limit).map { it.toMediaItem() }
+        }
     }
 
     suspend fun getRecentlyAdded(accountId: String, limit: Int = 20): List<MediaItem> = withContext(Dispatchers.IO) {
@@ -364,7 +491,11 @@ class KrasRepository(context: Context) {
     }
 
     suspend fun getByCategory(accountId: String, type: String, categoryId: String, limit: Int = 15): List<MediaItem> = withContext(Dispatchers.IO) {
-        mediaDao.getByCategory(accountId, type, categoryId, limit).map { it.toMediaItem() }
+        if (type.equals("LIVE", ignoreCase = true)) {
+            queryMediaPaged(accountId, "LIVE", categoryId, "", 0.0, "All", limit, 0)
+        } else {
+            mediaDao.getByCategory(accountId, type, categoryId, limit).map { it.toMediaItem() }
+        }
     }
 
     suspend fun queryMediaPaged(
@@ -375,9 +506,43 @@ class KrasRepository(context: Context) {
         minRating: Double,
         year: String,
         limit: Int,
-        offset: Int
+        offset: Int,
+        liveChannelOrder: LiveChannelOrder = getUserSettings().liveChannelOrder,
+        qualityFilter: String = "All",
+        sortByQuality: Boolean = false
     ): List<MediaItem> = withContext(Dispatchers.IO) {
-        mediaDao.queryMediaPaged(accountId, type, categoryId, query, minRating, year, limit, offset).map { it.toMediaItem() }
+        if (type.equals("LIVE", ignoreCase = true)) {
+            if (categoryId == "favorites") {
+                val favIds = getFavoritesRaw().filter { it.type == MediaType.LIVE }.map { it.mediaId }
+                if (favIds.isEmpty()) return@withContext emptyList()
+                val favEntities = when (liveChannelOrder) {
+                    LiveChannelOrder.SMART -> mediaDao.getFavoritesSmart(accountId, favIds, query, qualityFilter, sortByQuality)
+                    LiveChannelOrder.SERVER -> mediaDao.getFavoritesServer(accountId, favIds, query, qualityFilter, sortByQuality)
+                    LiveChannelOrder.A_TO_Z -> mediaDao.getFavoritesAZ(accountId, favIds, query, qualityFilter, sortByQuality)
+                }
+                return@withContext favEntities.drop(offset).take(limit).map { it.toMediaItem() }
+            }
+
+            val entities = when (liveChannelOrder) {
+                LiveChannelOrder.SMART -> mediaDao.queryLiveSmartPaged(accountId, categoryId, query, limit, offset, qualityFilter, sortByQuality)
+                LiveChannelOrder.SERVER -> mediaDao.queryLiveServerPaged(accountId, categoryId, query, limit, offset, qualityFilter, sortByQuality)
+                LiveChannelOrder.A_TO_Z -> mediaDao.queryLiveAZPaged(accountId, categoryId, query, limit, offset, qualityFilter, sortByQuality)
+            }
+            entities.map { it.toMediaItem() }
+        } else {
+            mediaDao.queryMediaPaged(
+                accountId = accountId,
+                type = type,
+                categoryId = categoryId,
+                query = query,
+                minRating = minRating,
+                year = year,
+                limit = limit,
+                offset = offset,
+                qualityFilter = qualityFilter,
+                sortByQuality = sortByQuality
+            ).map { it.toMediaItem() }
+        }
     }
 
     suspend fun countMedia(
@@ -386,17 +551,32 @@ class KrasRepository(context: Context) {
         categoryId: String,
         query: String,
         minRating: Double,
-        year: String
+        year: String,
+        qualityFilter: String = "All"
     ): Int = withContext(Dispatchers.IO) {
-        mediaDao.countMedia(accountId, type, categoryId, query, minRating, year)
+        if (type.equals("LIVE", ignoreCase = true) && categoryId == "favorites") {
+            val favIds = getFavoritesRaw().filter { it.type == MediaType.LIVE }.map { it.mediaId }
+            if (favIds.isEmpty()) return@withContext 0
+            return@withContext mediaDao.getFavoritesSmart(accountId, favIds, query, qualityFilter, false).size
+        }
+        mediaDao.countMedia(accountId, type, categoryId, query, minRating, year, qualityFilter)
     }
 
     suspend fun getItemsByIds(ids: List<String>): List<MediaItem> = withContext(Dispatchers.IO) {
         mediaDao.getItemsByIds(ids).map { it.toMediaItem() }
     }
 
-    suspend fun searchAll(accountId: String, query: String): List<MediaItem> = withContext(Dispatchers.IO) {
-        mediaDao.searchAll(accountId, query).map { it.toMediaItem() }
+    suspend fun searchAll(
+        accountId: String,
+        query: String,
+        liveChannelOrder: LiveChannelOrder = getUserSettings().liveChannelOrder
+    ): List<MediaItem> = withContext(Dispatchers.IO) {
+        val entities = when (liveChannelOrder) {
+            LiveChannelOrder.SMART -> mediaDao.searchAll(accountId, query)
+            LiveChannelOrder.SERVER -> mediaDao.searchAllServer(accountId, query)
+            LiveChannelOrder.A_TO_Z -> mediaDao.searchAllAZ(accountId, query)
+        }
+        entities.map { it.toMediaItem() }
     }
 
     suspend fun saveCategories(accountId: String, type: MediaType, categories: List<CategoryEntity>) = withContext(Dispatchers.IO) {
@@ -435,7 +615,8 @@ class KrasRepository(context: Context) {
             key.contains("series", ignoreCase = true) -> MediaType.SERIES
             else -> MediaType.LIVE
         }
-        val entities = items.map { MediaItemEntity.fromMediaItem(it, account.id) }
+        val normalizedItems = items.map { it.copy(type = type) }
+        val entities = MediaItemEntity.fromMediaItemList(normalizedItems, account.id)
         runBlocking(Dispatchers.IO) {
             try {
                 mediaDao.deleteByAccountAndType(account.id, type.name)
@@ -455,7 +636,11 @@ class KrasRepository(context: Context) {
         }
         return runBlocking(Dispatchers.IO) {
             try {
-                mediaDao.getTopRated(account.id, type, 50).map { it.toMediaItem() }
+                if (type == "LIVE") {
+                    queryMediaPaged(account.id, "LIVE", "all", "", 0.0, "All", 200, 0)
+                } else {
+                    mediaDao.getTopRated(account.id, type, 50).map { it.toMediaItem() }
+                }
             } catch (e: Exception) {
                 emptyList()
             }

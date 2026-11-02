@@ -112,6 +112,17 @@ fun PlayerScreen(
     val currentPos by playerWrapper.currentPosition.collectAsState()
     val duration by playerWrapper.duration.collectAsState()
     val errorMessage by playerWrapper.errorMessage.collectAsState()
+    val realResolutionOverlay by playerWrapper.realResolutionOverlay.collectAsState()
+    val detectedQualityBadge by playerWrapper.detectedQualityBadge.collectAsState()
+    val availableVariants by playerWrapper.availableVideoVariants.collectAsState()
+    val selectedVariant by playerWrapper.selectedVideoVariant.collectAsState()
+
+    val effectiveQualityString = remember(detectedQualityBadge, episode?.quality, mediaItem.quality, mediaItem.resolution) {
+        detectedQualityBadge.ifBlank {
+            episode?.quality?.ifBlank { null }
+                ?: mediaItem.quality.ifBlank { mediaItem.resolution }
+        }
+    }
 
     var controlsVisible by remember { mutableStateOf(true) }
     var currentAspectRatio by remember { mutableStateOf(userSettings.defaultAspectRatio) }
@@ -122,7 +133,6 @@ fun PlayerScreen(
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showQualityDialog by remember { mutableStateOf(false) }
     var showAudioDialog by remember { mutableStateOf(false) }
-    var selectedQuality by remember { mutableStateOf("Auto (1080p)") }
     var selectedAudioTrack by remember { mutableStateOf("Stereo 2.0 (Default)") }
 
     // Auto-hide controls after 4 seconds
@@ -251,7 +261,8 @@ fun PlayerScreen(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f, fill = false)
                     ) {
                         IconButton(
                             onClick = onClose,
@@ -272,12 +283,33 @@ fun PlayerScreen(
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1
                             )
-                            if (episode != null) {
-                                Text(
-                                    text = "${mediaItem.name} • S${episode.seasonNumber}:E${episode.episodeNum}",
-                                    color = TextSecondary,
-                                    fontSize = 11.sp
-                                )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (episode != null) {
+                                    Text(
+                                        text = "${mediaItem.name} • S${episode.seasonNumber}:E${episode.episodeNum}",
+                                        color = TextSecondary,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                if (realResolutionOverlay.isNotBlank()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(Color.White.copy(alpha = 0.16f))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            .testTag("player_real_resolution_overlay")
+                                    ) {
+                                        Text(
+                                            text = realResolutionOverlay,
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -288,9 +320,26 @@ fun PlayerScreen(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         ResolutionBadge(
-                            resolution = mediaItem.resolution,
+                            resolution = effectiveQualityString,
                             isLive = mediaItem.type == MediaType.LIVE
                         )
+
+                        // Quality Selector Button (available in both Live TV & VOD)
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color.White.copy(alpha = 0.15f))
+                                .clickable { showQualityDialog = true }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("player_quality_button")
+                        ) {
+                            Text(
+                                text = selectedVariant.label,
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
 
                         // Aspect Ratio Cycle Button
                         Box(
@@ -430,12 +479,14 @@ fun PlayerScreen(
                         ) {
                             items(liveChannels, key = { it.id }) { ch ->
                                 val isSelected = ch.id == mediaItem.id
-                                Box(
+                                Row(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(8.dp))
                                         .background(if (isSelected) KrasRed else Color.White.copy(alpha = 0.15f))
                                         .clickable { onSwitchChannel(ch) }
-                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
                                         text = ch.name,
@@ -443,6 +494,10 @@ fun PlayerScreen(
                                         fontSize = 11.sp,
                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                                     )
+                                    val chQ = ch.quality.ifBlank { ch.resolution }
+                                    if (chQ.isNotBlank()) {
+                                        ResolutionBadge(resolution = chQ, isLive = false)
+                                    }
                                 }
                             }
                         }
@@ -506,7 +561,11 @@ fun PlayerScreen(
                             // Quality Selector
                             TextButton(onClick = { showQualityDialog = true }) {
                                 Text(
-                                    text = selectedQuality,
+                                    text = if (realResolutionOverlay.isNotBlank() && selectedVariant.label == "Auto") {
+                                        "Quality: Auto ($realResolutionOverlay)"
+                                    } else {
+                                        "Quality: ${selectedVariant.label}"
+                                    },
                                     color = Color.White,
                                     fontSize = 12.sp
                                 )
@@ -570,34 +629,62 @@ fun PlayerScreen(
         )
     }
 
-    // Quality Selector Dialog
+    // Quality Selector Dialog (lists HLS/manifest variants: Auto, 1080p, 720p, 480p, etc.)
     if (showQualityDialog) {
+        val variantsToShow = remember(availableVariants) {
+            if (availableVariants.size > 1) {
+                availableVariants
+            } else {
+                listOf(
+                    com.example.player.VideoQualityVariant("Auto", 0),
+                    com.example.player.VideoQualityVariant("1080p", 1080),
+                    com.example.player.VideoQualityVariant("720p", 720),
+                    com.example.player.VideoQualityVariant("480p", 480)
+                )
+            }
+        }
         AlertDialog(
             onDismissRequest = { showQualityDialog = false },
             title = { Text("Select Stream Quality", color = Color.White) },
             text = {
                 Column {
-                    listOf("Auto (Adaptive)", "4K Ultra HD (2160p)", "Full HD (1080p)", "HD (720p)", "Data Saver (480p)").forEach { q ->
+                    if (realResolutionOverlay.isNotBlank()) {
+                        Text(
+                            text = "Current stream: $realResolutionOverlay",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                    }
+                    variantsToShow.forEach { variant ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    selectedQuality = q
+                                    playerWrapper.selectVideoQuality(variant)
                                     showQualityDialog = false
                                 }
                                 .padding(vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             RadioButton(
-                                selected = (selectedQuality == q),
+                                selected = (selectedVariant.label == variant.label),
                                 onClick = {
-                                    selectedQuality = q
+                                    playerWrapper.selectVideoQuality(variant)
                                     showQualityDialog = false
                                 },
                                 colors = RadioButtonDefaults.colors(selectedColor = KrasRed)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text(text = q, color = Color.White, fontSize = 14.sp)
+                            Text(
+                                text = if (variant.height == 0 && realResolutionOverlay.isNotBlank()) {
+                                    "Auto ($realResolutionOverlay)"
+                                } else {
+                                    variant.label
+                                },
+                                color = Color.White,
+                                fontSize = 14.sp
+                            )
                         }
                     }
                 }

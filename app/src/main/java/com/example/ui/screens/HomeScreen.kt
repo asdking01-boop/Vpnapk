@@ -43,7 +43,8 @@ fun HomeScreen(
     isRefreshing: Boolean,
     isLoading: Boolean,
     cardStyle: CardStyle,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    favorites: List<FavoriteItem> = emptyList()
 ) {
     // Pick hero item (first top-rated movie or series)
     val heroItem = remember(movies, series) {
@@ -62,6 +63,32 @@ fun HomeScreen(
             allMedia[hist.mediaId]?.let { media ->
                 Pair(media, hist)
             }
+        }
+    }
+
+    // Favorites resolved in the exact sorted order from repository.getFavorites(liveChannelOrder)
+    val favoriteMediaItems = remember(favorites, movies, series, liveStreams) {
+        val allMedia = (movies + series + liveStreams).associateBy { it.id }
+        favorites.map { fav ->
+            allMedia[fav.mediaId] ?: MediaItem(
+                id = fav.mediaId,
+                streamId = fav.mediaId.substringAfterLast("_").toIntOrNull() ?: 0,
+                name = fav.title,
+                title = fav.title,
+                type = fav.type,
+                streamIcon = fav.posterUrl,
+                backdrop = fav.posterUrl,
+                categoryName = fav.categoryName,
+                rating = fav.rating,
+                year = fav.year,
+                resolution = fav.quality,
+                quality = fav.quality,
+                streamUrl = fav.streamUrl,
+                groupKey = fav.groupKey,
+                seq = fav.seq,
+                groupOrder = fav.groupOrder,
+                serverOrder = fav.serverOrder
+            )
         }
     }
 
@@ -161,6 +188,27 @@ fun HomeScreen(
                     items = continueWatchingItems.map { it.first },
                     onItemClick = onMediaClick,
                     cardStyle = CardStyle.WIDE,
+                    onToggleFavorite = onToggleFavorite,
+                    isFavorite = isFavorite,
+                    watchHistory = watchHistory
+                )
+            }
+        }
+
+        // 3b. My Favorites (if favorites exist, ordered according to channel order)
+        val filteredFavorites = when (selectedQuickFilter) {
+            "Movies" -> favoriteMediaItems.filter { it.type == MediaType.MOVIE }
+            "Series" -> favoriteMediaItems.filter { it.type == MediaType.SERIES }
+            "Live TV" -> favoriteMediaItems.filter { it.type == MediaType.LIVE }
+            else -> favoriteMediaItems
+        }
+        if (filteredFavorites.isNotEmpty()) {
+            item {
+                MediaRow(
+                    title = "My Favorites",
+                    items = filteredFavorites,
+                    onItemClick = onMediaClick,
+                    cardStyle = cardStyle,
                     onToggleFavorite = onToggleFavorite,
                     isFavorite = isFavorite,
                     watchHistory = watchHistory

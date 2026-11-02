@@ -25,6 +25,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.local.QualityDetector
 import com.example.data.model.CardStyle
 import com.example.data.model.Category
 import com.example.data.model.MediaItem
@@ -47,29 +48,42 @@ fun MoviesScreen(
     modifier: Modifier = Modifier,
     totalCount: Int = movies.size,
     onLoadMore: (() -> Unit)? = null,
-    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String) -> Unit)? = null
+    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String, qualityFilter: String, sortByQuality: Boolean) -> Unit)? = null
 ) {
     var selectedCategoryId by remember { mutableStateOf("all") }
     var searchQuery by remember { mutableStateOf("") }
     var minRating by remember { mutableStateOf(0.0) }
     var selectedYear by remember { mutableStateOf("All") }
+    var selectedQualityFilter by remember { mutableStateOf("All") }
+    var sortByQuality by remember { mutableStateOf(false) }
     var showFilterDialog by remember { mutableStateOf(false) }
+
+    val qualityFilterOptions = remember { listOf("All", "4K", "FHD", "HD", "SD") }
 
     val gridState = rememberLazyGridState()
     val listState = rememberLazyListState()
 
     // Trigger filter update when controls change
-    LaunchedEffect(selectedCategoryId, searchQuery, minRating, selectedYear) {
+    LaunchedEffect(selectedCategoryId, searchQuery, minRating, selectedYear, selectedQualityFilter, sortByQuality) {
         if (onFilterChanged != null) {
-            onFilterChanged(selectedCategoryId, searchQuery, minRating, selectedYear)
+            onFilterChanged(selectedCategoryId, searchQuery, minRating, selectedYear, selectedQualityFilter, sortByQuality)
         }
     }
 
-    val filteredMovies = remember(movies, selectedCategoryId, searchQuery, minRating, selectedYear, onFilterChanged) {
+    val filteredMovies = remember(
+        movies,
+        selectedCategoryId,
+        searchQuery,
+        minRating,
+        selectedYear,
+        selectedQualityFilter,
+        sortByQuality,
+        onFilterChanged
+    ) {
         if (onFilterChanged != null) {
-            movies // Already filtered by Room SQL query
+            movies // Already filtered and sorted by Room SQL query
         } else {
-            movies.filter { movie ->
+            val filtered = movies.filter { movie ->
                 val matchCategory = selectedCategoryId == "all" ||
                         movie.categoryId == selectedCategoryId ||
                         movie.categoryName.contains(selectedCategoryId, ignoreCase = true)
@@ -78,7 +92,16 @@ fun MoviesScreen(
                         movie.genre.contains(searchQuery, ignoreCase = true)
                 val matchRating = movie.rating >= minRating
                 val matchYear = selectedYear == "All" || movie.year == selectedYear
-                matchCategory && matchSearch && matchRating && matchYear
+                val matchQuality = QualityDetector.matchesQualityFilter(
+                    movie.quality.ifBlank { movie.resolution },
+                    selectedQualityFilter
+                )
+                matchCategory && matchSearch && matchRating && matchYear && matchQuality
+            }
+            if (sortByQuality) {
+                QualityDetector.sortMediaByQualityDescending(filtered)
+            } else {
+                filtered
             }
         }
     }
@@ -141,7 +164,7 @@ fun MoviesScreen(
                 modifier = Modifier
                     .size(46.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(if (minRating > 0.0 || selectedYear != "All") KrasRed else CinemaCard)
+                    .background(if (minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality) KrasRed else CinemaCard)
                     .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
                     .clickable { showFilterDialog = true }
                     .testTag("movies_filter_button"),
@@ -158,7 +181,7 @@ fun MoviesScreen(
 
         // Category Chips Row
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             item {
@@ -198,6 +221,68 @@ fun MoviesScreen(
             }
         }
 
+        // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.testTag("movies_quality_filter_row")
+        ) {
+            items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
+                val isSelected = selectedQualityFilter == qOpt
+                val activeColor = when (qOpt) {
+                    "4K" -> Badge4K
+                    "FHD" -> BadgeFHD
+                    "HD" -> BadgeHD
+                    "SD" -> BadgeSD
+                    else -> KrasRed
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (isSelected) activeColor else CinemaCard)
+                        .border(
+                            width = 1.dp,
+                            color = if (isSelected) Color.White.copy(alpha = 0.3f) else GlassBorder,
+                            shape = RoundedCornerShape(14.dp)
+                        )
+                        .clickable { selectedQualityFilter = qOpt }
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                        .testTag("movies_quality_chip_$qOpt")
+                ) {
+                    Text(
+                        text = if (qOpt == "All") "All Quality" else qOpt,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+
+            item(key = "sort_by_quality") {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (sortByQuality) KrasRed else CinemaCard)
+                        .border(
+                            width = 1.dp,
+                            color = if (sortByQuality) Color.White.copy(alpha = 0.35f) else GlassBorder,
+                            shape = RoundedCornerShape(14.dp)
+                        )
+                        .clickable { sortByQuality = !sortByQuality }
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                        .testTag("movies_sort_by_quality_chip")
+                ) {
+                    Text(
+                        text = if (sortByQuality) "Sort by quality ↓" else "Sort by quality",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = if (sortByQuality) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
+
         // Results Count
         Row(
             modifier = Modifier
@@ -211,7 +296,7 @@ fun MoviesScreen(
                 color = TextSecondary,
                 fontSize = 12.sp
             )
-            if (minRating > 0.0 || selectedYear != "All") {
+            if (minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality) {
                 Text(
                     text = "Clear filters",
                     color = KrasRedBright,
@@ -220,6 +305,8 @@ fun MoviesScreen(
                     modifier = Modifier.clickable {
                         minRating = 0.0
                         selectedYear = "All"
+                        selectedQualityFilter = "All"
+                        sortByQuality = false
                     }
                 )
             }

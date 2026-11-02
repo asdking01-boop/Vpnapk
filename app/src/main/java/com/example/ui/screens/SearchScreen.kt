@@ -23,11 +23,15 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.local.ChannelNameNormalizer
 import com.example.data.model.CardStyle
+import com.example.data.model.LiveChannelOrder
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
 import com.example.ui.components.MediaCard
 import com.example.ui.theme.*
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.runtime.saveable.rememberSaveable
 
 @Composable
 fun SearchScreen(
@@ -36,15 +40,22 @@ fun SearchScreen(
     onToggleFavorite: (MediaItem) -> Unit,
     onMediaClick: (MediaItem) -> Unit,
     onClose: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    liveChannelOrder: LiveChannelOrder = LiveChannelOrder.SMART,
+    onSearchQueryChanged: ((String) -> Unit)? = null
 ) {
-    var query by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableStateOf("All") }
+    var query by rememberSaveable { mutableStateOf("") }
+    var selectedTab by rememberSaveable { mutableStateOf("All") }
     val tabs = listOf("All", "Movies", "Series", "Live TV")
+    val gridState = rememberLazyGridState()
 
-    val searchResults = remember(allMedia, query, selectedTab) {
-        allMedia.filter { item ->
-            val matchQuery = query.isBlank() ||
+    LaunchedEffect(query, liveChannelOrder) {
+        onSearchQueryChanged?.invoke(query)
+    }
+
+    val searchResults = remember(allMedia, query, selectedTab, liveChannelOrder, onSearchQueryChanged) {
+        val baseFiltered = allMedia.filter { item ->
+            val matchQuery = onSearchQueryChanged != null || query.isBlank() ||
                     item.name.contains(query, ignoreCase = true) ||
                     item.genre.contains(query, ignoreCase = true) ||
                     item.plot.contains(query, ignoreCase = true) ||
@@ -58,6 +69,22 @@ fun SearchScreen(
             }
 
             matchQuery && matchTab
+        }
+
+        if (onSearchQueryChanged != null) {
+            // Room search query already ordered Live TV items according to liveChannelOrder
+            baseFiltered
+        } else {
+            val nonLive = baseFiltered.filter { it.type != MediaType.LIVE }
+            val live = ChannelNameNormalizer.sortMediaItems(
+                baseFiltered.filter { it.type == MediaType.LIVE },
+                liveChannelOrder
+            )
+            when (selectedTab) {
+                "Live TV" -> live
+                "Movies", "Series" -> nonLive
+                else -> nonLive + live
+            }
         }
     }
 
@@ -174,6 +201,7 @@ fun SearchScreen(
             }
         } else {
             LazyVerticalGrid(
+                state = gridState,
                 columns = GridCells.Adaptive(minSize = 130.dp),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 40.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),

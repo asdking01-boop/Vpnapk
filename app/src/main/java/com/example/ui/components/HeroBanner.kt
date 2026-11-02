@@ -143,7 +143,10 @@ fun HeroBanner(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ResolutionBadge(resolution = item.resolution, isLive = false)
+                ResolutionBadge(
+                    resolution = item.quality.ifBlank { item.resolution },
+                    isLive = false
+                )
 
                 Box(
                     modifier = Modifier

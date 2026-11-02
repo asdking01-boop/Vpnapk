@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.local.QualityDetector
 import com.example.data.model.CardStyle
 import com.example.data.model.Category
 import com.example.data.model.MediaItem
@@ -41,28 +42,48 @@ fun SeriesScreen(
     modifier: Modifier = Modifier,
     totalCount: Int = seriesList.size,
     onLoadMore: (() -> Unit)? = null,
-    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String) -> Unit)? = null
+    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String, qualityFilter: String, sortByQuality: Boolean) -> Unit)? = null
 ) {
     var selectedCategoryId by remember { mutableStateOf("all") }
     var searchQuery by remember { mutableStateOf("") }
+    var selectedQualityFilter by remember { mutableStateOf("All") }
+    var sortByQuality by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
 
-    LaunchedEffect(selectedCategoryId, searchQuery) {
-        onFilterChanged?.invoke(selectedCategoryId, searchQuery, 0.0, "All")
+    val qualityFilterOptions = remember { listOf("All", "4K", "FHD", "HD", "SD") }
+
+    LaunchedEffect(selectedCategoryId, searchQuery, selectedQualityFilter, sortByQuality) {
+        onFilterChanged?.invoke(selectedCategoryId, searchQuery, 0.0, "All", selectedQualityFilter, sortByQuality)
     }
 
-    val filteredSeries = remember(seriesList, selectedCategoryId, searchQuery, onFilterChanged) {
+    val filteredSeries = remember(
+        seriesList,
+        selectedCategoryId,
+        searchQuery,
+        selectedQualityFilter,
+        sortByQuality,
+        onFilterChanged
+    ) {
         if (onFilterChanged != null) {
             seriesList
         } else {
-            seriesList.filter { s ->
+            val filtered = seriesList.filter { s ->
                 val matchCat = selectedCategoryId == "all" ||
                         s.categoryId == selectedCategoryId ||
                         s.categoryName.contains(selectedCategoryId, ignoreCase = true)
                 val matchSearch = searchQuery.isEmpty() ||
                         s.name.contains(searchQuery, ignoreCase = true) ||
                         s.genre.contains(searchQuery, ignoreCase = true)
-                matchCat && matchSearch
+                val matchQuality = QualityDetector.matchesQualityFilter(
+                    s.quality.ifBlank { s.resolution },
+                    selectedQualityFilter
+                )
+                matchCat && matchSearch && matchQuality
+            }
+            if (sortByQuality) {
+                QualityDetector.sortMediaByQualityDescending(filtered)
+            } else {
+                filtered
             }
         }
     }
@@ -112,7 +133,7 @@ fun SeriesScreen(
 
         // Category Chips
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             item {
@@ -147,6 +168,68 @@ fun SeriesScreen(
                         color = Color.White,
                         fontSize = 12.sp,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.testTag("series_quality_filter_row")
+        ) {
+            items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
+                val isSelected = selectedQualityFilter == qOpt
+                val activeColor = when (qOpt) {
+                    "4K" -> Badge4K
+                    "FHD" -> BadgeFHD
+                    "HD" -> BadgeHD
+                    "SD" -> BadgeSD
+                    else -> KrasRed
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (isSelected) activeColor else CinemaCard)
+                        .border(
+                            width = 1.dp,
+                            color = if (isSelected) Color.White.copy(alpha = 0.3f) else GlassBorder,
+                            shape = RoundedCornerShape(14.dp)
+                        )
+                        .clickable { selectedQualityFilter = qOpt }
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                        .testTag("series_quality_chip_$qOpt")
+                ) {
+                    Text(
+                        text = if (qOpt == "All") "All Quality" else qOpt,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+
+            item(key = "sort_by_quality") {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (sortByQuality) KrasRed else CinemaCard)
+                        .border(
+                            width = 1.dp,
+                            color = if (sortByQuality) Color.White.copy(alpha = 0.35f) else GlassBorder,
+                            shape = RoundedCornerShape(14.dp)
+                        )
+                        .clickable { sortByQuality = !sortByQuality }
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                        .testTag("series_sort_by_quality_chip")
+                ) {
+                    Text(
+                        text = if (sortByQuality) "Sort by quality ↓" else "Sort by quality",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = if (sortByQuality) FontWeight.Bold else FontWeight.Medium
                     )
                 }
             }

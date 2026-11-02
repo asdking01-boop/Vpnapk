@@ -29,12 +29,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.data.local.ChannelNameNormalizer
+import com.example.data.local.QualityDetector
 import com.example.data.model.Category
+import com.example.data.model.LiveChannelOrder
 import com.example.data.model.MediaItem
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.theme.*
-
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.saveable.rememberSaveable
 
 @Composable
 fun LiveTvScreen(
@@ -45,28 +48,55 @@ fun LiveTvScreen(
     onChannelClick: (MediaItem) -> Unit,
     modifier: Modifier = Modifier,
     totalCount: Int = channels.size,
+    liveChannelOrder: LiveChannelOrder = LiveChannelOrder.SMART,
     onLoadMore: (() -> Unit)? = null,
-    onFilterChanged: ((categoryId: String, query: String) -> Unit)? = null
+    onFilterChanged: ((categoryId: String, query: String, qualityFilter: String, sortByQuality: Boolean) -> Unit)? = null
 ) {
-    var selectedCategoryId by remember { mutableStateOf("all") }
-    var searchQuery by remember { mutableStateOf("") }
+    var selectedCategoryId by rememberSaveable { mutableStateOf("all") }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var selectedQualityFilter by rememberSaveable { mutableStateOf("All") }
+    var sortByQuality by rememberSaveable { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(selectedCategoryId, searchQuery) {
-        onFilterChanged?.invoke(selectedCategoryId, searchQuery)
+    val qualityFilterOptions = remember { listOf("All", "4K", "FHD", "HD", "SD") }
+
+    LaunchedEffect(selectedCategoryId, searchQuery, selectedQualityFilter, sortByQuality) {
+        onFilterChanged?.invoke(selectedCategoryId, searchQuery, selectedQualityFilter, sortByQuality)
     }
 
-    val filteredChannels = remember(channels, selectedCategoryId, searchQuery, onFilterChanged) {
+    val filteredChannels = remember(
+        channels,
+        selectedCategoryId,
+        searchQuery,
+        selectedQualityFilter,
+        sortByQuality,
+        onFilterChanged,
+        liveChannelOrder
+    ) {
         if (onFilterChanged != null) {
+            // Room query already sorted and filtered channels according to liveChannelOrder, qualityFilter, and sortByQuality
             channels
         } else {
-            channels.filter { ch ->
-                val matchCat = selectedCategoryId == "all" ||
-                        ch.categoryId == selectedCategoryId ||
-                        ch.categoryName.contains(selectedCategoryId, ignoreCase = true)
+            val filtered = channels.filter { ch ->
+                val matchCat = when (selectedCategoryId) {
+                    "all", "live_all" -> true
+                    "favorites" -> isFavorite(ch.id)
+                    else -> ch.categoryId == selectedCategoryId ||
+                            ch.categoryName.contains(selectedCategoryId, ignoreCase = true)
+                }
                 val matchSearch = searchQuery.isEmpty() ||
                         ch.name.contains(searchQuery, ignoreCase = true)
-                matchCat && matchSearch
+                val matchQuality = QualityDetector.matchesQualityFilter(
+                    ch.quality.ifBlank { ch.resolution },
+                    selectedQualityFilter
+                )
+                matchCat && matchSearch && matchQuality
+            }
+            val ordered = ChannelNameNormalizer.sortMediaItems(filtered, liveChannelOrder)
+            if (sortByQuality) {
+                QualityDetector.sortMediaByQualityDescending(ordered)
+            } else {
+                ordered
             }
         }
     }
@@ -89,6 +119,14 @@ fun LiveTvScreen(
         ),
         label = "pulse_alpha"
     )
+
+    val distinctCategories = remember(categories) {
+        categories.filter {
+            !it.categoryId.equals("all", ignoreCase = true) &&
+                    !it.categoryId.equals("live_all", ignoreCase = true) &&
+                    !it.categoryName.equals("All Channels", ignoreCase = true)
+        }
+    }
 
     Column(
         modifier = modifier
@@ -128,10 +166,10 @@ fun LiveTvScreen(
 
         // Category Chips
         LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            item {
+            item(key = "cat_all") {
                 val isSelected = selectedCategoryId == "all"
                 Box(
                     modifier = Modifier
@@ -149,7 +187,25 @@ fun LiveTvScreen(
                 }
             }
 
-            items(categories) { cat ->
+            item(key = "cat_favorites") {
+                val isSelected = selectedCategoryId == "favorites"
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (isSelected) MaterialTheme.colorScheme.primary else CinemaCard)
+                        .clickable { selectedCategoryId = "favorites" }
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "Favorites",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+
+            items(distinctCategories, key = { it.categoryId }) { cat ->
                 val isSelected = selectedCategoryId == cat.categoryId
                 Box(
                     modifier = Modifier
@@ -163,6 +219,68 @@ fun LiveTvScreen(
                         color = Color.White,
                         fontSize = 12.sp,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.testTag("live_quality_filter_row")
+        ) {
+            items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
+                val isSelected = selectedQualityFilter == qOpt
+                val activeColor = when (qOpt) {
+                    "4K" -> Badge4K
+                    "FHD" -> BadgeFHD
+                    "HD" -> BadgeHD
+                    "SD" -> BadgeSD
+                    else -> KrasRed
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (isSelected) activeColor else CinemaCard)
+                        .border(
+                            width = 1.dp,
+                            color = if (isSelected) Color.White.copy(alpha = 0.3f) else GlassBorder,
+                            shape = RoundedCornerShape(14.dp)
+                        )
+                        .clickable { selectedQualityFilter = qOpt }
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                        .testTag("live_quality_chip_$qOpt")
+                ) {
+                    Text(
+                        text = if (qOpt == "All") "All Quality" else qOpt,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                    )
+                }
+            }
+
+            item(key = "sort_by_quality") {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (sortByQuality) KrasRed else CinemaCard)
+                        .border(
+                            width = 1.dp,
+                            color = if (sortByQuality) Color.White.copy(alpha = 0.35f) else GlassBorder,
+                            shape = RoundedCornerShape(14.dp)
+                        )
+                        .clickable { sortByQuality = !sortByQuality }
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
+                        .testTag("live_sort_by_quality_chip")
+                ) {
+                    Text(
+                        text = if (sortByQuality) "Sort by quality ↓" else "Sort by quality",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = if (sortByQuality) FontWeight.Bold else FontWeight.Medium
                     )
                 }
             }
@@ -205,6 +323,7 @@ fun LiveTvScreen(
         ) {
             items(filteredChannels, key = { it.id }) { ch ->
                 val fav = isFavorite(ch.id)
+                val effectiveQuality = ch.quality.ifBlank { ch.resolution }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -260,19 +379,27 @@ fun LiveTvScreen(
 
                     Spacer(modifier = Modifier.width(12.dp))
 
-                    // Channel Name & Info
+                    // Channel Name & Info (with ResolutionBadge right next to the channel name)
                     Column(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.Center
                     ) {
-                        Text(
-                            text = ch.name,
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = ch.name,
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            ResolutionBadge(resolution = effectiveQuality, isLive = true)
+                        }
                         Spacer(modifier = Modifier.height(3.dp))
                         Text(
                             text = ch.plot.ifEmpty { ch.categoryName },
@@ -282,17 +409,11 @@ fun LiveTvScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Spacer(modifier = Modifier.height(4.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            ResolutionBadge(resolution = ch.resolution, isLive = true)
-                            Text(
-                                text = "Channel #${ch.streamId}",
-                                color = TextMuted,
-                                fontSize = 10.sp
-                            )
-                        }
+                        Text(
+                            text = "Channel #${ch.streamId}",
+                            color = TextMuted,
+                            fontSize = 10.sp
+                        )
                     }
 
                     // Favorite Button

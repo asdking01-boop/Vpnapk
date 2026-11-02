@@ -19,6 +19,12 @@ enum class DownloadStatus {
     QUEUED, DOWNLOADING, COMPLETED, FAILED
 }
 
+enum class LiveChannelOrder(val label: String) {
+    SMART("Smart (group similar channels, numeric order)"),
+    SERVER("Server order"),
+    A_TO_Z("A to Z")
+}
+
 data class Account(
     val id: String,
     val name: String,
@@ -45,14 +51,18 @@ data class MediaItem(
     val categoryName: String = "",
     val rating: Double = 0.0,
     val year: String = "",
-    val resolution: String = "HD",
-    val quality: String = "HD",
+    val resolution: String = "",
+    val quality: String = "",
     val plot: String = "",
     val genre: String = "",
     val duration: String = "",
     val streamUrl: String = "",
     val containerExtension: String = "mp4",
-    val addedTimestamp: Long = System.currentTimeMillis()
+    val addedTimestamp: Long = System.currentTimeMillis(),
+    val groupKey: String = "",
+    val seq: Int = 0,
+    val groupOrder: Int = 0,
+    val serverOrder: Int = 0
 )
 
 data class Category(
@@ -80,7 +90,8 @@ data class Episode(
     val coverUrl: String = "",
     val streamUrl: String = "",
     val seriesId: Int = 0,
-    val seasonNumber: Int = 1
+    val seasonNumber: Int = 1,
+    val quality: String = ""
 )
 
 data class SeriesDetails(
@@ -94,7 +105,8 @@ data class SeriesDetails(
     val genre: String = "",
     val releaseDate: String = "",
     val rating: Double = 0.0,
-    val seasons: List<Season> = emptyList()
+    val seasons: List<Season> = emptyList(),
+    val quality: String = ""
 )
 
 data class WatchProgress(
@@ -124,7 +136,12 @@ data class FavoriteItem(
     val year: String,
     val categoryName: String,
     val streamUrl: String = "",
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val groupKey: String = "",
+    val seq: Int = 0,
+    val groupOrder: Int = 0,
+    val serverOrder: Int = 0,
+    val quality: String = ""
 )
 
 data class DownloadItem(
@@ -151,7 +168,8 @@ data class UserSettings(
     val parentalPin: String = "",
     val parentalEnabled: Boolean = false,
     val playIntroSound: Boolean = true,
-    val silenceNotificationsWhileWatching: Boolean = false
+    val silenceNotificationsWhileWatching: Boolean = false,
+    val liveChannelOrder: LiveChannelOrder = LiveChannelOrder.SMART
 )
 
 // Xtream Codes API DTOs

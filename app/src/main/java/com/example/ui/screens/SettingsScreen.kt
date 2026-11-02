@@ -29,6 +29,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.model.Account
 import com.example.data.model.AspectRatioMode
 import com.example.data.model.CardStyle
+import com.example.data.model.LiveChannelOrder
 import com.example.data.model.UserSettings
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.KrasLogo
@@ -195,7 +196,73 @@ fun SettingsScreen(
             }
         }
 
-        // 2. Theme & Customization
+        // 2. Live TV Settings (Channel Order)
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = CinemaCard),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
+                    .padding(bottom = 16.dp)
+                    .testTag("settings_live_tv_card")
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Live TV",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Text("Channel order", color = TextSecondary, fontSize = 12.sp)
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        LiveChannelOrder.values().forEach { orderOption ->
+                            val isSelected = userSettings.liveChannelOrder == orderOption
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isSelected) KrasRed.copy(alpha = 0.2f) else Color.White.copy(alpha = 0.06f))
+                                    .border(
+                                        1.dp,
+                                        if (isSelected) KrasRed else Color.Transparent,
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable {
+                                        onUpdateSettings(userSettings.copy(liveChannelOrder = orderOption))
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                                    .testTag("channel_order_${orderOption.name.lowercase()}"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = orderOption.label,
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                RadioButton(
+                                    selected = isSelected,
+                                    onClick = {
+                                        onUpdateSettings(userSettings.copy(liveChannelOrder = orderOption))
+                                    },
+                                    colors = RadioButtonDefaults.colors(
+                                        selectedColor = KrasRedBright,
+                                        unselectedColor = TextSecondary
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Theme & Customization
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = CinemaCard),
@@ -285,7 +352,7 @@ fun SettingsScreen(
             }
         }
 
-        // 3. Playback & Streaming Engine
+        // 4. Playback & Streaming Engine
         item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = CinemaCard),

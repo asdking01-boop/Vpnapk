@@ -20,9 +20,11 @@ val AccentEmerald = Color(0xFF00E676)
 val AccentPurple = Color(0xFFD500F9)
 
 // Badges
+val Badge8K = Color(0xFFFFB300)
 val Badge4K = Color(0xFF8A2BE2)
 val BadgeFHD = Color(0xFF007ACC)
 val BadgeHD = Color(0xFF2E7D32)
+val BadgeSD = Color(0xFF616161)
 val RatingYellow = Color(0xFFFFC107)
 
 // Glassmorphism overlays

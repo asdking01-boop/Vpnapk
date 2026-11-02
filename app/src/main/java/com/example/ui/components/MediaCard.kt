@@ -17,6 +17,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,11 +30,26 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.data.local.QualityDetector
 import com.example.data.model.CardStyle
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
 import com.example.data.model.WatchProgress
 import com.example.ui.theme.*
+
+private fun resolveItemQuality(item: MediaItem): String {
+    val explicit = item.quality.ifBlank { item.resolution }
+    return if (explicit.isNotBlank()) {
+        val parsed = QualityDetector.parseStoredQuality(explicit)
+        if (parsed.badge.isNotEmpty() || parsed.extraTags.isNotEmpty()) {
+            parsed.toStorageString()
+        } else {
+            QualityDetector.detectFromNameAndCategory(item.name, item.categoryName, explicit)
+        }
+    } else {
+        QualityDetector.detectFromNameAndCategory(item.name, item.categoryName)
+    }
+}
 
 @Composable
 fun MediaCard(
@@ -62,6 +78,7 @@ private fun PosterCard(
     watchProgress: WatchProgress?,
     modifier: Modifier = Modifier
 ) {
+    val effectiveQuality = resolveItemQuality(item)
     Box(
         modifier = modifier
             .width(135.dp)
@@ -121,8 +138,14 @@ private fun PosterCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Resolution badge
-            ResolutionBadge(resolution = item.resolution, isLive = item.type == MediaType.LIVE)
+            // Resolution badge (empty Box preserves SpaceBetween layout if no badge is known)
+            Box(modifier = Modifier.weight(1f, fill = false)) {
+                ResolutionBadge(
+                    resolution = effectiveQuality,
+                    isLive = item.type == MediaType.LIVE,
+                    maxExtraTags = 1
+                )
+            }
 
             // Favorite toggle
             if (onToggleFavorite != null) {
@@ -216,6 +239,7 @@ private fun WideCard(
     watchProgress: WatchProgress?,
     modifier: Modifier = Modifier
 ) {
+    val effectiveQuality = resolveItemQuality(item)
     Box(
         modifier = modifier
             .width(230.dp)
@@ -272,7 +296,12 @@ private fun WideCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ResolutionBadge(resolution = item.resolution, isLive = item.type == MediaType.LIVE)
+            Box(modifier = Modifier.weight(1f, fill = false)) {
+                ResolutionBadge(
+                    resolution = effectiveQuality,
+                    isLive = item.type == MediaType.LIVE
+                )
+            }
 
             if (onToggleFavorite != null) {
                 Box(
@@ -356,6 +385,7 @@ private fun CompactCard(
     watchProgress: WatchProgress?,
     modifier: Modifier = Modifier
 ) {
+    val effectiveQuality = resolveItemQuality(item)
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -425,14 +455,24 @@ private fun CompactCard(
                 .fillMaxHeight(),
             verticalArrangement = Arrangement.Center
         ) {
-            Text(
-                text = item.name,
-                color = Color.White,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = item.name,
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                ResolutionBadge(
+                    resolution = effectiveQuality,
+                    isLive = item.type == MediaType.LIVE
+                )
+            }
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = item.genre.ifEmpty { item.categoryName },
@@ -446,7 +486,6 @@ private fun CompactCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                ResolutionBadge(resolution = item.resolution, isLive = item.type == MediaType.LIVE)
                 if (item.year.isNotEmpty()) {
                     Text(text = item.year, color = TextMuted, fontSize = 10.sp)
                 }
@@ -482,6 +521,7 @@ private fun BillboardCard(
     watchProgress: WatchProgress?,
     modifier: Modifier = Modifier
 ) {
+    val effectiveQuality = resolveItemQuality(item)
     Box(
         modifier = modifier
             .width(280.dp)
@@ -536,7 +576,10 @@ private fun BillboardCard(
                 .align(Alignment.BottomStart)
                 .padding(12.dp)
         ) {
-            ResolutionBadge(resolution = item.resolution, isLive = item.type == MediaType.LIVE)
+            ResolutionBadge(
+                resolution = effectiveQuality,
+                isLive = item.type == MediaType.LIVE
+            )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = item.name,
@@ -557,37 +600,78 @@ private fun BillboardCard(
     }
 }
 
+/**
+ * Renders the canonical resolution/quality badge ("8K", "4K UHD", "FHD", "HD", "SD")
+ * with distinct colors per level (8K gold, 4K UHD purple, FHD blue, HD green, SD gray)
+ * and optional small extra tags ("HEVC", "50 FPS", "60 FPS", "5.1").
+ * If nothing is known, renders nothing (never a wrong badge).
+ */
 @Composable
-fun ResolutionBadge(resolution: String, isLive: Boolean = false) {
-    val (bgColor, textColor, label) = when {
-        isLive -> Triple(KrasRed, Color.White, "LIVE")
-        resolution.contains("4K", ignoreCase = true) -> Triple(Badge4K, Color.White, "4K UHD")
-        resolution.contains("FHD", ignoreCase = true) || resolution.contains("1080", ignoreCase = true) -> Triple(BadgeFHD, Color.White, "FHD")
-        else -> Triple(Color(0xFF333333), Color.LightGray, resolution.ifEmpty { "HD" })
+fun ResolutionBadge(
+    resolution: String,
+    isLive: Boolean = false,
+    showExtraTags: Boolean = true,
+    maxExtraTags: Int = 3,
+    modifier: Modifier = Modifier
+) {
+    val parsed = remember(resolution) {
+        QualityDetector.parseStoredQuality(resolution)
+    }
+
+    if (parsed.badge.isEmpty() && (!showExtraTags || parsed.extraTags.isEmpty())) {
+        return
     }
 
     Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(bgColor)
-            .padding(horizontal = 5.dp, vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        if (isLive) {
+        if (parsed.badge.isNotEmpty()) {
+            val (bgColor, textColor, label) = when (parsed.badge) {
+                "8K" -> Triple(Badge8K, Color.Black, "8K")
+                "4K UHD" -> Triple(Badge4K, Color.White, "4K UHD")
+                "FHD" -> Triple(BadgeFHD, Color.White, "FHD")
+                "HD" -> Triple(BadgeHD, Color.White, "HD")
+                "SD" -> Triple(BadgeSD, Color.White, "SD")
+                else -> Triple(BadgeHD, Color.White, parsed.badge)
+            }
+
             Box(
                 modifier = Modifier
-                    .size(5.dp)
-                    .clip(CircleShape)
-                    .background(Color.White)
-            )
-            Spacer(modifier = Modifier.width(3.dp))
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(bgColor)
+                    .padding(horizontal = 5.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = label,
+                    color = textColor,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.3.sp,
+                    maxLines = 1
+                )
+            }
         }
-        Text(
-            text = label,
-            color = textColor,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.4.sp
-        )
+
+        if (showExtraTags && parsed.extraTags.isNotEmpty()) {
+            parsed.extraTags.take(maxExtraTags).forEach { tag ->
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xCC262626))
+                        .border(0.5.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.5.dp)
+                ) {
+                    Text(
+                        text = tag,
+                        color = Color(0xFFE0E0E0),
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
     }
 }

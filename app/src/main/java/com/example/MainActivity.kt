@@ -97,6 +97,8 @@ class MainActivity : ComponentActivity() {
                 val currentSeriesDetails by viewModel.currentSeriesDetails.collectAsState()
                 val liveStreams by viewModel.liveStreams.collectAsState()
                 val liveCategories by viewModel.liveCategories.collectAsState()
+                val favorites by viewModel.favorites.collectAsState()
+                val searchResults by viewModel.searchResults.collectAsState()
                 val watchHistory by viewModel.watchHistory.collectAsState()
                 val isRefreshing by viewModel.isRefreshing.collectAsState()
                 val isLoading by viewModel.isLoading.collectAsState()
@@ -255,9 +257,9 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 } else if (isSearchOpen) {
-                    // Full Screen Global Search
-                    val allMedia = remember(movies, series, liveStreams) {
-                        movies + series + liveStreams
+                    // Full Screen Global Search (Room-backed & LiveChannelOrder-sorted)
+                    val allMedia = remember(searchResults, movies, series, liveStreams) {
+                        if (searchResults.isNotEmpty()) searchResults else (movies + series + liveStreams)
                     }
                     SearchScreen(
                         allMedia = allMedia,
@@ -271,7 +273,9 @@ class MainActivity : ComponentActivity() {
                                 viewModel.startPlayback(item)
                             }
                         },
-                        onClose = { isSearchOpen = false }
+                        onClose = { isSearchOpen = false },
+                        liveChannelOrder = userSettings.liveChannelOrder,
+                        onSearchQueryChanged = { q -> viewModel.performSearch(q) }
                     )
                 } else {
                     // Main App Shell with Bottom Navigation
@@ -315,7 +319,8 @@ class MainActivity : ComponentActivity() {
                                     onRefreshClick = { viewModel.refreshContent() },
                                     isRefreshing = isRefreshing,
                                     isLoading = isLoading,
-                                    cardStyle = userSettings.cardStyle
+                                    cardStyle = userSettings.cardStyle,
+                                    favorites = favorites
                                 )
 
                                 NavScreen.MOVIES -> MoviesScreen(
@@ -328,8 +333,8 @@ class MainActivity : ComponentActivity() {
                                     cardStyle = userSettings.cardStyle,
                                     totalCount = totalMoviesCount,
                                     onLoadMore = { viewModel.loadMoreMovies() },
-                                    onFilterChanged = { cat, q, rating, yr ->
-                                        viewModel.filterMovies(cat, q, rating, yr)
+                                    onFilterChanged = { cat, q, rating, yr, qFilter, sortQ ->
+                                        viewModel.filterMovies(cat, q, rating, yr, qFilter, sortQ)
                                     }
                                 )
 
@@ -345,8 +350,8 @@ class MainActivity : ComponentActivity() {
                                     cardStyle = userSettings.cardStyle,
                                     totalCount = totalSeriesCount,
                                     onLoadMore = { viewModel.loadMoreSeries() },
-                                    onFilterChanged = { cat, q, rating, yr ->
-                                        viewModel.filterSeries(cat, q, rating, yr)
+                                    onFilterChanged = { cat, q, rating, yr, qFilter, sortQ ->
+                                        viewModel.filterSeries(cat, q, rating, yr, qFilter, sortQ)
                                     }
                                 )
 
@@ -357,9 +362,10 @@ class MainActivity : ComponentActivity() {
                                     onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                                     onChannelClick = { channel -> viewModel.startPlayback(channel) },
                                     totalCount = totalLiveCount,
+                                    liveChannelOrder = userSettings.liveChannelOrder,
                                     onLoadMore = { viewModel.loadMoreLive() },
-                                    onFilterChanged = { cat, q ->
-                                        viewModel.filterLive(cat, q)
+                                    onFilterChanged = { cat, q, qFilter, sortQ ->
+                                        viewModel.filterLive(cat, q, qFilter, sortQ)
                                     }
                                 )
 

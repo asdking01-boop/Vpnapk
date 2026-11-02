@@ -2,6 +2,8 @@ package com.example.data.api
 
 import android.util.JsonReader
 import android.util.JsonToken
+import com.example.data.local.ChannelNameNormalizer
+import com.example.data.local.QualityDetector
 import com.example.data.local.entity.CategoryEntity
 import com.example.data.local.entity.MediaItemEntity
 import com.example.data.model.*
@@ -209,6 +211,7 @@ class XtreamClient {
     suspend fun streamLiveStreams(
         account: Account,
         batchSize: Int = 500,
+        categoryMap: Map<String, String> = emptyMap(),
         onBatch: suspend (List<MediaItemEntity>) -> Unit
     ): Int = withContext(Dispatchers.IO) {
         val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_live_streams"
@@ -216,6 +219,7 @@ class XtreamClient {
         val base = normalizeUrl(account.serverUrl)
         var totalCount = 0
         val batch = ArrayList<MediaItemEntity>(batchSize)
+        val groupingTracker = ChannelNameNormalizer.ChannelGroupingTracker()
 
         try {
             httpClient.newCall(request).execute().use { response ->
@@ -263,7 +267,10 @@ class XtreamClient {
 
                             if (streamId > 0) {
                                 val channelName = name.ifBlank { "Channel $streamId" }
+                                val categoryName = categoryMap[categoryId].orEmpty()
+                                val detectedQuality = QualityDetector.detectFromNameAndCategory(channelName, categoryName)
                                 val streamUrl = "$base/live/${account.username}/${account.password}/$streamId.m3u8"
+                                val orderInfo = groupingTracker.nextChannel(channelName)
                                 batch.add(
                                     MediaItemEntity(
                                         id = "live_$streamId",
@@ -275,14 +282,18 @@ class XtreamClient {
                                         posterUrl = streamIcon,
                                         backdropUrl = streamIcon,
                                         categoryId = categoryId,
-                                        categoryName = "",
+                                        categoryName = categoryName,
                                         rating = 8.0,
                                         year = "2024",
-                                        resolution = "FHD",
-                                        quality = "Live",
+                                        resolution = detectedQuality,
+                                        quality = detectedQuality,
                                         streamUrl = streamUrl,
                                         containerExtension = "m3u8",
-                                        addedTimestamp = System.currentTimeMillis()
+                                        addedTimestamp = System.currentTimeMillis(),
+                                        groupKey = orderInfo.groupKey,
+                                        seq = orderInfo.seq,
+                                        groupOrder = orderInfo.groupOrder,
+                                        serverOrder = orderInfo.serverOrder
                                     )
                                 )
                                 totalCount++
@@ -314,6 +325,7 @@ class XtreamClient {
     suspend fun streamVodStreams(
         account: Account,
         batchSize: Int = 500,
+        categoryMap: Map<String, String> = emptyMap(),
         onBatch: suspend (List<MediaItemEntity>) -> Unit
     ): Int = withContext(Dispatchers.IO) {
         val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_vod_streams"
@@ -321,6 +333,7 @@ class XtreamClient {
         val base = normalizeUrl(account.serverUrl)
         var totalCount = 0
         val batch = ArrayList<MediaItemEntity>(batchSize)
+        val groupingTracker = ChannelNameNormalizer.ChannelGroupingTracker()
 
         try {
             httpClient.newCall(request).execute().use { response ->
@@ -397,7 +410,10 @@ class XtreamClient {
 
                             if (streamId > 0) {
                                 val movieName = name.ifBlank { "Movie $streamId" }
+                                val categoryName = categoryMap[categoryId].orEmpty()
+                                val detectedQuality = QualityDetector.detectFromNameAndCategory(movieName, categoryName)
                                 val streamUrl = "$base/movie/${account.username}/${account.password}/$streamId.$containerExt"
+                                val orderInfo = groupingTracker.nextChannel(movieName)
                                 batch.add(
                                     MediaItemEntity(
                                         id = "vod_$streamId",
@@ -409,14 +425,18 @@ class XtreamClient {
                                         posterUrl = streamIcon,
                                         backdropUrl = streamIcon,
                                         categoryId = categoryId,
-                                        categoryName = "",
+                                        categoryName = categoryName,
                                         rating = rating,
                                         year = year.ifBlank { "2024" },
-                                        resolution = if (rating > 8.0) "4K" else "FHD",
-                                        quality = if (rating > 8.0) "HDR" else "HD",
+                                        resolution = detectedQuality,
+                                        quality = detectedQuality,
                                         streamUrl = streamUrl,
                                         containerExtension = containerExt,
-                                        addedTimestamp = addedTime
+                                        addedTimestamp = addedTime,
+                                        groupKey = orderInfo.groupKey,
+                                        seq = orderInfo.seq,
+                                        groupOrder = orderInfo.groupOrder,
+                                        serverOrder = orderInfo.serverOrder
                                     )
                                 )
                                 totalCount++
@@ -448,12 +468,14 @@ class XtreamClient {
     suspend fun streamSeries(
         account: Account,
         batchSize: Int = 500,
+        categoryMap: Map<String, String> = emptyMap(),
         onBatch: suspend (List<MediaItemEntity>) -> Unit
     ): Int = withContext(Dispatchers.IO) {
         val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_series"
         val request = Request.Builder().url(url).build()
         var totalCount = 0
         val batch = ArrayList<MediaItemEntity>(batchSize)
+        val groupingTracker = ChannelNameNormalizer.ChannelGroupingTracker()
 
         try {
             httpClient.newCall(request).execute().use { response ->
@@ -514,6 +536,9 @@ class XtreamClient {
 
                             if (seriesId > 0) {
                                 val seriesName = name.ifBlank { "Series $seriesId" }
+                                val categoryName = categoryMap[categoryId].orEmpty()
+                                val detectedQuality = QualityDetector.detectFromNameAndCategory(seriesName, categoryName)
+                                val orderInfo = groupingTracker.nextChannel(seriesName)
                                 batch.add(
                                     MediaItemEntity(
                                         id = "series_$seriesId",
@@ -525,14 +550,18 @@ class XtreamClient {
                                         posterUrl = cover,
                                         backdropUrl = cover,
                                         categoryId = categoryId,
-                                        categoryName = "",
+                                        categoryName = categoryName,
                                         rating = rating,
                                         year = year,
-                                        resolution = "4K",
-                                        quality = "Dolby Atmos",
+                                        resolution = detectedQuality,
+                                        quality = detectedQuality,
                                         streamUrl = "",
                                         containerExtension = "mp4",
-                                        addedTimestamp = System.currentTimeMillis()
+                                        addedTimestamp = System.currentTimeMillis(),
+                                        groupKey = orderInfo.groupKey,
+                                        seq = orderInfo.seq,
+                                        groupOrder = orderInfo.groupOrder,
+                                        serverOrder = orderInfo.serverOrder
                                     )
                                 )
                                 totalCount++
@@ -560,6 +589,89 @@ class XtreamClient {
         totalCount
     }
 
+    /**
+     * Step 2b: Extracts real video width, height, codec, bitrate, framerate, and audio channels
+     * from a JSON "info" object returned by get_vod_info or get_series_info.
+     */
+    fun parseVideoAudioSpecsFromInfo(infoObj: JSONObject?, fallbackQuality: String = ""): String {
+        if (infoObj == null) return fallbackQuality
+        return try {
+            val videoObj = infoObj.optJSONObject("video")
+            val audioObj = infoObj.optJSONObject("audio")
+
+            val width = videoObj?.optInt("width", 0) ?: infoObj.optInt("width", 0)
+            val rawHeight = videoObj?.optInt("height", 0) ?: infoObj.optInt("height", 0)
+            val effectiveHeight = when {
+                rawHeight > 0 -> rawHeight
+                width >= 7680 -> 4320
+                width >= 3840 -> 2160
+                width >= 1920 -> 1080
+                width >= 1280 -> 720
+                width > 0 -> 480
+                else -> 0
+            }
+
+            val codecName = videoObj?.optString("codec_name", "")?.ifBlank {
+                videoObj.optString("codec_long_name", "")
+            } ?: infoObj.optString("video_codec", "")
+
+            val fpsStr = videoObj?.optString("avg_frame_rate", "")?.ifBlank {
+                videoObj.optString("r_frame_rate", "")
+            } ?: infoObj.optString("framerate", "")
+            val fps = QualityDetector.parseFrameRateString(fpsStr)
+
+            val audioChannels = audioObj?.optInt("channels", 0) ?: 0
+            val audioLayout = audioObj?.optString("channel_layout", "") ?: ""
+
+            if (effectiveHeight > 0 || codecName.isNotBlank() || fps > 0f || audioChannels > 0) {
+                QualityDetector.buildFromRealSpecs(
+                    height = effectiveHeight,
+                    frameRate = fps,
+                    codecOrMime = codecName,
+                    audioChannels = audioChannels,
+                    audioLayout = audioLayout,
+                    fallbackQuality = fallbackQuality
+                )
+            } else {
+                fallbackQuality
+            }
+        } catch (e: Exception) {
+            fallbackQuality
+        }
+    }
+
+    /**
+     * Step 2b: Fetches real video resolution/codec/framerate for a movie from get_vod_info.
+     */
+    suspend fun getVodVideoInfo(
+        account: Account,
+        vodId: Int,
+        fallbackQuality: String = ""
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_vod_info&vod_id=$vodId"
+            val request = Request.Builder().url(url).build()
+            val body = httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+            }
+            if (!body.startsWith("{")) return@withContext null
+
+            val json = try { JSONObject(body) } catch (e: Exception) { return@withContext null }
+            val info = json.optJSONObject("info")
+            val movieData = json.optJSONObject("movie_data")
+
+            val nameHint = movieData?.optString("name", "") ?: info?.optString("name", "") ?: ""
+            val baseFallback = fallbackQuality.ifBlank {
+                QualityDetector.detectFromNameAndCategory(nameHint)
+            }
+
+            val detected = parseVideoAudioSpecsFromInfo(info, baseFallback)
+            detected.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     // --- On-Demand Series Details (Fetched per series, not for the whole catalog) ---
     suspend fun getSeriesDetails(account: Account, seriesId: Int): SeriesDetails? = withContext(Dispatchers.IO) {
         try {
@@ -583,9 +695,15 @@ class XtreamClient {
             val releaseDate = info.optString("releaseDate", "")
             val rating = info.optDouble("rating", 8.2)
 
+            val seriesBaseQuality = parseVideoAudioSpecsFromInfo(
+                info,
+                QualityDetector.detectFromNameAndCategory(name, genre)
+            )
+
             val seasonsList = mutableListOf<Season>()
             val keys = seasonsJson.keys()
             val base = normalizeUrl(account.serverUrl)
+            var bestEpisodeQuality = seriesBaseQuality
 
             while (keys.hasNext()) {
                 val seasonNumStr = keys.next()
@@ -604,6 +722,14 @@ class XtreamClient {
                         val epPlot = epInfo?.optString("plot", "") ?: ""
                         val duration = epInfo?.optInt("duration_secs", 2700) ?: 2700
 
+                        val epFallback = QualityDetector.detectFromNameAndCategory(epTitle, name, seriesBaseQuality)
+                        val epQuality = parseVideoAudioSpecsFromInfo(epInfo, epFallback)
+                        if (QualityDetector.rankForBadge(epQuality) > QualityDetector.rankForBadge(bestEpisodeQuality)) {
+                            bestEpisodeQuality = epQuality
+                        } else if (bestEpisodeQuality.isBlank() && epQuality.isNotBlank()) {
+                            bestEpisodeQuality = epQuality
+                        }
+
                         val streamUrl = "$base/series/${account.username}/${account.password}/$epId.$ext"
 
                         epList.add(
@@ -617,7 +743,8 @@ class XtreamClient {
                                 rating = 8.0,
                                 streamUrl = streamUrl,
                                 seriesId = seriesId,
-                                seasonNumber = seasonNum
+                                seasonNumber = seasonNum,
+                                quality = epQuality
                             )
                         )
                     } catch (e: Exception) {
@@ -645,7 +772,8 @@ class XtreamClient {
                 genre = genre,
                 releaseDate = releaseDate,
                 rating = rating,
-                seasons = seasonsList.sortedBy { it.seasonNumber }
+                seasons = seasonsList.sortedBy { it.seasonNumber },
+                quality = bestEpisodeQuality
             )
         } catch (e: Exception) {
             e.printStackTrace()

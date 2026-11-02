@@ -4,7 +4,6 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import androidx.room.Transaction
 import com.example.data.local.entity.CategoryEntity
 import com.example.data.local.entity.MediaItemEntity
 
@@ -33,7 +32,225 @@ interface MediaDao {
     @Query("SELECT * FROM media_items WHERE accountId = :accountId AND type = :type AND (categoryId = :categoryId OR :categoryId = 'all') ORDER BY rating DESC, addedTimestamp DESC LIMIT :limit")
     suspend fun getByCategory(accountId: String, type: String, categoryId: String, limit: Int = 15): List<MediaItemEntity>
 
-    // Paged & Filtered Queries for Movies, Series, Live TV
+    // --- Quality Update (when real video resolution is detected from VOD/Series info or ExoPlayer) ---
+    @Query("UPDATE media_items SET quality = :quality, resolution = :quality WHERE id = :id")
+    suspend fun updateMediaQuality(id: String, quality: String)
+
+    // --- Live TV Paged Queries (Sorted in Room SQLite via Indexes) ---
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND type = 'LIVE' 
+          AND (:categoryId = 'all' OR categoryId = :categoryId)
+          AND (:query = '' OR name LIKE '%' || :query || '%' OR categoryName LIKE '%' || :query || '%')
+          AND (
+              :qualityFilter = 'All'
+              OR (:qualityFilter = '8K' AND (quality = '8K' OR quality LIKE '8K |%'))
+              OR ((:qualityFilter = '4K' OR :qualityFilter = '4K UHD') AND (quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%'))
+              OR (:qualityFilter = 'FHD' AND (quality = 'FHD' OR quality LIKE 'FHD |%'))
+              OR (:qualityFilter = 'HD' AND (quality = 'HD' OR quality LIKE 'HD |%'))
+              OR (:qualityFilter = 'SD' AND (quality = 'SD' OR quality LIKE 'SD |%'))
+          )
+        ORDER BY 
+          CASE
+              WHEN :sortByQuality = 0 THEN 0
+              WHEN quality = '8K' OR quality LIKE '8K |%' THEN 5
+              WHEN quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%' THEN 4
+              WHEN quality = 'FHD' OR quality LIKE 'FHD |%' THEN 3
+              WHEN quality = 'HD' OR quality LIKE 'HD |%' THEN 2
+              WHEN quality = 'SD' OR quality LIKE 'SD |%' THEN 1
+              ELSE 0
+          END DESC,
+          groupOrder ASC, seq ASC, name ASC 
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun queryLiveSmartPaged(
+        accountId: String,
+        categoryId: String,
+        query: String,
+        limit: Int,
+        offset: Int,
+        qualityFilter: String = "All",
+        sortByQuality: Boolean = false
+    ): List<MediaItemEntity>
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND type = 'LIVE' 
+          AND (:categoryId = 'all' OR categoryId = :categoryId)
+          AND (:query = '' OR name LIKE '%' || :query || '%' OR categoryName LIKE '%' || :query || '%')
+          AND (
+              :qualityFilter = 'All'
+              OR (:qualityFilter = '8K' AND (quality = '8K' OR quality LIKE '8K |%'))
+              OR ((:qualityFilter = '4K' OR :qualityFilter = '4K UHD') AND (quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%'))
+              OR (:qualityFilter = 'FHD' AND (quality = 'FHD' OR quality LIKE 'FHD |%'))
+              OR (:qualityFilter = 'HD' AND (quality = 'HD' OR quality LIKE 'HD |%'))
+              OR (:qualityFilter = 'SD' AND (quality = 'SD' OR quality LIKE 'SD |%'))
+          )
+        ORDER BY 
+          CASE
+              WHEN :sortByQuality = 0 THEN 0
+              WHEN quality = '8K' OR quality LIKE '8K |%' THEN 5
+              WHEN quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%' THEN 4
+              WHEN quality = 'FHD' OR quality LIKE 'FHD |%' THEN 3
+              WHEN quality = 'HD' OR quality LIKE 'HD |%' THEN 2
+              WHEN quality = 'SD' OR quality LIKE 'SD |%' THEN 1
+              ELSE 0
+          END DESC,
+          serverOrder ASC, name ASC 
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun queryLiveServerPaged(
+        accountId: String,
+        categoryId: String,
+        query: String,
+        limit: Int,
+        offset: Int,
+        qualityFilter: String = "All",
+        sortByQuality: Boolean = false
+    ): List<MediaItemEntity>
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND type = 'LIVE' 
+          AND (:categoryId = 'all' OR categoryId = :categoryId)
+          AND (:query = '' OR name LIKE '%' || :query || '%' OR categoryName LIKE '%' || :query || '%')
+          AND (
+              :qualityFilter = 'All'
+              OR (:qualityFilter = '8K' AND (quality = '8K' OR quality LIKE '8K |%'))
+              OR ((:qualityFilter = '4K' OR :qualityFilter = '4K UHD') AND (quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%'))
+              OR (:qualityFilter = 'FHD' AND (quality = 'FHD' OR quality LIKE 'FHD |%'))
+              OR (:qualityFilter = 'HD' AND (quality = 'HD' OR quality LIKE 'HD |%'))
+              OR (:qualityFilter = 'SD' AND (quality = 'SD' OR quality LIKE 'SD |%'))
+          )
+        ORDER BY 
+          CASE
+              WHEN :sortByQuality = 0 THEN 0
+              WHEN quality = '8K' OR quality LIKE '8K |%' THEN 5
+              WHEN quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%' THEN 4
+              WHEN quality = 'FHD' OR quality LIKE 'FHD |%' THEN 3
+              WHEN quality = 'HD' OR quality LIKE 'HD |%' THEN 2
+              WHEN quality = 'SD' OR quality LIKE 'SD |%' THEN 1
+              ELSE 0
+          END DESC,
+          groupKey ASC, seq ASC, name ASC 
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun queryLiveAZPaged(
+        accountId: String,
+        categoryId: String,
+        query: String,
+        limit: Int,
+        offset: Int,
+        qualityFilter: String = "All",
+        sortByQuality: Boolean = false
+    ): List<MediaItemEntity>
+
+    // --- Live TV Favorites Queries (Sorted in Room SQLite) ---
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND id IN (:ids)
+          AND (:query = '' OR name LIKE '%' || :query || '%')
+          AND (
+              :qualityFilter = 'All'
+              OR (:qualityFilter = '8K' AND (quality = '8K' OR quality LIKE '8K |%'))
+              OR ((:qualityFilter = '4K' OR :qualityFilter = '4K UHD') AND (quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%'))
+              OR (:qualityFilter = 'FHD' AND (quality = 'FHD' OR quality LIKE 'FHD |%'))
+              OR (:qualityFilter = 'HD' AND (quality = 'HD' OR quality LIKE 'HD |%'))
+              OR (:qualityFilter = 'SD' AND (quality = 'SD' OR quality LIKE 'SD |%'))
+          )
+        ORDER BY 
+          CASE
+              WHEN :sortByQuality = 0 THEN 0
+              WHEN quality = '8K' OR quality LIKE '8K |%' THEN 5
+              WHEN quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%' THEN 4
+              WHEN quality = 'FHD' OR quality LIKE 'FHD |%' THEN 3
+              WHEN quality = 'HD' OR quality LIKE 'HD |%' THEN 2
+              WHEN quality = 'SD' OR quality LIKE 'SD |%' THEN 1
+              ELSE 0
+          END DESC,
+          groupOrder ASC, seq ASC, name ASC
+    """)
+    suspend fun getFavoritesSmart(
+        accountId: String,
+        ids: List<String>,
+        query: String = "",
+        qualityFilter: String = "All",
+        sortByQuality: Boolean = false
+    ): List<MediaItemEntity>
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND id IN (:ids)
+          AND (:query = '' OR name LIKE '%' || :query || '%')
+          AND (
+              :qualityFilter = 'All'
+              OR (:qualityFilter = '8K' AND (quality = '8K' OR quality LIKE '8K |%'))
+              OR ((:qualityFilter = '4K' OR :qualityFilter = '4K UHD') AND (quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%'))
+              OR (:qualityFilter = 'FHD' AND (quality = 'FHD' OR quality LIKE 'FHD |%'))
+              OR (:qualityFilter = 'HD' AND (quality = 'HD' OR quality LIKE 'HD |%'))
+              OR (:qualityFilter = 'SD' AND (quality = 'SD' OR quality LIKE 'SD |%'))
+          )
+        ORDER BY 
+          CASE
+              WHEN :sortByQuality = 0 THEN 0
+              WHEN quality = '8K' OR quality LIKE '8K |%' THEN 5
+              WHEN quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%' THEN 4
+              WHEN quality = 'FHD' OR quality LIKE 'FHD |%' THEN 3
+              WHEN quality = 'HD' OR quality LIKE 'HD |%' THEN 2
+              WHEN quality = 'SD' OR quality LIKE 'SD |%' THEN 1
+              ELSE 0
+          END DESC,
+          serverOrder ASC, name ASC
+    """)
+    suspend fun getFavoritesServer(
+        accountId: String,
+        ids: List<String>,
+        query: String = "",
+        qualityFilter: String = "All",
+        sortByQuality: Boolean = false
+    ): List<MediaItemEntity>
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND id IN (:ids)
+          AND (:query = '' OR name LIKE '%' || :query || '%')
+          AND (
+              :qualityFilter = 'All'
+              OR (:qualityFilter = '8K' AND (quality = '8K' OR quality LIKE '8K |%'))
+              OR ((:qualityFilter = '4K' OR :qualityFilter = '4K UHD') AND (quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%'))
+              OR (:qualityFilter = 'FHD' AND (quality = 'FHD' OR quality LIKE 'FHD |%'))
+              OR (:qualityFilter = 'HD' AND (quality = 'HD' OR quality LIKE 'HD |%'))
+              OR (:qualityFilter = 'SD' AND (quality = 'SD' OR quality LIKE 'SD |%'))
+          )
+        ORDER BY 
+          CASE
+              WHEN :sortByQuality = 0 THEN 0
+              WHEN quality = '8K' OR quality LIKE '8K |%' THEN 5
+              WHEN quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%' THEN 4
+              WHEN quality = 'FHD' OR quality LIKE 'FHD |%' THEN 3
+              WHEN quality = 'HD' OR quality LIKE 'HD |%' THEN 2
+              WHEN quality = 'SD' OR quality LIKE 'SD |%' THEN 1
+              ELSE 0
+          END DESC,
+          groupKey ASC, seq ASC, name ASC
+    """)
+    suspend fun getFavoritesAZ(
+        accountId: String,
+        ids: List<String>,
+        query: String = "",
+        qualityFilter: String = "All",
+        sortByQuality: Boolean = false
+    ): List<MediaItemEntity>
+
+    // --- Paged & Filtered Queries for Movies & Series ---
     @Query("""
         SELECT * FROM media_items 
         WHERE accountId = :accountId 
@@ -42,7 +259,25 @@ interface MediaDao {
           AND (:query = '' OR name LIKE '%' || :query || '%')
           AND rating >= :minRating
           AND (:year = 'All' OR year = :year)
-        ORDER BY rating DESC, addedTimestamp DESC 
+          AND (
+              :qualityFilter = 'All'
+              OR (:qualityFilter = '8K' AND (quality = '8K' OR quality LIKE '8K |%'))
+              OR ((:qualityFilter = '4K' OR :qualityFilter = '4K UHD') AND (quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%'))
+              OR (:qualityFilter = 'FHD' AND (quality = 'FHD' OR quality LIKE 'FHD |%'))
+              OR (:qualityFilter = 'HD' AND (quality = 'HD' OR quality LIKE 'HD |%'))
+              OR (:qualityFilter = 'SD' AND (quality = 'SD' OR quality LIKE 'SD |%'))
+          )
+        ORDER BY 
+          CASE
+              WHEN :sortByQuality = 0 THEN 0
+              WHEN quality = '8K' OR quality LIKE '8K |%' THEN 5
+              WHEN quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%' THEN 4
+              WHEN quality = 'FHD' OR quality LIKE 'FHD |%' THEN 3
+              WHEN quality = 'HD' OR quality LIKE 'HD |%' THEN 2
+              WHEN quality = 'SD' OR quality LIKE 'SD |%' THEN 1
+              ELSE 0
+          END DESC,
+          rating DESC, addedTimestamp DESC, name ASC 
         LIMIT :limit OFFSET :offset
     """)
     suspend fun queryMediaPaged(
@@ -53,7 +288,9 @@ interface MediaDao {
         minRating: Double,
         year: String,
         limit: Int,
-        offset: Int
+        offset: Int,
+        qualityFilter: String = "All",
+        sortByQuality: Boolean = false
     ): List<MediaItemEntity>
 
     @Query("""
@@ -64,6 +301,14 @@ interface MediaDao {
           AND (:query = '' OR name LIKE '%' || :query || '%')
           AND rating >= :minRating
           AND (:year = 'All' OR year = :year)
+          AND (
+              :qualityFilter = 'All'
+              OR (:qualityFilter = '8K' AND (quality = '8K' OR quality LIKE '8K |%'))
+              OR ((:qualityFilter = '4K' OR :qualityFilter = '4K UHD') AND (quality = '4K UHD' OR quality LIKE '4K UHD |%' OR quality = '4K' OR quality LIKE '4K |%'))
+              OR (:qualityFilter = 'FHD' AND (quality = 'FHD' OR quality LIKE 'FHD |%'))
+              OR (:qualityFilter = 'HD' AND (quality = 'HD' OR quality LIKE 'HD |%'))
+              OR (:qualityFilter = 'SD' AND (quality = 'SD' OR quality LIKE 'SD |%'))
+          )
     """)
     suspend fun countMedia(
         accountId: String,
@@ -71,17 +316,44 @@ interface MediaDao {
         categoryId: String,
         query: String,
         minRating: Double,
-        year: String
+        year: String,
+        qualityFilter: String = "All"
     ): Int
 
     @Query("SELECT * FROM media_items WHERE id = :id LIMIT 1")
     suspend fun getItemById(id: String): MediaItemEntity?
 
-    @Query("SELECT * FROM media_items WHERE id IN (:ids)")
+    @Query("SELECT * FROM media_items WHERE id IN (:ids) ORDER BY groupOrder ASC, seq ASC, name ASC")
     suspend fun getItemsByIds(ids: List<String>): List<MediaItemEntity>
 
-    @Query("SELECT * FROM media_items WHERE accountId = :accountId AND (:query = '' OR name LIKE '%' || :query || '%') LIMIT 50")
+    // --- Search Queries (Sorted in Room SQLite) ---
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND (:query = '' OR name LIKE '%' || :query || '%' OR categoryName LIKE '%' || :query || '%')
+        ORDER BY groupOrder ASC, seq ASC, name ASC 
+        LIMIT 100
+    """)
     suspend fun searchAll(accountId: String, query: String): List<MediaItemEntity>
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND (:query = '' OR name LIKE '%' || :query || '%' OR categoryName LIKE '%' || :query || '%')
+        ORDER BY serverOrder ASC, name ASC 
+        LIMIT 100
+    """)
+    suspend fun searchAllServer(accountId: String, query: String): List<MediaItemEntity>
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND (:query = '' OR name LIKE '%' || :query || '%' OR categoryName LIKE '%' || :query || '%')
+        ORDER BY groupKey ASC, seq ASC, name ASC 
+        LIMIT 100
+    """)
+    suspend fun searchAllAZ(accountId: String, query: String): List<MediaItemEntity>
 
     // Categories
     @Insert(onConflict = OnConflictStrategy.REPLACE)
