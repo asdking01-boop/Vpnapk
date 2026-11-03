@@ -1,9 +1,11 @@
 package com.example.ui.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Icon
@@ -12,6 +14,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -20,6 +24,8 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.CardStyle
 import com.example.data.model.MediaItem
 import com.example.data.model.WatchProgress
+import com.example.ui.theme.KrasRed
+import com.example.ui.theme.OutfitFontFamily
 import com.example.ui.theme.TextSecondary
 
 @Composable
@@ -42,7 +48,7 @@ fun MediaRow(
             .padding(vertical = 10.dp)
             .testTag("media_row_${title.lowercase().replace(" ", "_")}")
     ) {
-        // Section Header
+        // Section Header with Vertical Accent Pill
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -54,30 +60,58 @@ fun MediaRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                Box(
+                    modifier = Modifier
+                        .width(3.5.dp)
+                        .height(18.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    MaterialTheme.colorScheme.primary,
+                                    KrasRed.copy(alpha = 0.45f)
+                                )
+                            )
+                        )
+                )
                 Text(
                     text = title,
                     color = Color.White,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold
+                    fontSize = 18.sp,
+                    fontFamily = OutfitFontFamily,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = (-0.2).sp
                 )
-                Text(
-                    text = "(${items.size})",
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.White.copy(alpha = 0.08f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = "${items.size}",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
 
             if (onSeeAllClick != null) {
                 Row(
-                    modifier = Modifier.clickable(onClick = onSeeAllClick),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(onClick = onSeeAllClick)
+                        .padding(horizontal = 6.dp, vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "See All",
+                        text = "Explore",
                         color = MaterialTheme.colorScheme.primary,
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold
                     )
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -89,12 +123,12 @@ fun MediaRow(
             }
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Horizontal scrolling row
         LazyRow(
             contentPadding = PaddingValues(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(items, key = { it.id }) { item ->
                 val fav = isFavorite?.invoke(item.id) ?: false

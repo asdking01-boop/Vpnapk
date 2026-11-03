@@ -1,9 +1,12 @@
 package com.example.ui.components
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -19,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -26,13 +30,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ui.theme.GlassBackground
-import com.example.ui.theme.GlassBorder
-import com.example.ui.theme.KrasRed
+import com.example.ui.theme.OutfitFontFamily
+import com.example.ui.theme.TextSecondary
 
 enum class NavScreen {
     HOME, MOVIES, SERIES, LIVE_TV, SETTINGS
@@ -44,19 +48,65 @@ fun BottomNavBar(
     onScreenSelected: (NavScreen) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val accentColor = MaterialTheme.colorScheme.primary
+
     Box(
         modifier = modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
     ) {
-        // Glassmorphic navigation capsule
+        // iOS 26 Frosted Liquid Glass Navigation Dock
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(26.dp))
-                .background(GlassBackground)
-                .border(1.dp, GlassBorder, RoundedCornerShape(26.dp))
+                .widthIn(max = 560.dp)
+                .clip(RoundedCornerShape(32.dp))
+                .drawWithCache {
+                    val radiusPx = size.height / 2f
+                    val corner = CornerRadius(radiusPx, radiusPx)
+                    val strokePx = 1.dp.toPx()
+
+                    val glassSurfaceBrush = Brush.verticalGradient(
+                        colors = listOf(
+                            Color(0xDC1A1E2C),
+                            Color(0xEB0B0D14)
+                        )
+                    )
+                    val topSpecularBrush = Brush.horizontalGradient(
+                        colors = listOf(
+                            Color.Transparent,
+                            Color.White.copy(alpha = 0.48f),
+                            Color.Transparent
+                        )
+                    )
+                    val rimBorderBrush = Brush.linearGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.45f),
+                            Color.White.copy(alpha = 0.14f),
+                            accentColor.copy(alpha = 0.28f),
+                            Color.White.copy(alpha = 0.25f)
+                        ),
+                        start = Offset.Zero,
+                        end = Offset(size.width, size.height)
+                    )
+
+                    onDrawBehind {
+                        drawRoundRect(brush = glassSurfaceBrush, cornerRadius = corner)
+                        drawLine(
+                            brush = topSpecularBrush,
+                            start = Offset(radiusPx * 0.7f, strokePx),
+                            end = Offset(size.width - radiusPx * 0.7f, strokePx),
+                            strokeWidth = strokePx * 1.1f
+                        )
+                        drawRoundRect(
+                            brush = rimBorderBrush,
+                            cornerRadius = corner,
+                            style = Stroke(width = strokePx)
+                        )
+                    }
+                }
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.CenterVertically
@@ -65,12 +115,12 @@ fun BottomNavBar(
                 label = "Home",
                 isSelected = currentScreen == NavScreen.HOME,
                 onClick = { onScreenSelected(NavScreen.HOME) },
-                icon = { isSel, color ->
+                icon = { _, color ->
                     Icon(
                         imageVector = Icons.Default.Home,
                         contentDescription = "Home",
                         tint = color,
-                        modifier = Modifier.size(24.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             )
@@ -106,12 +156,12 @@ fun BottomNavBar(
                 label = "Settings",
                 isSelected = currentScreen == NavScreen.SETTINGS,
                 onClick = { onScreenSelected(NavScreen.SETTINGS) },
-                icon = { isSel, color ->
+                icon = { _, color ->
                     Icon(
                         imageVector = Icons.Default.Settings,
                         contentDescription = "Settings",
                         tint = color,
-                        modifier = Modifier.size(24.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             )
@@ -128,24 +178,68 @@ private fun NavItem(
 ) {
     val activeColor = MaterialTheme.colorScheme.primary
     val targetColor by animateColorAsState(
-        targetValue = if (isSelected) activeColor else Color(0xFF888888),
+        targetValue = if (isSelected) Color.White else TextSecondary,
+        animationSpec = tween(200),
         label = "nav_color"
+    )
+    val scale by animateFloatAsState(
+        targetValue = if (isSelected) 1.05f else 1.0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "nav_scale_$label"
+    )
+    val pillAlpha by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0f,
+        animationSpec = tween(220),
+        label = "nav_pill_$label"
     )
 
     Column(
         modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clip(RoundedCornerShape(22.dp))
+            .drawWithCache {
+                val pillCorner = CornerRadius(size.height / 2f, size.height / 2f)
+                val pillBrush = Brush.linearGradient(
+                    colors = listOf(
+                        activeColor.copy(alpha = 0.34f * pillAlpha),
+                        activeColor.copy(alpha = 0.12f * pillAlpha)
+                    )
+                )
+                val pillBorder = Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.42f * pillAlpha),
+                        activeColor.copy(alpha = 0.5f * pillAlpha)
+                    )
+                )
+                onDrawBehind {
+                    if (pillAlpha > 0.01f) {
+                        drawRoundRect(brush = pillBrush, cornerRadius = pillCorner)
+                        drawRoundRect(
+                            brush = pillBorder,
+                            cornerRadius = pillCorner,
+                            style = Stroke(width = 1.dp.toPx())
+                        )
+                    }
+                }
+            }
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 12.dp, vertical = 7.dp)
             .testTag("nav_${label.lowercase().replace(" ", "_")}"),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        icon(isSelected, targetColor)
+        icon(isSelected, if (isSelected) activeColor else targetColor)
         Spacer(modifier = Modifier.height(3.dp))
         Text(
             text = label,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
+            fontFamily = OutfitFontFamily,
             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
             color = targetColor
         )

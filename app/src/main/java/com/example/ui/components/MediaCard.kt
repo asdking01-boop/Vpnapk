@@ -21,12 +21,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -36,6 +41,29 @@ import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
 import com.example.data.model.WatchProgress
 import com.example.ui.theme.*
+
+private fun Modifier.cardGlassRim(cornerRadius: Dp = 14.dp): Modifier = this.drawWithCache {
+    val r = cornerRadius.toPx()
+    val corner = CornerRadius(r, r)
+    val rimBrush = Brush.linearGradient(
+        colors = listOf(
+            Color.White.copy(alpha = 0.38f),
+            Color.White.copy(alpha = 0.09f),
+            Color.White.copy(alpha = 0.03f),
+            Color.White.copy(alpha = 0.20f)
+        ),
+        start = Offset.Zero,
+        end = Offset(size.width, size.height)
+    )
+    onDrawWithContent {
+        drawContent()
+        drawRoundRect(
+            brush = rimBrush,
+            cornerRadius = corner,
+            style = Stroke(width = 1.dp.toPx())
+        )
+    }
+}
 
 private fun resolveItemQuality(item: MediaItem): String {
     val explicit = item.quality.ifBlank { item.resolution }
@@ -83,10 +111,10 @@ private fun PosterCard(
         modifier = modifier
             .width(135.dp)
             .height(205.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(CinemaCard)
-            .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
+            .cardGlassRim(14.dp)
+            .liquidPressClickable(onClick = onClick)
             .testTag("media_card_${item.id}")
     ) {
         // Poster Image
@@ -178,6 +206,7 @@ private fun PosterCard(
                 text = item.name,
                 color = Color.White,
                 fontSize = 12.sp,
+                fontFamily = OutfitFontFamily,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -244,10 +273,10 @@ private fun WideCard(
         modifier = modifier
             .width(230.dp)
             .height(140.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(CinemaCard)
-            .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
+            .cardGlassRim(14.dp)
+            .liquidPressClickable(onClick = onClick)
             .testTag("media_card_wide_${item.id}")
     ) {
         val imageUrl = item.backdrop.ifBlank { item.streamIcon }.takeIf { it.isNotBlank() }
@@ -390,10 +419,8 @@ private fun CompactCard(
         modifier = modifier
             .fillMaxWidth()
             .height(90.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(CinemaCard)
-            .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
+            .liquidGlassPanel(cornerRadius = 14.dp, surfaceAlpha = 0.72f, borderAlpha = 0.42f)
+            .liquidPressClickable(onClick = onClick)
             .padding(8.dp)
             .testTag("media_card_compact_${item.id}"),
         verticalAlignment = Alignment.CenterVertically
@@ -526,10 +553,10 @@ private fun BillboardCard(
         modifier = modifier
             .width(280.dp)
             .height(170.dp)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(CinemaCard)
-            .border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick)
+            .cardGlassRim(16.dp)
+            .liquidPressClickable(onClick = onClick)
             .testTag("media_card_billboard_${item.id}")
     ) {
         val imageUrl = item.backdrop.ifBlank { item.streamIcon }.takeIf { it.isNotBlank() }

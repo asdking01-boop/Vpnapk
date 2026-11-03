@@ -10,6 +10,15 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -39,6 +48,7 @@ import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.AppUpdateDialogs
 import com.example.ui.components.BottomNavBar
 import com.example.ui.components.NavScreen
+import com.example.ui.components.liquidGlassPanel
 import com.example.ui.screens.*
 import com.example.ui.theme.*
 import com.example.viewmodel.KrasViewModel
@@ -297,12 +307,13 @@ class MainActivity : ComponentActivity() {
                         onSearchQueryChanged = { q -> viewModel.performSearch(q) }
                     )
                 } else {
-                    // Main App Shell with Bottom Navigation
+                    // Main App Shell with Floating Liquid Glass Bottom Navigation
                     Scaffold(
                         modifier = Modifier
                             .fillMaxSize()
                             .background(CinemaBlack),
                         containerColor = CinemaBlack,
+                        contentWindowInsets = WindowInsets(0, 0, 0, 0),
                         bottomBar = {
                             BottomNavBar(
                                 currentScreen = currentScreen,
@@ -315,107 +326,128 @@ class MainActivity : ComponentActivity() {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(bottom = innerPadding.calculateBottomPadding())
+                                .padding(top = innerPadding.calculateTopPadding())
                         ) {
-                            when (currentScreen) {
-                                NavScreen.HOME -> HomeScreen(
-                                    movies = movies,
-                                    series = series,
-                                    liveStreams = liveStreams,
-                                    watchHistory = watchHistory,
-                                    isFavorite = { id -> viewModel.isFavorite(id) },
-                                    onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
-                                    onMediaClick = { item ->
-                                        if (item.type == MediaType.SERIES) {
-                                            viewModel.loadSeriesDetails(item)
-                                            selectedSeriesForDetails = item
-                                        } else {
-                                            viewModel.startPlayback(item)
+                            AnimatedContent(
+                                targetState = currentScreen,
+                                transitionSpec = {
+                                    val direction = if (targetState.ordinal >= initialState.ordinal) 1 else -1
+                                    (fadeIn(animationSpec = tween(240, easing = FastOutSlowInEasing)) +
+                                        slideInHorizontally(
+                                            animationSpec = tween(260, easing = FastOutSlowInEasing),
+                                            initialOffsetX = { fullWidth -> (fullWidth * 0.06f * direction).toInt() }
+                                        ) +
+                                        scaleIn(
+                                            initialScale = 0.98f,
+                                            animationSpec = tween(240, easing = FastOutSlowInEasing)
+                                        )).togetherWith(
+                                        fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)) +
+                                            slideOutHorizontally(
+                                                animationSpec = tween(220, easing = FastOutSlowInEasing),
+                                                targetOffsetX = { fullWidth -> (-fullWidth * 0.04f * direction).toInt() }
+                                            )
+                                    )
+                                },
+                                label = "nav_screen_transition"
+                            ) { targetScreen ->
+                                when (targetScreen) {
+                                    NavScreen.HOME -> HomeScreen(
+                                        movies = movies,
+                                        series = series,
+                                        liveStreams = liveStreams,
+                                        watchHistory = watchHistory,
+                                        isFavorite = { id -> viewModel.isFavorite(id) },
+                                        onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
+                                        onMediaClick = { item ->
+                                            if (item.type == MediaType.SERIES) {
+                                                viewModel.loadSeriesDetails(item)
+                                                selectedSeriesForDetails = item
+                                            } else {
+                                                viewModel.startPlayback(item)
+                                            }
+                                        },
+                                        onSearchClick = { isSearchOpen = true },
+                                        onAccountClick = { isLoginOpen = true },
+                                        onRefreshClick = { viewModel.refreshContent() },
+                                        isRefreshing = isRefreshing,
+                                        isLoading = isLoading,
+                                        cardStyle = userSettings.cardStyle,
+                                        favorites = favorites
+                                    )
+
+                                    NavScreen.MOVIES -> MoviesScreen(
+                                        movies = movies,
+                                        categories = movieCategories,
+                                        watchHistory = watchHistory,
+                                        isFavorite = { id -> viewModel.isFavorite(id) },
+                                        onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
+                                        onMovieClick = { movie -> viewModel.startPlayback(movie) },
+                                        cardStyle = userSettings.cardStyle,
+                                        totalCount = totalMoviesCount,
+                                        onLoadMore = { viewModel.loadMoreMovies() },
+                                        onFilterChanged = { cat, q, rating, yr, qFilter, sortQ ->
+                                            viewModel.filterMovies(cat, q, rating, yr, qFilter, sortQ)
                                         }
-                                    },
-                                    onSearchClick = { isSearchOpen = true },
-                                    onAccountClick = { isLoginOpen = true },
-                                    onRefreshClick = { viewModel.refreshContent() },
-                                    isRefreshing = isRefreshing,
-                                    isLoading = isLoading,
-                                    cardStyle = userSettings.cardStyle,
-                                    favorites = favorites
-                                )
+                                    )
 
-                                NavScreen.MOVIES -> MoviesScreen(
-                                    movies = movies,
-                                    categories = movieCategories,
-                                    watchHistory = watchHistory,
-                                    isFavorite = { id -> viewModel.isFavorite(id) },
-                                    onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
-                                    onMovieClick = { movie -> viewModel.startPlayback(movie) },
-                                    cardStyle = userSettings.cardStyle,
-                                    totalCount = totalMoviesCount,
-                                    onLoadMore = { viewModel.loadMoreMovies() },
-                                    onFilterChanged = { cat, q, rating, yr, qFilter, sortQ ->
-                                        viewModel.filterMovies(cat, q, rating, yr, qFilter, sortQ)
-                                    }
-                                )
+                                    NavScreen.SERIES -> SeriesScreen(
+                                        seriesList = series,
+                                        categories = seriesCategories,
+                                        isFavorite = { id -> viewModel.isFavorite(id) },
+                                        onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
+                                        onSeriesClick = { s ->
+                                            viewModel.loadSeriesDetails(s)
+                                            selectedSeriesForDetails = s
+                                        },
+                                        cardStyle = userSettings.cardStyle,
+                                        totalCount = totalSeriesCount,
+                                        onLoadMore = { viewModel.loadMoreSeries() },
+                                        onFilterChanged = { cat, q, rating, yr, qFilter, sortQ ->
+                                            viewModel.filterSeries(cat, q, rating, yr, qFilter, sortQ)
+                                        }
+                                    )
 
-                                NavScreen.SERIES -> SeriesScreen(
-                                    seriesList = series,
-                                    categories = seriesCategories,
-                                    isFavorite = { id -> viewModel.isFavorite(id) },
-                                    onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
-                                    onSeriesClick = { s ->
-                                        viewModel.loadSeriesDetails(s)
-                                        selectedSeriesForDetails = s
-                                    },
-                                    cardStyle = userSettings.cardStyle,
-                                    totalCount = totalSeriesCount,
-                                    onLoadMore = { viewModel.loadMoreSeries() },
-                                    onFilterChanged = { cat, q, rating, yr, qFilter, sortQ ->
-                                        viewModel.filterSeries(cat, q, rating, yr, qFilter, sortQ)
-                                    }
-                                )
+                                    NavScreen.LIVE_TV -> LiveTvScreen(
+                                        channels = liveStreams,
+                                        categories = liveCategories,
+                                        isFavorite = { id -> viewModel.isFavorite(id) },
+                                        onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
+                                        onChannelClick = { channel -> viewModel.startPlayback(channel) },
+                                        totalCount = totalLiveCount,
+                                        liveChannelOrder = userSettings.liveChannelOrder,
+                                        onLoadMore = { viewModel.loadMoreLive() },
+                                        onFilterChanged = { cat, q, qFilter, sortQ ->
+                                            viewModel.filterLive(cat, q, qFilter, sortQ)
+                                        }
+                                    )
 
-                                NavScreen.LIVE_TV -> LiveTvScreen(
-                                    channels = liveStreams,
-                                    categories = liveCategories,
-                                    isFavorite = { id -> viewModel.isFavorite(id) },
-                                    onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
-                                    onChannelClick = { channel -> viewModel.startPlayback(channel) },
-                                    totalCount = totalLiveCount,
-                                    liveChannelOrder = userSettings.liveChannelOrder,
-                                    onLoadMore = { viewModel.loadMoreLive() },
-                                    onFilterChanged = { cat, q, qFilter, sortQ ->
-                                        viewModel.filterLive(cat, q, qFilter, sortQ)
-                                    }
-                                )
-
-                                NavScreen.SETTINGS -> SettingsScreen(
-                                    userSettings = userSettings,
-                                    onUpdateSettings = { newSettings -> viewModel.updateSettings(newSettings) },
-                                    activeAccount = activeAccount,
-                                    accounts = accounts,
-                                    onSwitchAccount = { accId -> viewModel.switchAccount(accId) },
-                                    onAddAccountClick = { isLoginOpen = true },
-                                    onRemoveAccount = { accId -> viewModel.removeAccount(accId) },
-                                    onClearCache = { viewModel.clearCache() },
-                                    updateState = updateState,
-                                    onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) }
-                                )
+                                    NavScreen.SETTINGS -> SettingsScreen(
+                                        userSettings = userSettings,
+                                        onUpdateSettings = { newSettings -> viewModel.updateSettings(newSettings) },
+                                        activeAccount = activeAccount,
+                                        accounts = accounts,
+                                        onSwitchAccount = { accId -> viewModel.switchAccount(accId) },
+                                        onAddAccountClick = { isLoginOpen = true },
+                                        onRemoveAccount = { accId -> viewModel.removeAccount(accId) },
+                                        onClearCache = { viewModel.clearCache() },
+                                        updateState = updateState,
+                                        onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) }
+                                    )
+                                }
                             }
 
-                            // Non-blocking sync progress indicator
+                            // Non-blocking Liquid Glass sync progress indicator
                             if (syncProgress != null) {
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.BottomCenter)
-                                        .padding(bottom = 16.dp)
-                                        .clip(RoundedCornerShape(20.dp))
-                                        .background(Color(0xE6151515))
-                                        .border(1.dp, GlassBorder, RoundedCornerShape(20.dp))
-                                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                                        .padding(bottom = 92.dp)
+                                        .liquidGlassPanel(cornerRadius = 22.dp, accentGlow = KrasRed)
+                                        .padding(horizontal = 16.dp, vertical = 9.dp)
                                 ) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         CircularProgressIndicator(
-                                            color = KrasRed,
+                                            color = KrasRedBright,
                                             strokeWidth = 2.dp,
                                             modifier = Modifier.size(14.dp)
                                         )

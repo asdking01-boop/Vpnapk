@@ -34,6 +34,7 @@ import com.example.data.model.LiveChannelOrder
 import com.example.data.model.UserSettings
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.KrasLogo
+import com.example.ui.components.liquidGlassPanel
 import com.example.ui.theme.*
 import com.example.updater.AppUpdateUiState
 
@@ -100,21 +101,20 @@ fun SettingsScreen(
             Text(
                 text = "Settings",
                 color = Color.White,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
+                fontSize = 26.sp,
+                fontFamily = OutfitFontFamily,
+                fontWeight = FontWeight.ExtraBold,
                 modifier = Modifier.padding(vertical = 14.dp)
             )
         }
 
         // 1. Account Management Card
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = CinemaCard),
-                shape = RoundedCornerShape(16.dp),
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
                     .padding(bottom = 16.dp)
+                    .liquidGlassPanel(cornerRadius = 20.dp, accentGlow = KrasRed)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(
@@ -202,13 +202,11 @@ fun SettingsScreen(
 
         // 2. Live TV Settings (Channel Order)
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = CinemaCard),
-                shape = RoundedCornerShape(16.dp),
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
                     .padding(bottom = 16.dp)
+                    .liquidGlassPanel(cornerRadius = 20.dp)
                     .testTag("settings_live_tv_card")
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -268,13 +266,11 @@ fun SettingsScreen(
 
         // 3. Theme & Customization
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = CinemaCard),
-                shape = RoundedCornerShape(16.dp),
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
                     .padding(bottom = 16.dp)
+                    .liquidGlassPanel(cornerRadius = 20.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Text(
@@ -358,13 +354,11 @@ fun SettingsScreen(
 
         // 4. Playback & Streaming Engine
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = CinemaCard),
-                shape = RoundedCornerShape(16.dp),
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
                     .padding(bottom = 16.dp)
+                    .liquidGlassPanel(cornerRadius = 20.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Text(
@@ -464,13 +458,11 @@ fun SettingsScreen(
 
         // 4. Parental Controls & Security
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = CinemaCard),
-                shape = RoundedCornerShape(16.dp),
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
                     .padding(bottom = 16.dp)
+                    .liquidGlassPanel(cornerRadius = 20.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
@@ -505,13 +497,11 @@ fun SettingsScreen(
 
         // 5. Language, Cache & About
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = CinemaCard),
-                shape = RoundedCornerShape(16.dp),
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
                     .padding(bottom = 24.dp)
+                    .liquidGlassPanel(cornerRadius = 20.dp)
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(

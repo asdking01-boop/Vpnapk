@@ -3,11 +3,11 @@ package com.example.ui.screens
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -34,10 +35,12 @@ import com.example.data.local.QualityDetector
 import com.example.data.model.Category
 import com.example.data.model.LiveChannelOrder
 import com.example.data.model.MediaItem
+import com.example.ui.components.DynamicAmbientPosterBackdrop
+import com.example.ui.components.LiquidGlassChip
 import com.example.ui.components.ResolutionBadge
+import com.example.ui.components.liquidGlassPanel
+import com.example.ui.components.liquidPressClickable
 import com.example.ui.theme.*
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.runtime.saveable.rememberSaveable
 
 @Composable
 fun LiveTvScreen(
@@ -74,7 +77,6 @@ fun LiveTvScreen(
         liveChannelOrder
     ) {
         if (onFilterChanged != null) {
-            // Room query already sorted and filtered channels according to liveChannelOrder, qualityFilter, and sortByQuality
             channels
         } else {
             val filtered = channels.filter { ch ->
@@ -114,7 +116,7 @@ fun LiveTvScreen(
         initialValue = 0.3f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(800, easing = LinearEasing),
+            animation = tween(900, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulse_alpha"
@@ -128,301 +130,277 @@ fun LiveTvScreen(
         }
     }
 
-    Column(
+    val ambientChannelArt = remember(filteredChannels) {
+        filteredChannels.firstOrNull()?.let { it.streamIcon.ifBlank { it.backdrop } }
+    }
+
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(CinemaBlack)
-            .statusBarsPadding()
             .testTag("live_tv_screen")
     ) {
-        // Search bar
-        Row(
+        DynamicAmbientPosterBackdrop(
+            imageUrl = ambientChannelArt,
+            ambientAlpha = 0.18f
+        )
+
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .fillMaxSize()
+                .statusBarsPadding()
         ) {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Search Live Channels, Sports, News...", color = TextSecondary, fontSize = 13.sp) },
-                leadingIcon = {
-                    Icon(Icons.Default.Search, contentDescription = "Search", tint = KrasRed)
-                },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = KrasRed,
-                    unfocusedBorderColor = GlassBorder,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                ),
-                shape = RoundedCornerShape(24.dp),
+            // Search bar
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("live_search_input")
-            )
-        }
-
-        // Category Chips
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            item(key = "cat_all") {
-                val isSelected = selectedCategoryId == "all"
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) MaterialTheme.colorScheme.primary else CinemaCard)
-                        .clickable { selectedCategoryId = "all" }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = "All Channels",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-
-            item(key = "cat_favorites") {
-                val isSelected = selectedCategoryId == "favorites"
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) MaterialTheme.colorScheme.primary else CinemaCard)
-                        .clickable { selectedCategoryId = "favorites" }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = "Favorites",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-
-            items(distinctCategories, key = { it.categoryId }) { cat ->
-                val isSelected = selectedCategoryId == cat.categoryId
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) MaterialTheme.colorScheme.primary else CinemaCard)
-                        .clickable { selectedCategoryId = cat.categoryId }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = cat.categoryName,
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-        }
-
-        // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.testTag("live_quality_filter_row")
-        ) {
-            items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
-                val isSelected = selectedQualityFilter == qOpt
-                val activeColor = when (qOpt) {
-                    "4K" -> Badge4K
-                    "FHD" -> BadgeFHD
-                    "HD" -> BadgeHD
-                    "SD" -> BadgeSD
-                    else -> KrasRed
-                }
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (isSelected) activeColor else CinemaCard)
-                        .border(
-                            width = 1.dp,
-                            color = if (isSelected) Color.White.copy(alpha = 0.3f) else GlassBorder,
-                            shape = RoundedCornerShape(14.dp)
-                        )
-                        .clickable { selectedQualityFilter = qOpt }
-                        .padding(horizontal = 12.dp, vertical = 5.dp)
-                        .testTag("live_quality_chip_$qOpt")
-                ) {
-                    Text(
-                        text = if (qOpt == "All") "All Quality" else qOpt,
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-
-            item(key = "sort_by_quality") {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (sortByQuality) KrasRed else CinemaCard)
-                        .border(
-                            width = 1.dp,
-                            color = if (sortByQuality) Color.White.copy(alpha = 0.35f) else GlassBorder,
-                            shape = RoundedCornerShape(14.dp)
-                        )
-                        .clickable { sortByQuality = !sortByQuality }
-                        .padding(horizontal = 12.dp, vertical = 5.dp)
-                        .testTag("live_sort_by_quality_chip")
-                ) {
-                    Text(
-                        text = if (sortByQuality) "Sort by quality ↓" else "Sort by quality",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = if (sortByQuality) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-        }
-
-        // Count + Live Beacon
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .alpha(pulseAlpha)
-                        .background(KrasRed)
-                )
-                Text(
-                    text = "${totalCount.coerceAtLeast(filteredChannels.size)} Live Streams Online",
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-
-        // Channels List
-        LazyColumn(
-            state = listState,
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 90.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            items(filteredChannels, key = { it.id }) { ch ->
-                val fav = isFavorite(ch.id)
-                val effectiveQuality = ch.quality.ifBlank { ch.resolution }
-                Row(
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = {
+                        Text(
+                            text = "Search Live Channels, Sports, News...",
+                            color = TextSecondary,
+                            fontSize = 13.sp
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Default.Search, contentDescription = "Search", tint = KrasRedBright)
+                    },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = KrasRedBright,
+                        unfocusedBorderColor = GlassBorder,
+                        focusedContainerColor = Color(0x8810131C),
+                        unfocusedContainerColor = Color(0x6610131C),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(24.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(82.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(CinemaCard)
-                        .border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
-                        .clickable { onChannelClick(ch) }
-                        .padding(10.dp)
-                        .testTag("channel_item_${ch.streamId}"),
-                    verticalAlignment = Alignment.CenterVertically
+                        .height(50.dp)
+                        .testTag("live_search_input")
+                )
+            }
+
+            // Category Chips
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item(key = "cat_all") {
+                    LiquidGlassChip(
+                        text = "All Channels",
+                        isSelected = selectedCategoryId == "all",
+                        onClick = { selectedCategoryId = "all" },
+                        activeColor = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                item(key = "cat_favorites") {
+                    LiquidGlassChip(
+                        text = "Favorites",
+                        isSelected = selectedCategoryId == "favorites",
+                        onClick = { selectedCategoryId = "favorites" },
+                        activeColor = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                items(distinctCategories, key = { it.categoryId }) { cat ->
+                    LiquidGlassChip(
+                        text = cat.categoryName,
+                        isSelected = selectedCategoryId == cat.categoryId,
+                        onClick = { selectedCategoryId = cat.categoryId },
+                        activeColor = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.testTag("live_quality_filter_row")
+            ) {
+                items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
+                    val isSelected = selectedQualityFilter == qOpt
+                    val activeColor = when (qOpt) {
+                        "4K" -> Badge4K
+                        "FHD" -> BadgeFHD
+                        "HD" -> BadgeHD
+                        "SD" -> BadgeSD
+                        else -> KrasRed
+                    }
+                    LiquidGlassChip(
+                        text = if (qOpt == "All") "All Quality" else qOpt,
+                        isSelected = isSelected,
+                        onClick = { selectedQualityFilter = qOpt },
+                        activeColor = activeColor,
+                        modifier = Modifier.testTag("live_quality_chip_$qOpt")
+                    )
+                }
+
+                item(key = "sort_by_quality") {
+                    LiquidGlassChip(
+                        text = if (sortByQuality) "Sort by quality ↓" else "Sort by quality",
+                        isSelected = sortByQuality,
+                        onClick = { sortByQuality = !sortByQuality },
+                        activeColor = KrasRed,
+                        modifier = Modifier.testTag("live_sort_by_quality_chip")
+                    )
+                }
+            }
+
+            // Count + Live Beacon
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp)
                 ) {
-                    // Logo / Preview
                     Box(
                         modifier = Modifier
-                            .width(80.dp)
-                            .fillMaxHeight()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(CinemaDark),
-                        contentAlignment = Alignment.Center
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .alpha(pulseAlpha)
+                            .background(KrasRedBright)
+                    )
+                    Text(
+                        text = "${totalCount.coerceAtLeast(filteredChannels.size)} Live Streams Online",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            // Channels List with Liquid Glass cards
+            LazyColumn(
+                state = listState,
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 100.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(filteredChannels, key = { it.id }) { ch ->
+                    val fav = isFavorite(ch.id)
+                    val effectiveQuality = ch.quality.ifBlank { ch.resolution }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(84.dp)
+                            .liquidGlassPanel(
+                                cornerRadius = 18.dp,
+                                surfaceAlpha = 0.72f,
+                                borderAlpha = 0.42f
+                            )
+                            .liquidPressClickable { onChannelClick(ch) }
+                            .padding(10.dp)
+                            .testTag("channel_item_${ch.streamId}"),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val chIcon = ch.streamIcon.ifBlank { ch.backdrop }.takeIf { it.isNotBlank() }
-                        if (chIcon != null) {
-                            AsyncImage(
-                                model = chIcon,
-                                contentDescription = ch.name,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            Text(
-                                text = ch.name.firstOrNull()?.uppercase() ?: "TV",
-                                color = KrasRedBright,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                        // Logo / Preview
                         Box(
                             modifier = Modifier
-                                .size(24.dp)
-                                .clip(CircleShape)
-                                .background(Color.Black.copy(alpha = 0.6f)),
+                                .width(82.dp)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(CinemaDark)
+                                .border(0.75.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(12.dp)),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.PlayArrow,
-                                contentDescription = "Play Live",
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
+                            val chIcon = ch.streamIcon.ifBlank { ch.backdrop }.takeIf { it.isNotBlank() }
+                            if (chIcon != null) {
+                                AsyncImage(
+                                    model = chIcon,
+                                    contentDescription = ch.name,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Text(
+                                    text = ch.name.firstOrNull()?.uppercase() ?: "TV",
+                                    color = KrasRedBright,
+                                    fontSize = 18.sp,
+                                    fontFamily = OutfitFontFamily,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.58f))
+                                    .border(0.8.dp, Color.White.copy(alpha = 0.4f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = "Play Live",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.width(12.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
 
-                    // Channel Name & Info (with ResolutionBadge right next to the channel name)
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
+                        // Channel Name & Info (with ResolutionBadge right next to the channel name)
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.Center
                         ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = ch.name,
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontFamily = OutfitFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                ResolutionBadge(resolution = effectiveQuality, isLive = true)
+                            }
+                            Spacer(modifier = Modifier.height(3.dp))
                             Text(
-                                text = ch.name,
-                                color = Color.White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
+                                text = ch.plot.ifEmpty { ch.categoryName },
+                                color = TextSecondary,
+                                fontSize = 11.sp,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
+                                overflow = TextOverflow.Ellipsis
                             )
-                            ResolutionBadge(resolution = effectiveQuality, isLive = true)
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "Channel #${ch.streamId}",
+                                color = TextMuted,
+                                fontSize = 10.sp
+                            )
                         }
-                        Spacer(modifier = Modifier.height(3.dp))
-                        Text(
-                            text = ch.plot.ifEmpty { ch.categoryName },
-                            color = TextSecondary,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Channel #${ch.streamId}",
-                            color = TextMuted,
-                            fontSize = 10.sp
-                        )
-                    }
 
-                    // Favorite Button
-                    IconButton(onClick = { onToggleFavorite(ch) }) {
-                        Icon(
-                            imageVector = if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                            contentDescription = "Favorite",
-                            tint = if (fav) KrasRed else TextSecondary
-                        )
+                        // Favorite Button
+                        IconButton(onClick = { onToggleFavorite(ch) }) {
+                            Icon(
+                                imageVector = if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                contentDescription = "Favorite",
+                                tint = if (fav) KrasRedBright else TextSecondary
+                            )
+                        }
                     }
                 }
             }

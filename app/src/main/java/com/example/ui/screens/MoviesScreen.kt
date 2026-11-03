@@ -9,12 +9,13 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,11 +31,11 @@ import com.example.data.model.CardStyle
 import com.example.data.model.Category
 import com.example.data.model.MediaItem
 import com.example.data.model.WatchProgress
+import com.example.ui.components.DynamicAmbientPosterBackdrop
+import com.example.ui.components.LiquidGlassChip
 import com.example.ui.components.MediaCard
+import com.example.ui.components.liquidGlassPanel
 import com.example.ui.theme.*
-
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.rememberLazyListState
 
 @Composable
 fun MoviesScreen(
@@ -81,7 +82,7 @@ fun MoviesScreen(
         onFilterChanged
     ) {
         if (onFilterChanged != null) {
-            movies // Already filtered and sorted by Room SQL query
+            movies
         } else {
             val filtered = movies.filter { movie ->
                 val matchCategory = selectedCategoryId == "all" ||
@@ -121,257 +122,246 @@ fun MoviesScreen(
         }
     }
 
-    Column(
+    val ambientPosterUrl = remember(filteredMovies) {
+        filteredMovies.firstOrNull()?.let { it.backdrop.ifBlank { it.streamIcon } }
+    }
+
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(CinemaBlack)
-            .statusBarsPadding()
             .testTag("movies_screen")
     ) {
-        // Top Header with Search and Filter
-        Row(
+        DynamicAmbientPosterBackdrop(
+            imageUrl = ambientPosterUrl,
+            ambientAlpha = 0.22f
+        )
+
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .fillMaxSize()
+                .statusBarsPadding()
         ) {
-            // Search Input
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Search movies, genres...", color = TextSecondary, fontSize = 13.sp) },
-                leadingIcon = {
-                    Icon(Icons.Default.Search, contentDescription = "Search", tint = KrasRed)
-                },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = KrasRed,
-                    unfocusedBorderColor = GlassBorder,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                ),
-                shape = RoundedCornerShape(24.dp),
+            // Top Header with Liquid Glass Search and Filter
+            Row(
                 modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp)
-                    .testTag("movies_search_input")
-            )
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // Filter button
-            Box(
-                modifier = Modifier
-                    .size(46.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality) KrasRed else CinemaCard)
-                    .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
-                    .clickable { showFilterDialog = true }
-                    .testTag("movies_filter_button"),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.FilterList,
-                    contentDescription = "Filter",
-                    tint = Color.White,
-                    modifier = Modifier.size(22.dp)
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = {
+                        Text(
+                            text = "Search movies, genres...",
+                            color = TextSecondary,
+                            fontSize = 13.sp
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Default.Search, contentDescription = "Search", tint = KrasRedBright)
+                    },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = KrasRedBright,
+                        unfocusedBorderColor = GlassBorder,
+                        focusedContainerColor = Color(0x8810131C),
+                        unfocusedContainerColor = Color(0x6610131C),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp)
+                        .testTag("movies_search_input")
                 )
-            }
-        }
 
-        // Category Chips Row
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            item {
-                val isSelected = selectedCategoryId == "all"
+                Spacer(modifier = Modifier.width(10.dp))
+
+                val hasActiveExtraFilter = minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) MaterialTheme.colorScheme.primary else CinemaCard)
-                        .clickable { selectedCategoryId = "all" }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                        .size(48.dp)
+                        .liquidGlassPanel(
+                            cornerRadius = 16.dp,
+                            tintColor = if (hasActiveExtraFilter) KrasRed else Color(0xFF141824),
+                            surfaceAlpha = if (hasActiveExtraFilter) 0.85f else 0.65f,
+                            borderAlpha = 0.55f
+                        )
+                        .clickable { showFilterDialog = true }
+                        .testTag("movies_filter_button"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text(
+                    Icon(
+                        imageVector = Icons.Default.FilterList,
+                        contentDescription = "Filter",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+
+            // Category Chips Row
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item(key = "cat_all_movies") {
+                    LiquidGlassChip(
                         text = "All Movies",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        isSelected = selectedCategoryId == "all",
+                        onClick = { selectedCategoryId = "all" },
+                        activeColor = MaterialTheme.colorScheme.primary
                     )
                 }
-            }
 
-            items(categories) { cat ->
-                val isSelected = selectedCategoryId == cat.categoryId
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) MaterialTheme.colorScheme.primary else CinemaCard)
-                        .clickable { selectedCategoryId = cat.categoryId }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
+                items(categories, key = { it.categoryId }) { cat ->
+                    LiquidGlassChip(
                         text = cat.categoryName,
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-        }
-
-        // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.testTag("movies_quality_filter_row")
-        ) {
-            items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
-                val isSelected = selectedQualityFilter == qOpt
-                val activeColor = when (qOpt) {
-                    "4K" -> Badge4K
-                    "FHD" -> BadgeFHD
-                    "HD" -> BadgeHD
-                    "SD" -> BadgeSD
-                    else -> KrasRed
-                }
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (isSelected) activeColor else CinemaCard)
-                        .border(
-                            width = 1.dp,
-                            color = if (isSelected) Color.White.copy(alpha = 0.3f) else GlassBorder,
-                            shape = RoundedCornerShape(14.dp)
-                        )
-                        .clickable { selectedQualityFilter = qOpt }
-                        .padding(horizontal = 12.dp, vertical = 5.dp)
-                        .testTag("movies_quality_chip_$qOpt")
-                ) {
-                    Text(
-                        text = if (qOpt == "All") "All Quality" else qOpt,
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        isSelected = selectedCategoryId == cat.categoryId,
+                        onClick = { selectedCategoryId = cat.categoryId },
+                        activeColor = MaterialTheme.colorScheme.primary
                     )
                 }
             }
 
-            item(key = "sort_by_quality") {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (sortByQuality) KrasRed else CinemaCard)
-                        .border(
-                            width = 1.dp,
-                            color = if (sortByQuality) Color.White.copy(alpha = 0.35f) else GlassBorder,
-                            shape = RoundedCornerShape(14.dp)
-                        )
-                        .clickable { sortByQuality = !sortByQuality }
-                        .padding(horizontal = 12.dp, vertical = 5.dp)
-                        .testTag("movies_sort_by_quality_chip")
-                ) {
-                    Text(
-                        text = if (sortByQuality) "Sort by quality ↓" else "Sort by quality",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = if (sortByQuality) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-        }
-
-        // Results Count
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "${totalCount.coerceAtLeast(filteredMovies.size)} Movies available",
-                color = TextSecondary,
-                fontSize = 12.sp
-            )
-            if (minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality) {
-                Text(
-                    text = "Clear filters",
-                    color = KrasRedBright,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.clickable {
-                        minRating = 0.0
-                        selectedYear = "All"
-                        selectedQualityFilter = "All"
-                        sortByQuality = false
-                    }
-                )
-            }
-        }
-
-        // Movies Grid / List
-        if (filteredMovies.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(32.dp),
-                contentAlignment = Alignment.Center
+            // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.testTag("movies_quality_filter_row")
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "No movies match your filter",
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
+                items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
+                    val isSelected = selectedQualityFilter == qOpt
+                    val activeColor = when (qOpt) {
+                        "4K" -> Badge4K
+                        "FHD" -> BadgeFHD
+                        "HD" -> BadgeHD
+                        "SD" -> BadgeSD
+                        else -> KrasRed
+                    }
+                    LiquidGlassChip(
+                        text = if (qOpt == "All") "All Quality" else qOpt,
+                        isSelected = isSelected,
+                        onClick = { selectedQualityFilter = qOpt },
+                        activeColor = activeColor,
+                        modifier = Modifier.testTag("movies_quality_chip_$qOpt")
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Try clearing your search or category filter",
-                        color = TextSecondary,
-                        fontSize = 12.sp
+                }
+
+                item(key = "sort_by_quality") {
+                    LiquidGlassChip(
+                        text = if (sortByQuality) "Sort by quality ↓" else "Sort by quality",
+                        isSelected = sortByQuality,
+                        onClick = { sortByQuality = !sortByQuality },
+                        activeColor = KrasRed,
+                        modifier = Modifier.testTag("movies_sort_by_quality_chip")
                     )
                 }
             }
-        } else {
-            if (cardStyle == CardStyle.COMPACT) {
-                LazyColumn(
-                    state = listState,
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 90.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize()
+
+            // Results Count
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${totalCount.coerceAtLeast(filteredMovies.size)} Movies available",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    fontFamily = OutfitFontFamily,
+                    fontWeight = FontWeight.Medium
+                )
+                if (minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality) {
+                    Text(
+                        text = "Clear filters",
+                        color = KrasRedBright,
+                        fontSize = 11.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clickable {
+                            minRating = 0.0
+                            selectedYear = "All"
+                            selectedQualityFilter = "All"
+                            sortByQuality = false
+                        }
+                    )
+                }
+            }
+
+            // Movies Grid / List
+            if (filteredMovies.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    items(filteredMovies, key = { it.id }) { movie ->
-                        MediaCard(
-                            item = movie,
-                            onClick = { onMovieClick(movie) },
-                            cardStyle = CardStyle.COMPACT,
-                            isFavorite = isFavorite(movie.id),
-                            onToggleFavorite = { onToggleFavorite(movie) },
-                            watchProgress = watchHistory.find { it.mediaId == movie.id }
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .liquidGlassPanel(cornerRadius = 20.dp)
+                            .padding(horizontal = 24.dp, vertical = 20.dp)
+                    ) {
+                        Text(
+                            text = "No movies match your filter",
+                            color = Color.White,
+                            fontSize = 16.sp,
+                            fontFamily = OutfitFontFamily,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Try clearing your search or category filter",
+                            color = TextSecondary,
+                            fontSize = 12.sp
                         )
                     }
                 }
             } else {
-                LazyVerticalGrid(
-                    state = gridState,
-                    columns = GridCells.Adaptive(minSize = if (cardStyle == CardStyle.WIDE) 180.dp else 125.dp),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 90.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(filteredMovies, key = { it.id }) { movie ->
-                        MediaCard(
-                            item = movie,
-                            onClick = { onMovieClick(movie) },
-                            cardStyle = cardStyle,
-                            isFavorite = isFavorite(movie.id),
-                            onToggleFavorite = { onToggleFavorite(movie) },
-                            watchProgress = watchHistory.find { it.mediaId == movie.id }
-                        )
+                if (cardStyle == CardStyle.COMPACT) {
+                    LazyColumn(
+                        state = listState,
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 100.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(filteredMovies, key = { it.id }) { movie ->
+                            MediaCard(
+                                item = movie,
+                                onClick = { onMovieClick(movie) },
+                                cardStyle = CardStyle.COMPACT,
+                                isFavorite = isFavorite(movie.id),
+                                onToggleFavorite = { onToggleFavorite(movie) },
+                                watchProgress = watchHistory.find { it.mediaId == movie.id }
+                            )
+                        }
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        state = gridState,
+                        columns = GridCells.Adaptive(minSize = if (cardStyle == CardStyle.WIDE) 180.dp else 118.dp),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 100.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(filteredMovies, key = { it.id }) { movie ->
+                            MediaCard(
+                                item = movie,
+                                onClick = { onMovieClick(movie) },
+                                cardStyle = cardStyle,
+                                isFavorite = isFavorite(movie.id),
+                                onToggleFavorite = { onToggleFavorite(movie) },
+                                watchProgress = watchHistory.find { it.mediaId == movie.id }
+                            )
+                        }
                     }
                 }
             }
@@ -383,7 +373,12 @@ fun MoviesScreen(
         AlertDialog(
             onDismissRequest = { showFilterDialog = false },
             title = {
-                Text("Filter Movies", color = Color.White, fontWeight = FontWeight.Bold)
+                Text(
+                    text = "Filter Movies",
+                    color = Color.White,
+                    fontFamily = OutfitFontFamily,
+                    fontWeight = FontWeight.Bold
+                )
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -396,8 +391,9 @@ fun MoviesScreen(
                             val isSel = minRating == rating
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(10.dp))
                                     .background(if (isSel) KrasRed else CinemaCard)
+                                    .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
                                     .clickable { minRating = rating }
                                     .padding(horizontal = 10.dp, vertical = 6.dp)
                             ) {
@@ -415,8 +411,9 @@ fun MoviesScreen(
                             val isSel = selectedYear == yr
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(10.dp))
                                     .background(if (isSel) KrasRed else CinemaCard)
+                                    .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
                                     .clickable { selectedYear = yr }
                                     .padding(horizontal = 10.dp, vertical = 6.dp)
                             ) {

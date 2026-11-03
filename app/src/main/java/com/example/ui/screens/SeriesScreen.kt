@@ -1,14 +1,12 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -17,7 +15,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -27,8 +24,9 @@ import com.example.data.local.QualityDetector
 import com.example.data.model.CardStyle
 import com.example.data.model.Category
 import com.example.data.model.MediaItem
+import com.example.ui.components.DynamicAmbientPosterBackdrop
+import com.example.ui.components.LiquidGlassChip
 import com.example.ui.components.MediaCard
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import com.example.ui.theme.*
 
 @Composable
@@ -95,171 +93,151 @@ fun SeriesScreen(
         }
     }
 
-    Column(
+    val ambientPosterUrl = remember(filteredSeries) {
+        filteredSeries.firstOrNull()?.let { it.backdrop.ifBlank { it.streamIcon } }
+    }
+
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(CinemaBlack)
-            .statusBarsPadding()
             .testTag("series_screen")
     ) {
-        // Search bar
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Search TV Series, seasons...", color = TextSecondary, fontSize = 13.sp) },
-                leadingIcon = {
-                    Icon(Icons.Default.Search, contentDescription = "Search", tint = KrasRed)
-                },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = KrasRed,
-                    unfocusedBorderColor = GlassBorder,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                ),
-                shape = RoundedCornerShape(24.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("series_search_input")
-            )
-        }
-
-        // Category Chips
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            item {
-                val isSelected = selectedCategoryId == "all"
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) MaterialTheme.colorScheme.primary else CinemaCard)
-                        .clickable { selectedCategoryId = "all" }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = "All TV Series",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-
-            items(categories) { cat ->
-                val isSelected = selectedCategoryId == cat.categoryId
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(if (isSelected) MaterialTheme.colorScheme.primary else CinemaCard)
-                        .clickable { selectedCategoryId = cat.categoryId }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = cat.categoryName,
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-        }
-
-        // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.testTag("series_quality_filter_row")
-        ) {
-            items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
-                val isSelected = selectedQualityFilter == qOpt
-                val activeColor = when (qOpt) {
-                    "4K" -> Badge4K
-                    "FHD" -> BadgeFHD
-                    "HD" -> BadgeHD
-                    "SD" -> BadgeSD
-                    else -> KrasRed
-                }
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (isSelected) activeColor else CinemaCard)
-                        .border(
-                            width = 1.dp,
-                            color = if (isSelected) Color.White.copy(alpha = 0.3f) else GlassBorder,
-                            shape = RoundedCornerShape(14.dp)
-                        )
-                        .clickable { selectedQualityFilter = qOpt }
-                        .padding(horizontal = 12.dp, vertical = 5.dp)
-                        .testTag("series_quality_chip_$qOpt")
-                ) {
-                    Text(
-                        text = if (qOpt == "All") "All Quality" else qOpt,
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-
-            item(key = "sort_by_quality") {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (sortByQuality) KrasRed else CinemaCard)
-                        .border(
-                            width = 1.dp,
-                            color = if (sortByQuality) Color.White.copy(alpha = 0.35f) else GlassBorder,
-                            shape = RoundedCornerShape(14.dp)
-                        )
-                        .clickable { sortByQuality = !sortByQuality }
-                        .padding(horizontal = 12.dp, vertical = 5.dp)
-                        .testTag("series_sort_by_quality_chip")
-                ) {
-                    Text(
-                        text = if (sortByQuality) "Sort by quality ↓" else "Sort by quality",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = if (sortByQuality) FontWeight.Bold else FontWeight.Medium
-                    )
-                }
-            }
-        }
-
-        // Count
-        Text(
-            text = "${totalCount.coerceAtLeast(filteredSeries.size)} Shows available",
-            color = TextSecondary,
-            fontSize = 12.sp,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+        DynamicAmbientPosterBackdrop(
+            imageUrl = ambientPosterUrl,
+            ambientAlpha = 0.22f
         )
 
-        // Grid
-        LazyVerticalGrid(
-            state = gridState,
-            columns = GridCells.Adaptive(minSize = 130.dp),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 90.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxSize()
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
         ) {
-            items(filteredSeries, key = { it.id }) { s ->
-                MediaCard(
-                    item = s,
-                    onClick = { onSeriesClick(s) },
-                    cardStyle = cardStyle,
-                    isFavorite = isFavorite(s.id),
-                    onToggleFavorite = { onToggleFavorite(s) }
+            // Search bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = {
+                        Text(
+                            text = "Search TV Series, seasons...",
+                            color = TextSecondary,
+                            fontSize = 13.sp
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Default.Search, contentDescription = "Search", tint = KrasRedBright)
+                    },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = KrasRedBright,
+                        unfocusedBorderColor = GlassBorder,
+                        focusedContainerColor = Color(0x8810131C),
+                        unfocusedContainerColor = Color(0x6610131C),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("series_search_input")
                 )
+            }
+
+            // Category Chips
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item(key = "cat_all_series") {
+                    LiquidGlassChip(
+                        text = "All TV Series",
+                        isSelected = selectedCategoryId == "all",
+                        onClick = { selectedCategoryId = "all" },
+                        activeColor = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                items(categories, key = { it.categoryId }) { cat ->
+                    LiquidGlassChip(
+                        text = cat.categoryName,
+                        isSelected = selectedCategoryId == cat.categoryId,
+                        onClick = { selectedCategoryId = cat.categoryId },
+                        activeColor = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.testTag("series_quality_filter_row")
+            ) {
+                items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
+                    val isSelected = selectedQualityFilter == qOpt
+                    val activeColor = when (qOpt) {
+                        "4K" -> Badge4K
+                        "FHD" -> BadgeFHD
+                        "HD" -> BadgeHD
+                        "SD" -> BadgeSD
+                        else -> KrasRed
+                    }
+                    LiquidGlassChip(
+                        text = if (qOpt == "All") "All Quality" else qOpt,
+                        isSelected = isSelected,
+                        onClick = { selectedQualityFilter = qOpt },
+                        activeColor = activeColor,
+                        modifier = Modifier.testTag("series_quality_chip_$qOpt")
+                    )
+                }
+
+                item(key = "sort_by_quality") {
+                    LiquidGlassChip(
+                        text = if (sortByQuality) "Sort by quality ↓" else "Sort by quality",
+                        isSelected = sortByQuality,
+                        onClick = { sortByQuality = !sortByQuality },
+                        activeColor = KrasRed,
+                        modifier = Modifier.testTag("series_sort_by_quality_chip")
+                    )
+                }
+            }
+
+            // Count
+            Text(
+                text = "${totalCount.coerceAtLeast(filteredSeries.size)} Shows available",
+                color = TextSecondary,
+                fontSize = 12.sp,
+                fontFamily = OutfitFontFamily,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+            )
+
+            // Grid
+            LazyVerticalGrid(
+                state = gridState,
+                columns = GridCells.Adaptive(minSize = 118.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 100.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(filteredSeries, key = { it.id }) { s ->
+                    MediaCard(
+                        item = s,
+                        onClick = { onSeriesClick(s) },
+                        cardStyle = cardStyle,
+                        isFavorite = isFavorite(s.id),
+                        onToggleFavorite = { onToggleFavorite(s) }
+                    )
+                }
             }
         }
     }
