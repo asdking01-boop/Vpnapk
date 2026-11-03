@@ -522,5 +522,38 @@ class ExampleRobolectricTest {
     assertFalse(dummyApk.exists())
     assertEquals(2, repo.getLastKnownVersionCode())
   }
+
+  @Test
+  fun `unified player wrapper reuses exoplayer instance and transitions states cleanly`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val wrapper = com.example.player.ExoPlayerWrapper(context)
+
+    // Verify single instance reuse across identical buffer settings
+    val p1 = wrapper.initPlayer("Large")
+    val p2 = wrapper.initPlayer("Large")
+    assertSame(p1, p2)
+
+    // Initial state is PREPARING before first frame
+    wrapper.setPreparingState()
+    assertEquals(com.example.player.PlayerUiState.PREPARING, wrapper.playerUiState.value)
+    assertFalse(wrapper.hasRenderedFirstFrame.value)
+    assertNull(wrapper.errorMessage.value)
+
+    // Blank URL transitions cleanly to ERROR state without infinite spinner
+    wrapper.play("")
+    assertEquals(com.example.player.PlayerUiState.ERROR, wrapper.playerUiState.value)
+    assertFalse(wrapper.isBuffering.value)
+    assertNotNull(wrapper.errorMessage.value)
+
+    // Valid stream preparation enters PREPARING on the same player instance
+    wrapper.play("https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", startPositionMs = 15_000L)
+    assertEquals(com.example.player.PlayerUiState.PREPARING, wrapper.playerUiState.value)
+    assertNull(wrapper.errorMessage.value)
+    assertSame(p1, wrapper.getPlayer())
+
+    // Cleanup
+    wrapper.release()
+  }
 }
+
 

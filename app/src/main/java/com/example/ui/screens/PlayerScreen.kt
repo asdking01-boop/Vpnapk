@@ -75,6 +75,7 @@ import coil.compose.AsyncImage
 import com.example.data.local.KrasRepository
 import com.example.data.model.*
 import com.example.player.ExoPlayerWrapper
+import com.example.player.PlayerUiState
 import com.example.player.VideoQualityVariant
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.KrasLogo
@@ -98,7 +99,8 @@ fun PlayerScreen(
     modifier: Modifier = Modifier,
     seriesDetails: SeriesDetails? = null,
     moviesPlaylist: List<MediaItem> = emptyList(),
-    onPlayEpisode: ((Episode) -> Unit)? = null
+    onPlayEpisode: ((Episode) -> Unit)? = null,
+    onRetry: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -136,11 +138,20 @@ fun PlayerScreen(
         }
     }
 
-    // Re-apply immersive fullscreen on Lifecycle ON_RESUME
+    // Lifecycle-aware player & immersive management
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                PlayerImmersiveHelper.enterImmersiveMode(activity)
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    PlayerImmersiveHelper.enterImmersiveMode(activity)
+                    playerWrapper.resumeForLifecycle()
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    if (activity?.isInPictureInPictureMode != true) {
+                        playerWrapper.pauseForLifecycle()
+                    }
+                }
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -149,6 +160,8 @@ fun PlayerScreen(
         }
     }
 
+    val playerUiState by playerWrapper.playerUiState.collectAsState()
+    val hasRenderedFirstFrame by playerWrapper.hasRenderedFirstFrame.collectAsState()
     val isPlaying by playerWrapper.isPlaying.collectAsState()
     val isBuffering by playerWrapper.isBuffering.collectAsState()
     val currentPos by playerWrapper.currentPosition.collectAsState()
@@ -175,6 +188,62 @@ fun PlayerScreen(
     var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
     var isFullscreenLandscape by remember { mutableStateOf(isLandscape) }
 
+    // Delayed small red spinner: only shown if preparation takes > 600ms (or mid-stream buffering > 350ms),
+    // and removed immediately when the first video frame is rendered.
+    var showDelayedSpinner by remember { mutableStateOf(false) }
+
+    LaunchedEffect(playerUiState, hasRenderedFirstFrame, mediaItem.id, episode?.id) {
+        when {
+            playerUiState == PlayerUiState.ERROR -> {
+                showDelayedSpinner = false
+            }
+            playerUiState == PlayerUiState.PREPARING && !hasRenderedFirstFrame -> {
+                showDelayedSpinner = false
+                delay(600L)
+                showDelayedSpinner = true
+            }
+            playerUiState == PlayerUiState.BUFFERING -> {
+                showDelayedSpinner = false
+                delay(350L)
+                showDelayedSpinner = true
+            }
+            else -> {
+                showDelayedSpinner = false
+            }
+        }
+    }
+
+    // Fallback for software/headless surfaces where STATE_READY is active
+    LaunchedEffect(playerUiState, isPlaying, hasRenderedFirstFrame) {
+        if ((playerUiState == PlayerUiState.PLAYING || playerUiState == PlayerUiState.PAUSED) && !hasRenderedFirstFrame) {
+            delay(250L)
+            playerWrapper.markFirstFrameRenderedFallback()
+        }
+    }
+
+    // Watchdog timeout so the user is never left stuck on an infinite spinner
+    LaunchedEffect(playerUiState, hasRenderedFirstFrame, mediaItem.id, episode?.id) {
+        if (playerUiState == PlayerUiState.PREPARING && !hasRenderedFirstFrame) {
+            delay(25_000L)
+            if (playerWrapper.playerUiState.value == PlayerUiState.PREPARING &&
+                !playerWrapper.hasRenderedFirstFrame.value
+            ) {
+                playerWrapper.failWithError("Stream connection timed out. Please try again.")
+            }
+        }
+    }
+
+    // Display controls when playback becomes ready
+    var wasPreparing by remember(mediaItem.id, episode?.id) { mutableStateOf(true) }
+    LaunchedEffect(playerUiState) {
+        if (playerUiState == PlayerUiState.PREPARING) {
+            wasPreparing = true
+        } else if (wasPreparing && (playerUiState == PlayerUiState.PLAYING || playerUiState == PlayerUiState.PAUSED)) {
+            wasPreparing = false
+            controlsVisible = true
+        }
+    }
+
     // Interactive scrubbing state for smooth timeline seeking
     var isScrubbing by remember { mutableStateOf(false) }
     var scrubFraction by remember { mutableFloatStateOf(0f) }
@@ -197,10 +266,10 @@ fun PlayerScreen(
 
     val anyModalOpen = showSpeedDialog || showQualityDialog || showAudioSubtitleDialog || showPlaylistDialog || showCastDialog
 
-    // Auto-hide controls after 4 seconds of inactivity while video is playing
-    LaunchedEffect(controlsVisible, isPlaying, isScrubbing, anyModalOpen) {
-        if (controlsVisible && isPlaying && !isScrubbing && !anyModalOpen) {
-            delay(4000)
+    // Auto-hide controls after 3.5 seconds of inactivity while video is actively playing
+    LaunchedEffect(controlsVisible, playerUiState, isPlaying, isScrubbing, anyModalOpen) {
+        if (controlsVisible && playerUiState == PlayerUiState.PLAYING && isPlaying && !isScrubbing && !anyModalOpen) {
+            delay(3500L)
             controlsVisible = false
         }
     }
@@ -217,6 +286,22 @@ fun PlayerScreen(
         label = "glow_pulse"
     )
 
+    // Subtle fade-in of the video surface when the first video frame is rendered
+    val firstFrameShutterAlpha by animateFloatAsState(
+        targetValue = if (hasRenderedFirstFrame) 0f else 1f,
+        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+        label = "first_frame_shutter_alpha"
+    )
+
+    val isSpinnerVisible = showDelayedSpinner &&
+        playerUiState != PlayerUiState.ERROR &&
+        (playerUiState == PlayerUiState.PREPARING || playerUiState == PlayerUiState.BUFFERING || (isBuffering && !hasRenderedFirstFrame))
+
+    val showCenterControls = playerUiState != PlayerUiState.PREPARING &&
+        playerUiState != PlayerUiState.BUFFERING &&
+        playerUiState != PlayerUiState.ERROR &&
+        !isSpinnerVisible
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -229,12 +314,14 @@ fun PlayerScreen(
             }
             .testTag("player_screen")
     ) {
-        // 1. Video Surface (Media3 ExoPlayer PlayerView)
+        // 1. Video Surface (Media3 ExoPlayer PlayerView) - same instance preserved throughout preparation, buffering & playback
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     player = playerWrapper.getPlayer()
                     useController = false
+                    setShutterBackgroundColor(android.graphics.Color.BLACK)
+                    setKeepContentOnPlayerReset(true)
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
@@ -249,6 +336,10 @@ fun PlayerScreen(
                 }
             },
             update = { playerView ->
+                val activePlayer = playerWrapper.getPlayer()
+                if (playerView.player !== activePlayer) {
+                    playerView.player = activePlayer
+                }
                 playerView.resizeMode = when (currentAspectRatio) {
                     AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
                     AspectRatioMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
@@ -260,92 +351,100 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. Buffering Spinner / Loading Overlay
-        AnimatedVisibility(
-            visible = isBuffering,
-            enter = fadeIn(tween(200)),
-            exit = fadeOut(tween(200)),
-            modifier = Modifier.align(Alignment.Center)
-        ) {
+        // Pure black video surface before the first frame is rendered, with subtle fade-out on first frame
+        if (firstFrameShutterAlpha > 0.001f) {
             Box(
                 modifier = Modifier
-                    .size(110.dp)
-                    .liquidGlassPanel(
-                        cornerRadius = 28.dp,
-                        tintColor = Color(0xFF0A0B10),
-                        surfaceAlpha = 0.72f,
-                        borderAlpha = 0.45f,
-                        accentGlow = KrasRed
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(
-                        color = KrasRed,
-                        trackColor = Color.White.copy(alpha = 0.15f),
-                        strokeWidth = 3.dp,
-                        modifier = Modifier.size(42.dp)
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = "Loading Stream",
-                        color = Color.White.copy(alpha = 0.9f),
-                        fontSize = 11.sp,
-                        fontFamily = OutfitFontFamily,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = firstFrameShutterAlpha }
+                    .background(Color.Black)
+            )
         }
 
-        // 3. Stream Reconnect / Error Banner
+        // 2. Small Elegant Red Spinner directly over the video surface (shown only if preparation > 600ms or mid-stream buffering > 350ms)
         AnimatedVisibility(
-            visible = errorMessage != null,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            visible = isSpinnerVisible,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(150)),
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 74.dp, start = 24.dp, end = 24.dp)
+                .align(Alignment.Center)
+                .testTag("player_loading_spinner")
         ) {
-            if (errorMessage != null) {
-                Box(
-                    modifier = Modifier
-                        .liquidGlassPanel(
-                            cornerRadius = 16.dp,
-                            tintColor = KrasRedDark,
-                            surfaceAlpha = 0.85f,
-                            borderAlpha = 0.55f
-                        )
-                        .padding(horizontal = 16.dp, vertical = 10.dp)
+            CircularProgressIndicator(
+                color = KrasRed,
+                trackColor = Color.White.copy(alpha = 0.14f),
+                strokeWidth = 3.dp,
+                modifier = Modifier.size(38.dp)
+            )
+        }
+
+        // 3. Minimal In-Player Error State with Retry Button (inside the same player screen)
+        AnimatedVisibility(
+            visible = playerUiState == PlayerUiState.ERROR,
+            enter = fadeIn(tween(220)),
+            exit = fadeOut(tween(180)),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = 32.dp)
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier
+                    .widthIn(max = 380.dp)
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ErrorOutline,
+                    contentDescription = "Playback Error",
+                    tint = KrasRedBright,
+                    modifier = Modifier.size(36.dp)
+                )
+                Text(
+                    text = errorMessage ?: "Unable to play this stream right now.",
+                    color = Color.White.copy(alpha = 0.92f),
+                    fontSize = 14.sp,
+                    fontFamily = PlusJakartaSansFontFamily,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Button(
+                    onClick = {
+                        if (onRetry != null) {
+                            onRetry()
+                        } else {
+                            playerWrapper.retry()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = KrasRed),
+                    shape = RoundedCornerShape(50),
+                    contentPadding = PaddingValues(horizontal = 28.dp, vertical = 10.dp),
+                    modifier = Modifier.testTag("player_retry_button")
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ErrorOutline,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = errorMessage!!,
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontFamily = PlusJakartaSansFontFamily,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Retry",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
 
         // 4. Main Cinematic Controls Overlay (Top Bar, Center Controls, Bottom Timeline & Pill Bar)
         AnimatedVisibility(
-            visible = controlsVisible,
-            enter = fadeIn(animationSpec = tween(260, easing = FastOutSlowInEasing)),
-            exit = fadeOut(animationSpec = tween(260, easing = FastOutSlowInEasing)),
+            visible = controlsVisible || playerUiState == PlayerUiState.ERROR,
+            enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)),
+            exit = fadeOut(animationSpec = tween(220, easing = FastOutSlowInEasing)),
             modifier = Modifier.fillMaxSize()
         ) {
             val horizontalEdgePadding = if (isLandscape) 28.dp else 18.dp
@@ -579,68 +678,76 @@ fun PlayerScreen(
 
                 // =========================================================================
                 // CENTER PLAYER CONTROLS: 10s Rewind | Glowing Play/Pause | 10s Forward
+                // Hidden during initial preparation and while spinner is active so they never overlap
                 // =========================================================================
-                Column(
-                    modifier = Modifier.align(Alignment.Center),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                AnimatedVisibility(
+                    visible = showCenterControls,
+                    enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.92f, animationSpec = tween(180)),
+                    exit = fadeOut(tween(140)),
+                    modifier = Modifier.align(Alignment.Center)
                 ) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(if (isLandscape) 44.dp else 32.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // Left: Smooth 10-Second Rewind Button
-                        CenterSeekButton(
-                            icon = Icons.Default.Replay10,
-                            contentDescription = "Rewind 10 seconds",
-                            onClick = {
-                                playerWrapper.seekBackward(10_000)
-                                seekFeedbackText = "-10s"
-                            },
-                            modifier = Modifier.testTag("player_rewind_button")
-                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(if (isLandscape) 44.dp else 32.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Left: Smooth 10-Second Rewind Button
+                            CenterSeekButton(
+                                icon = Icons.Default.Replay10,
+                                contentDescription = "Rewind 10 seconds",
+                                onClick = {
+                                    playerWrapper.seekBackward(10_000)
+                                    seekFeedbackText = "-10s"
+                                },
+                                modifier = Modifier.testTag("player_rewind_button")
+                            )
 
-                        // Center: Large Circular Play/Pause Button with Dark Translucent Glass & Red Glowing Border
-                        CenterPlayPauseButton(
-                            isPlaying = isPlaying,
-                            glowPulse = glowPulse,
-                            onClick = { playerWrapper.togglePlayPause() },
-                            modifier = Modifier.testTag("player_play_pause_button")
-                        )
+                            // Center: Large Circular Play/Pause Button with Dark Translucent Glass & Red Glowing Border
+                            CenterPlayPauseButton(
+                                isPlaying = isPlaying,
+                                isEnded = playerUiState == PlayerUiState.ENDED,
+                                glowPulse = glowPulse,
+                                onClick = { playerWrapper.togglePlayPause() },
+                                modifier = Modifier.testTag("player_play_pause_button")
+                            )
 
-                        // Right: Smooth 10-Second Forward Button
-                        CenterSeekButton(
-                            icon = Icons.Default.Forward10,
-                            contentDescription = "Forward 10 seconds",
-                            onClick = {
-                                playerWrapper.seekForward(10_000)
-                                seekFeedbackText = "+10s"
-                            },
-                            modifier = Modifier.testTag("player_forward_button")
-                        )
-                    }
+                            // Right: Smooth 10-Second Forward Button
+                            CenterSeekButton(
+                                icon = Icons.Default.Forward10,
+                                contentDescription = "Forward 10 seconds",
+                                onClick = {
+                                    playerWrapper.seekForward(10_000)
+                                    seekFeedbackText = "+10s"
+                                },
+                                modifier = Modifier.testTag("player_forward_button")
+                            )
+                        }
 
-                    // Subtle seek feedback pill (-10s / +10s)
-                    AnimatedVisibility(
-                        visible = seekFeedbackText != null,
-                        enter = fadeIn(tween(120)) + scaleIn(initialScale = 0.85f),
-                        exit = fadeOut(tween(180)) + scaleOut(targetScale = 0.9f)
-                    ) {
-                        if (seekFeedbackText != null) {
-                            Box(
-                                modifier = Modifier
-                                    .padding(top = 10.dp)
-                                    .clip(RoundedCornerShape(50))
-                                    .background(KrasRed.copy(alpha = 0.85f))
-                                    .border(0.8.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(50))
-                                    .padding(horizontal = 12.dp, vertical = 3.dp)
-                            ) {
-                                Text(
-                                    text = seekFeedbackText!!,
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontFamily = OutfitFontFamily,
-                                    fontWeight = FontWeight.Bold
-                                )
+                        // Subtle seek feedback pill (-10s / +10s)
+                        AnimatedVisibility(
+                            visible = seekFeedbackText != null,
+                            enter = fadeIn(tween(120)) + scaleIn(initialScale = 0.85f),
+                            exit = fadeOut(tween(180)) + scaleOut(targetScale = 0.9f)
+                        ) {
+                            if (seekFeedbackText != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .padding(top = 10.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(KrasRed.copy(alpha = 0.85f))
+                                        .border(0.8.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(50))
+                                        .padding(horizontal = 12.dp, vertical = 3.dp)
+                                ) {
+                                    Text(
+                                        text = seekFeedbackText!!,
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontFamily = OutfitFontFamily,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
                     }
@@ -1707,7 +1814,8 @@ private fun CenterPlayPauseButton(
     isPlaying: Boolean,
     glowPulse: Float,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isEnded: Boolean = false
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -1778,8 +1886,16 @@ private fun CenterPlayPauseButton(
         contentAlignment = Alignment.Center
     ) {
         Icon(
-            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-            contentDescription = if (isPlaying) "Pause" else "Play",
+            imageVector = when {
+                isEnded -> Icons.Default.Replay
+                isPlaying -> Icons.Default.Pause
+                else -> Icons.Default.PlayArrow
+            },
+            contentDescription = when {
+                isEnded -> "Replay"
+                isPlaying -> "Pause"
+                else -> "Play"
+            },
             tint = Color.White,
             modifier = Modifier.size(38.dp)
         )

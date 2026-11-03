@@ -79,6 +79,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val _currentSeriesDetails = MutableStateFlow<SeriesDetails?>(null)
     val currentSeriesDetails = _currentSeriesDetails.asStateFlow()
 
+    private val _isSeriesDetailsLoading = MutableStateFlow(false)
+    val isSeriesDetailsLoading = _isSeriesDetailsLoading.asStateFlow()
+
     // Favorites & History & Downloads
     private val _favorites = MutableStateFlow<List<FavoriteItem>>(emptyList())
     val favorites = _favorites.asStateFlow()
@@ -915,18 +918,22 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- On-Demand Series Details ---
     fun loadSeriesDetails(seriesItem: MediaItem) {
+        if (_currentSeriesDetails.value?.seriesId != seriesItem.streamId) {
+            _currentSeriesDetails.value = null
+        }
         viewModelScope.launch {
-            _isLoading.value = true
+            _isSeriesDetailsLoading.value = true
             try {
                 val active = _activeAccount.value
                 if (active != null && !active.isDemo) {
-                    val details = apiClient.getSeriesDetails(active, seriesItem.streamId)
+                    val details = withContext(Dispatchers.IO) {
+                        apiClient.getSeriesDetails(active, seriesItem.streamId)
+                    }
                     if (details != null) {
                         _currentSeriesDetails.value = details
                         if (details.quality.isNotBlank()) {
                             applyDetectedQualityToItem(seriesItem.id, details.quality)
                         }
-                        _isLoading.value = false
                         return@launch
                     }
                 }
@@ -935,7 +942,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 e.printStackTrace()
                 _currentSeriesDetails.value = SampleData.getSampleSeriesDetails(seriesItem.streamId)
             } finally {
-                _isLoading.value = false
+                _isSeriesDetailsLoading.value = false
             }
         }
     }
@@ -945,12 +952,57 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         _nowPlayingItem.value = mediaItem
         _nowPlayingEpisode.value = episode
 
-        val urlToPlay = episode?.streamUrl ?: mediaItem.streamUrl
+        val urlToPlay = (episode?.streamUrl?.takeIf { it.isNotBlank() } ?: mediaItem.streamUrl).trim()
         val previousProgress = _watchHistory.value.find { it.mediaId == (episode?.id ?: mediaItem.id) }
         val startPos = previousProgress?.positionMs ?: 0L
 
-        playerWrapper.play(urlToPlay, startPos)
-        startPositionTracker()
+        if (urlToPlay.isNotBlank()) {
+            playerWrapper.play(urlToPlay, startPos)
+            startPositionTracker()
+        } else if (mediaItem.type == MediaType.SERIES) {
+            // Immediately enter the unified player in PREPARING state and resolve the episode URL in-place
+            playerWrapper.setPreparingState()
+            viewModelScope.launch {
+                try {
+                    val active = _activeAccount.value
+                    val details = _currentSeriesDetails.value?.takeIf { it.seriesId == mediaItem.streamId }
+                        ?: withContext(Dispatchers.IO) {
+                            if (active != null && !active.isDemo) {
+                                apiClient.getSeriesDetails(active, mediaItem.streamId)
+                            } else {
+                                SampleData.getSampleSeriesDetails(mediaItem.streamId)
+                            }
+                        }
+                        ?: SampleData.getSampleSeriesDetails(mediaItem.streamId)
+
+                    _currentSeriesDetails.value = details
+                    val resolvedEpisode = episode?.let { ep ->
+                        details.seasons.flatMap { it.episodes }.find {
+                            it.id == ep.id || (it.seasonNumber == ep.seasonNumber && it.episodeNum == ep.episodeNum)
+                        }
+                    } ?: details.seasons.firstOrNull()?.episodes?.firstOrNull()
+
+                    if (_nowPlayingItem.value?.id != mediaItem.id) return@launch
+
+                    if (resolvedEpisode != null && resolvedEpisode.streamUrl.isNotBlank()) {
+                        _nowPlayingEpisode.value = resolvedEpisode
+                        val epProgress = _watchHistory.value.find { it.mediaId == resolvedEpisode.id }
+                        playerWrapper.play(resolvedEpisode.streamUrl, epProgress?.positionMs ?: startPos)
+                        startPositionTracker()
+                    } else {
+                        playerWrapper.failWithError("Unable to load episode stream URL.")
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    if (_nowPlayingItem.value?.id == mediaItem.id) {
+                        playerWrapper.failWithError("Failed to prepare series episode stream.")
+                    }
+                }
+            }
+        } else {
+            playerWrapper.play(urlToPlay, startPos)
+            startPositionTracker()
+        }
 
         // Step 2b: For movies, also check get_vod_info in background for video width/height/codec/framerate
         val active = _activeAccount.value
@@ -969,6 +1021,17 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     e.printStackTrace()
                 }
             }
+        }
+    }
+
+    fun retryPlayback() {
+        val currentItem = _nowPlayingItem.value ?: return
+        val currentEp = _nowPlayingEpisode.value
+        val activeUrl = currentEp?.streamUrl?.ifBlank { currentItem.streamUrl } ?: currentItem.streamUrl
+        if (activeUrl.isNotBlank()) {
+            playerWrapper.retry()
+        } else {
+            startPlayback(currentItem, currentEp)
         }
     }
 
@@ -1179,11 +1242,14 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     // --- Settings & Cache ---
     fun updateSettings(newSettings: UserSettings) {
         val orderChanged = _userSettings.value.liveChannelOrder != newSettings.liveChannelOrder
+        val bufferChanged = _userSettings.value.bufferSize != newSettings.bufferSize
         _userSettings.value = newSettings
         viewModelScope.launch(Dispatchers.IO) {
             repository.saveUserSettings(newSettings)
         }
-        playerWrapper.initPlayer(newSettings.bufferSize)
+        if (bufferChanged) {
+            playerWrapper.initPlayer(newSettings.bufferSize)
+        }
         if (orderChanged) {
             refreshLiveChannelsOrder()
         }

@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
                 val series by viewModel.series.collectAsState()
                 val seriesCategories by viewModel.seriesCategories.collectAsState()
                 val currentSeriesDetails by viewModel.currentSeriesDetails.collectAsState()
+                val isSeriesDetailsLoading by viewModel.isSeriesDetailsLoading.collectAsState()
                 val liveStreams by viewModel.liveStreams.collectAsState()
                 val liveCategories by viewModel.liveCategories.collectAsState()
                 val favorites by viewModel.favorites.collectAsState()
@@ -116,6 +117,12 @@ class MainActivity : ComponentActivity() {
 
                 val nowPlayingItem by viewModel.nowPlayingItem.collectAsState()
                 val nowPlayingEpisode by viewModel.nowPlayingEpisode.collectAsState()
+                var lastActivePlayingItem by remember { mutableStateOf<MediaItem?>(null) }
+                var lastActivePlayingEpisode by remember { mutableStateOf< com.example.data.model.Episode?>(null) }
+                if (nowPlayingItem != null) {
+                    lastActivePlayingItem = nowPlayingItem
+                    lastActivePlayingEpisode = nowPlayingEpisode
+                }
                 val syncProgress by viewModel.syncProgress.collectAsState()
                 val errorMessage by viewModel.errorMessage.collectAsState()
                 val totalMoviesCount by viewModel.totalMoviesCount.collectAsState()
@@ -241,56 +248,40 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
-                if (isSplashActive) {
-                    SplashScreen(
-                        isLoading = isLoading,
-                        onSplashFinished = {
-                            viewModel.stopIntroSound()
-                            isSplashActive = false
-                            if (activeAccount == null) {
-                                isLoginOpen = true
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                ) {
+                    if (isSplashActive) {
+                        SplashScreen(
+                            isLoading = isLoading,
+                            onSplashFinished = {
+                                viewModel.stopIntroSound()
+                                isSplashActive = false
+                                if (activeAccount == null) {
+                                    isLoginOpen = true
+                                }
                             }
-                        }
-                    )
-                } else if (nowPlayingItem != null) {
-                    // Fullscreen Cinema & Live Video Player
-                    PlayerScreen(
-                        mediaItem = nowPlayingItem!!,
-                        episode = nowPlayingEpisode,
-                        playerWrapper = viewModel.playerWrapper,
-                        userSettings = userSettings,
-                        onClose = { viewModel.stopPlayback() },
-                        liveChannels = liveStreams,
-                        onSwitchChannel = { channel ->
-                            viewModel.startPlayback(channel)
-                        },
-                        onDownloadClick = {
-                            viewModel.downloadItem(nowPlayingItem!!)
-                        },
-                        seriesDetails = currentSeriesDetails,
-                        moviesPlaylist = movies,
-                        onPlayEpisode = { ep ->
-                            viewModel.startPlayback(nowPlayingItem!!, ep)
-                        }
-                    )
-                } else if (isLoginOpen) {
-                    // Login / Account Manager Screen
-                    LoginScreen(
-                        onLoginSuccess = { isLoginOpen = false },
-                        savedAccounts = accounts,
-                        onSelectAccount = { acc ->
-                            viewModel.switchAccount(acc.id)
-                            isLoginOpen = false
-                        },
-                        onDemoLogin = {
-                            viewModel.loginDemoMode()
-                            isLoginOpen = false
-                        },
-                        onPerformLogin = { serverUrl, user, pass, callback ->
-                            viewModel.login(serverUrl, user, pass, callback)
-                        }
-                    )
-                } else if (isSearchOpen) {
+                        )
+                    } else if (isLoginOpen) {
+                        // Login / Account Manager Screen
+                        LoginScreen(
+                            onLoginSuccess = { isLoginOpen = false },
+                            savedAccounts = accounts,
+                            onSelectAccount = { acc ->
+                                viewModel.switchAccount(acc.id)
+                                isLoginOpen = false
+                            },
+                            onDemoLogin = {
+                                viewModel.loginDemoMode()
+                                isLoginOpen = false
+                            },
+                            onPerformLogin = { serverUrl, user, pass, callback ->
+                                viewModel.login(serverUrl, user, pass, callback)
+                            }
+                        )
+                    } else if (isSearchOpen) {
                     // Full Screen Global Search (Room-backed & LiveChannelOrder-sorted)
                     val allMedia = remember(searchResults, movies, series, liveStreams) {
                         if (searchResults.isNotEmpty()) searchResults else (movies + series + liveStreams)
@@ -518,11 +509,11 @@ class MainActivity : ComponentActivity() {
                         }
 
                         // Series Details Bottom Sheet
-                        if (selectedSeriesForDetails != null) {
+                        if (selectedSeriesForDetails != null && nowPlayingItem == null) {
                             SeriesDetailsSheet(
                                 seriesItem = selectedSeriesForDetails!!,
                                 seriesDetails = currentSeriesDetails,
-                                isLoading = isLoading,
+                                isLoading = isSeriesDetailsLoading,
                                 onDismiss = { selectedSeriesForDetails = null },
                                 onPlayEpisode = { seriesItem, episode ->
                                     selectedSeriesForDetails = null
@@ -540,6 +531,42 @@ class MainActivity : ComponentActivity() {
                                 isFavorite = viewModel.isFavorite(selectedSeriesForDetails!!.id),
                                 onToggleFavorite = { viewModel.toggleFavorite(selectedSeriesForDetails!!) },
                                 watchHistory = watchHistory
+                            )
+                        }
+                    }
+                    }
+
+                    // Unified Seamless Fullscreen Video Player Overlay
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = !isSplashActive && nowPlayingItem != null,
+                        enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)),
+                        exit = fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        val activeMedia = nowPlayingItem ?: lastActivePlayingItem
+                        val activeEpisode = if (nowPlayingItem != null) nowPlayingEpisode else lastActivePlayingEpisode
+                        if (activeMedia != null) {
+                            PlayerScreen(
+                                mediaItem = activeMedia,
+                                episode = activeEpisode,
+                                playerWrapper = viewModel.playerWrapper,
+                                userSettings = userSettings,
+                                onClose = { viewModel.stopPlayback() },
+                                liveChannels = liveStreams,
+                                onSwitchChannel = { channel ->
+                                    viewModel.startPlayback(channel)
+                                },
+                                onDownloadClick = {
+                                    viewModel.downloadItem(activeMedia)
+                                },
+                                seriesDetails = currentSeriesDetails,
+                                moviesPlaylist = movies,
+                                onPlayEpisode = { ep ->
+                                    viewModel.startPlayback(activeMedia, ep)
+                                },
+                                onRetry = {
+                                    viewModel.retryPlayback()
+                                }
                             )
                         }
                     }
