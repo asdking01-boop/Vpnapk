@@ -62,6 +62,11 @@ class MainActivity : ComponentActivity() {
     private val viewModel: KrasViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            splashScreen.setOnExitAnimationListener { splashScreenView ->
+                splashScreenView.remove()
+            }
+        }
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
@@ -253,18 +258,7 @@ class MainActivity : ComponentActivity() {
                         .fillMaxSize()
                         .background(Color.Black)
                 ) {
-                    if (isSplashActive) {
-                        SplashScreen(
-                            isLoading = isLoading,
-                            onSplashFinished = {
-                                viewModel.stopIntroSound()
-                                isSplashActive = false
-                                if (activeAccount == null) {
-                                    isLoginOpen = true
-                                }
-                            }
-                        )
-                    } else if (isLoginOpen) {
+                    if (isLoginOpen && !isSplashActive) {
                         // Login / Account Manager Screen
                         LoginScreen(
                             onLoginSuccess = { isLoginOpen = false },
@@ -281,7 +275,7 @@ class MainActivity : ComponentActivity() {
                                 viewModel.login(serverUrl, user, pass, callback)
                             }
                         )
-                    } else if (isSearchOpen) {
+                    } else if (isSearchOpen && !isSplashActive) {
                     // Full Screen Global Search (Room-backed & LiveChannelOrder-sorted)
                     val allMedia = remember(searchResults, movies, series, liveStreams) {
                         if (searchResults.isNotEmpty()) searchResults else (movies + series + liveStreams)
@@ -569,6 +563,20 @@ class MainActivity : ComponentActivity() {
                                 }
                             )
                         }
+                    }
+
+                    // Cinematic 3D Glass KRAS TV Splash Overlay (preloads HomeScreen underneath)
+                    if (isSplashActive) {
+                        SplashScreen(
+                            isLoading = isLoading,
+                            onSplashFinished = {
+                                viewModel.stopIntroSound()
+                                isSplashActive = false
+                                if (activeAccount == null) {
+                                    isLoginOpen = true
+                                }
+                            }
+                        )
                     }
                 }
             }

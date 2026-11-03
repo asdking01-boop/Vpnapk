@@ -1,16 +1,17 @@
 package com.example.ui.screens
 
+import android.animation.ValueAnimator
+import android.os.Build
+import android.provider.Settings
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -18,49 +19,31 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.PlatformTextStyle
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
-import com.example.R
 import com.example.ui.components.KrasLogo
-import com.example.ui.theme.CinemaBlack
 import com.example.ui.theme.KrasRed
 import com.example.ui.theme.KrasRedBright
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Kras TV Netflix-Style Cinematic Opening Animation
+ * KRAS TV Ultra-Premium 3D Glass & Metallic Silver Cinematic Splash Screen
  *
- * Requirements:
- * 1. ONLY ONE K element in the entire animation. The same K composable animates from the
- *    center of the screen down to its final position as the first letter of "KRAS TV".
- * 2. Sequence:
- *    a) Glossy red K appears large in the center (zoom-in, soft red glow, specular light sweep,
- *       thin red ribbon light streaks).
- *    b) The SAME K smoothly scales down and moves to the left into its final slot over ~700ms
- *       (FastOutSlowInEasing), while "RAS TV" appears right next to it letter by letter
- *       (fade + slight rise, 60ms delay per letter).
- *    c) At the end, K and "RAS TV" form one centered word "KRAS TV", with identical height,
- *       weight, red gradient, and glass effect.
- *    d) One soft red glow pulse, hold ~0.5s, then fade smoothly into Home.
- * 3. Exact measurement: Row("KRAS TV") is rendered in the center with alpha=0 for letters initially.
- *    Target position and delta are measured, and K animates from (screenCenter - kSlotCenter) down to (0, 0).
- * 4. Specular light sweep clipped strictly to the K letter shape (no bounding box/rectangle visible).
- *    Soft radial glow that fades to transparent with no hard edge. Tap to skip enabled.
+ * Timeline (2.2s total, zero artificial loading delay):
+ * - 0.0–0.3s (0–300ms): Pure black screen (#000000).
+ * - 0.3–0.8s (300–800ms): Reveal the 3D glass K symbol in center with subtle zoom, fade, and volumetric red glow.
+ * - 0.8–1.3s (800–1300ms): Animate a cinematic red & metallic silver light sweep across the 3D glass K symbol.
+ * - 1.3–1.8s (1300–1800ms): Reveal the full KRAS TV wordmark with elegant reflective lighting as the SAME K
+ *   glides into its first-letter slot.
+ * - 1.8–2.2s (1800–2200ms): Smoothly transition directly to the preloaded Home screen.
+ *
+ * Respects system reduced-motion accessibility settings and supports tap-to-skip.
  */
 @Composable
 fun SplashScreen(
@@ -68,38 +51,61 @@ fun SplashScreen(
     isLoading: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    // Measurement state
+    val context = LocalContext.current
+
+    // Detect system reduced-motion setting
+    val isReducedMotion = remember(context) {
+        try {
+            val scale = Settings.Global.getFloat(
+                context.contentResolver,
+                Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f
+            )
+            val animatorsEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ValueAnimator.areAnimatorsEnabled()
+            } else {
+                true
+            }
+            scale <= 0.05f || !animatorsEnabled
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // Measurement state so the single K element animates from exact screen center to its wordmark slot
     var isMeasured by remember { mutableStateOf(false) }
     var screenCenter by remember { mutableStateOf(Offset.Zero) }
     var kSlotCenter by remember { mutableStateOf(Offset.Zero) }
 
-    // Step 1: Initial Zoom and Ambient Glow
-    val kInitialZoom = remember { Animatable(0.72f) }
+    // Phase 2 (0.3–0.8s): 3D Glass K reveal & volumetric red glow
+    val kInitialZoom = remember { Animatable(0.80f) }
     val kAlpha = remember { Animatable(0f) }
     val step1GlowAlpha = remember { Animatable(0f) }
-    val step1GlowScale = remember { Animatable(0.75f) }
+    val step1GlowScale = remember { Animatable(0.80f) }
 
-    // Step 2: Light sweep across K and ribbon streaks
+    // Phase 3 (0.8–1.3s): Cinematic red & metallic silver light sweep across 3D glass K + volumetric rays
     val sweepProgress = remember { Animatable(0f) }
     val streakProgress = remember { Animatable(0f) }
 
-    // Step 3: Slide & Scale from center to final Row position, letters "RAS TV" reveal
+    // Phase 4 (1.3–1.8s): Full KRAS TV wordmark reveal with reflective lighting
     val slideProgress = remember { Animatable(0f) }
+    val wordSweepProgress = remember { Animatable(0f) }
     val letterRAlpha = remember { Animatable(0f) }
-    val letterROffset = remember { Animatable(16f) }
+    val letterROffset = remember { Animatable(14f) }
     val letterAAlpha = remember { Animatable(0f) }
-    val letterAOffset = remember { Animatable(16f) }
+    val letterAOffset = remember { Animatable(14f) }
     val letterSAlpha = remember { Animatable(0f) }
-    val letterSOffset = remember { Animatable(16f) }
+    val letterSOffset = remember { Animatable(14f) }
     val letterTAlpha = remember { Animatable(0f) }
-    val letterTOffset = remember { Animatable(16f) }
+    val letterTOffset = remember { Animatable(14f) }
     val letterVAlpha = remember { Animatable(0f) }
-    val letterVOffset = remember { Animatable(16f) }
-
-    // Step 4: Glow pulse and final fade
+    val letterVOffset = remember { Animatable(14f) }
     val wordGlowAlpha = remember { Animatable(0f) }
-    val wordGlowScale = remember { Animatable(0.85f) }
+    val wordGlowScale = remember { Animatable(0.88f) }
+
+    // Phase 5 (1.8–2.2s): Smooth transition into Home screen
     val fadeAlpha = remember { Animatable(1f) }
+    val exitScale = remember { Animatable(1f) }
 
     var hasFinished by remember { mutableStateOf(false) }
 
@@ -110,95 +116,130 @@ fun SplashScreen(
         }
     }
 
-    // Sequence runs once layout is measured to ensure exact pixel coordinates
-    LaunchedEffect(isMeasured) {
+    LaunchedEffect(isMeasured, isReducedMotion) {
         if (!isMeasured) return@LaunchedEffect
 
-        // --- STEP 1: Big K appears in center with quick zoom-in + soft radial glow (~0-600ms) ---
-        launch {
-            kAlpha.animateTo(1f, tween(durationMillis = 260, easing = FastOutSlowInEasing))
-        }
-        launch {
-            step1GlowAlpha.animateTo(1f, tween(durationMillis = 450, easing = FastOutSlowInEasing))
-            step1GlowScale.animateTo(1.15f, tween(durationMillis = 550, easing = FastOutSlowInEasing))
-        }
-        kInitialZoom.animateTo(1.06f, tween(durationMillis = 450, easing = FastOutSlowInEasing))
-        kInitialZoom.animateTo(1.00f, tween(durationMillis = 150, easing = LinearOutSlowInEasing))
-
-        // --- STEP 2: Specular light sweep across K + fanning red ribbon streaks (~600-1250ms) ---
-        launch {
-            streakProgress.animateTo(1f, tween(durationMillis = 650, easing = FastOutSlowInEasing))
-        }
-        sweepProgress.animateTo(1f, tween(durationMillis = 550, easing = FastOutSlowInEasing))
-
-        // Fade out Step 1 ambient glow
-        launch {
-            step1GlowAlpha.animateTo(0f, tween(durationMillis = 250))
-        }
-        delay(60)
-
-        // --- STEP 3: SAME K scales down and slides from center to final slot (~1250-1950ms, 700ms) ---
-        launch {
-            slideProgress.animateTo(1f, tween(durationMillis = 700, easing = FastOutSlowInEasing))
+        // Shortened accessible path when system reduced-motion is enabled
+        if (isReducedMotion) {
+            slideProgress.snapTo(1f)
+            kInitialZoom.snapTo(1f)
+            kAlpha.snapTo(1f)
+            letterRAlpha.snapTo(1f)
+            letterROffset.snapTo(0f)
+            letterAAlpha.snapTo(1f)
+            letterAOffset.snapTo(0f)
+            letterSAlpha.snapTo(1f)
+            letterSOffset.snapTo(0f)
+            letterTAlpha.snapTo(1f)
+            letterTOffset.snapTo(0f)
+            letterVAlpha.snapTo(1f)
+            letterVOffset.snapTo(0f)
+            wordGlowAlpha.snapTo(0.45f)
+            delay(220)
+            fadeAlpha.animateTo(0f, tween(durationMillis = 180, easing = LinearOutSlowInEasing))
+            finishSplash()
+            return@LaunchedEffect
         }
 
-        // Letters "RAS TV" appear right next to K letter by letter (60ms delay per letter, fade + slight rise)
+        // =====================================================================
+        // 0.0–0.3s (300ms): Display a pure black screen (#000000)
+        // =====================================================================
+        delay(300)
+
+        // =====================================================================
+        // 0.3–0.8s (500ms): Reveal the 3D glass K symbol with subtle zoom & fade
+        // =====================================================================
         launch {
-            delay(60)
-            launch { letterRAlpha.animateTo(1f, tween(220)) }
-            letterROffset.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+            kAlpha.animateTo(1f, tween(durationMillis = 360, easing = FastOutSlowInEasing))
         }
         launch {
-            delay(120)
-            launch { letterAAlpha.animateTo(1f, tween(220)) }
-            letterAOffset.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+            step1GlowAlpha.animateTo(1f, tween(durationMillis = 480, easing = FastOutSlowInEasing))
         }
         launch {
-            delay(180)
-            launch { letterSAlpha.animateTo(1f, tween(220)) }
-            letterSOffset.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+            step1GlowScale.animateTo(1.12f, tween(durationMillis = 500, easing = FastOutSlowInEasing))
+        }
+        kInitialZoom.animateTo(1.04f, tween(durationMillis = 360, easing = FastOutSlowInEasing))
+        kInitialZoom.animateTo(1.00f, tween(durationMillis = 140, easing = LinearOutSlowInEasing))
+
+        // =====================================================================
+        // 0.8–1.3s (500ms): Animate a cinematic red & silver light sweep across the K
+        // =====================================================================
+        launch {
+            streakProgress.animateTo(1f, tween(durationMillis = 500, easing = FastOutSlowInEasing))
+        }
+        sweepProgress.animateTo(1f, tween(durationMillis = 500, easing = FastOutSlowInEasing))
+
+        // =====================================================================
+        // 1.3–1.8s (500ms): Reveal full KRAS TV wordmark with elegant reflective lighting
+        // =====================================================================
+        launch {
+            step1GlowAlpha.animateTo(0f, tween(durationMillis = 220, easing = FastOutSlowInEasing))
         }
         launch {
-            delay(240)
-            launch { letterTAlpha.animateTo(1f, tween(220)) }
-            letterTOffset.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+            slideProgress.animateTo(1f, tween(durationMillis = 460, easing = FastOutSlowInEasing))
         }
         launch {
-            delay(300)
-            launch { letterVAlpha.animateTo(1f, tween(220)) }
-            letterVOffset.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+            wordGlowAlpha.animateTo(0.92f, tween(durationMillis = 260, easing = FastOutSlowInEasing))
+            wordGlowAlpha.animateTo(0.50f, tween(durationMillis = 240, easing = LinearOutSlowInEasing))
+        }
+        launch {
+            wordGlowScale.animateTo(1.14f, tween(durationMillis = 500, easing = FastOutSlowInEasing))
+        }
+        launch {
+            delay(40)
+            wordSweepProgress.animateTo(1f, tween(durationMillis = 460, easing = FastOutSlowInEasing))
         }
 
-        // Wait for slide & letter animations to fully complete
-        delay(720)
-
-        // --- STEP 4: Soft red glow pulse behind full word "KRAS TV", hold 0.5s, then fade (~1950-2800ms) ---
+        // Per-letter 3D glass reveal ("R", "A", "S", "T", "V")
         launch {
-            wordGlowAlpha.animateTo(0.95f, tween(240, easing = FastOutSlowInEasing))
-            wordGlowAlpha.animateTo(0.35f, tween(260, easing = LinearOutSlowInEasing))
+            delay(35)
+            launch { letterRAlpha.animateTo(1f, tween(210, easing = FastOutSlowInEasing)) }
+            letterROffset.animateTo(0f, tween(210, easing = FastOutSlowInEasing))
         }
-        wordGlowScale.animateTo(1.20f, tween(240, easing = FastOutSlowInEasing))
-        wordGlowScale.animateTo(1.00f, tween(260, easing = LinearOutSlowInEasing))
+        launch {
+            delay(80)
+            launch { letterAAlpha.animateTo(1f, tween(210, easing = FastOutSlowInEasing)) }
+            letterAOffset.animateTo(0f, tween(210, easing = FastOutSlowInEasing))
+        }
+        launch {
+            delay(125)
+            launch { letterSAlpha.animateTo(1f, tween(210, easing = FastOutSlowInEasing)) }
+            letterSOffset.animateTo(0f, tween(210, easing = FastOutSlowInEasing))
+        }
+        launch {
+            delay(170)
+            launch { letterTAlpha.animateTo(1f, tween(210, easing = FastOutSlowInEasing)) }
+            letterTOffset.animateTo(0f, tween(210, easing = FastOutSlowInEasing))
+        }
+        launch {
+            delay(215)
+            launch { letterVAlpha.animateTo(1f, tween(210, easing = FastOutSlowInEasing)) }
+            letterVOffset.animateTo(0f, tween(210, easing = FastOutSlowInEasing))
+        }
 
-        // Hold for half a second
+        // Wait until 1.8s mark (500ms elapsed in Phase 4)
         delay(500)
 
-        // Non-blocking: keep last frame visible if data is still loading
-        while (isLoading) {
-            delay(100)
+        // =====================================================================
+        // 1.8–2.2s (400ms): Smoothly transition directly to the existing Home screen
+        // =====================================================================
+        launch {
+            exitScale.animateTo(1.04f, tween(durationMillis = 400, easing = FastOutSlowInEasing))
         }
-
-        // Smooth fade out into Home screen
-        fadeAlpha.animateTo(0f, tween(durationMillis = 350, easing = FastOutSlowInEasing))
+        fadeAlpha.animateTo(0f, tween(durationMillis = 400, easing = FastOutSlowInEasing))
         finishSplash()
     }
 
-    // Full screen pure black container with tap-to-skip
+    // Full-screen pure black (#000000) container with tap-to-skip
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(CinemaBlack)
-            .alpha(fadeAlpha.value)
+            .graphicsLayer {
+                alpha = fadeAlpha.value
+                scaleX = exitScale.value
+                scaleY = exitScale.value
+            }
+            .background(Color.Black)
             .onGloballyPositioned { rootCoordinates ->
                 screenCenter = Offset(
                     rootCoordinates.size.width / 2f,
@@ -209,17 +250,16 @@ fun SplashScreen(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {
-                // Tap anywhere to skip intro immediately
                 finishSplash()
             }
             .testTag("splash_screen"),
         contentAlignment = Alignment.Center
     ) {
-        // Step 1: Soft red radial glow behind big centered K (fades to transparent, no hard edge)
+        // Volumetric Red & Silver Atmospheric Glow behind centered 3D K (0.3–1.3s)
         if (step1GlowAlpha.value > 0.01f) {
             Canvas(
                 modifier = Modifier
-                    .size(420.dp)
+                    .size(440.dp)
                     .graphicsLayer(
                         scaleX = step1GlowScale.value,
                         scaleY = step1GlowScale.value,
@@ -230,8 +270,9 @@ fun SplashScreen(
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            KrasRed.copy(alpha = 0.50f),
-                            KrasRed.copy(alpha = 0.18f),
+                            KrasRedBright.copy(alpha = 0.46f),
+                            KrasRed.copy(alpha = 0.22f),
+                            Color(0xFF64748B).copy(alpha = 0.06f),
                             Color.Transparent
                         ),
                         center = center,
@@ -243,17 +284,17 @@ fun SplashScreen(
             }
         }
 
-        // Step 2: Red ribbon light streaks fanning out behind K
+        // Volumetric Red Crystal Light Streaks (0.8–1.3s)
         RibbonLightStreaks(
             progress = streakProgress.value,
             modifier = Modifier.size(420.dp)
         )
 
-        // Step 4: Pulsing soft red glow behind "KRAS TV"
+        // Volumetric Red & Metallic Halo behind full "KRAS TV" wordmark (1.3–2.2s)
         if (wordGlowAlpha.value > 0.01f) {
             Canvas(
                 modifier = Modifier
-                    .size(460.dp, 240.dp)
+                    .size(480.dp, 240.dp)
                     .graphicsLayer(
                         scaleX = wordGlowScale.value,
                         scaleY = wordGlowScale.value,
@@ -264,8 +305,9 @@ fun SplashScreen(
                 drawCircle(
                     brush = Brush.radialGradient(
                         colors = listOf(
-                            KrasRed.copy(alpha = 0.55f),
-                            KrasRed.copy(alpha = 0.20f),
+                            KrasRed.copy(alpha = 0.50f),
+                            KrasRed.copy(alpha = 0.18f),
+                            Color(0xFF94A3B8).copy(alpha = 0.05f),
                             Color.Transparent
                         ),
                         center = center,
@@ -277,15 +319,12 @@ fun SplashScreen(
             }
         }
 
-        // --- BRANDING LOCKUP: ONE ROW [K] [RAS TV] ---
-        // The Row is centered in the screen.
-        // The K slot is measured on first pass to find its final position (kSlotCenter).
-        // Before slide (slideProgress = 0): K is translated by (screenCenter - kSlotCenter) and scaled 4.2x
-        // so it appears large in the center of the screen.
-        // During slide (slideProgress 0 -> 1): K smoothly scales to 1.0x and moves to (0, 0),
-        // settling seamlessly into the first letter slot with zero jump or overlap!
+        // --- SINGLE UNIFIED 3D BRANDING LOCKUP: [K] [RAS TV] ---
+        // Before slide (slideProgress = 0): The single K is translated to screenCenter and scaled 4.0x.
+        // During 1.3–1.8s (slideProgress 0 -> 1): The SAME K smoothly scales to 1.0x and settles
+        // into its first-letter slot while "RAS TV" reveals with a metallic silver & red sweep.
         val s = slideProgress.value
-        val bigKScale = 4.2f * (if (s == 0f) kInitialZoom.value else 1f)
+        val bigKScale = 4.0f * (if (s == 0f) kInitialZoom.value else 1f)
         val currentKScale = bigKScale * (1f - s) + 1.0f * s
 
         val deltaX = if (isMeasured) screenCenter.x - kSlotCenter.x else 0f
@@ -293,9 +332,8 @@ fun SplashScreen(
         val currentTransX = deltaX * (1f - s)
         val currentTransY = deltaY * (1f - s)
 
-        // Canonical Kras TV Wordmark: The SAME K animates from center down to its final slot
         KrasLogo(
-            height = 36.dp,
+            height = 40.dp,
             modifier = Modifier
                 .align(Alignment.Center)
                 .padding(horizontal = 16.dp),
@@ -310,28 +348,31 @@ fun SplashScreen(
                 }
                 .drawWithContent {
                     drawContent()
+                    // 0.8–1.3s: Cinematic Red & Metallic Silver Light Sweep clipped strictly to the 3D K glyph
                     val sp = sweepProgress.value
-                    if (sp > 0f && sp < 1f) {
+                    if (sp > 0.01f && sp < 0.99f) {
                         val w = size.width
                         val h = size.height
                         val travel = (sp * (w * 2.8f)) - (w * 0.9f)
-                        val beamWidth = w * 0.45f
+                        val beamWidth = w * 0.52f
                         drawRect(
                             brush = Brush.linearGradient(
                                 colors = listOf(
                                     Color.Transparent,
-                                    Color.White.copy(alpha = 0.35f),
-                                    Color.White.copy(alpha = 0.95f),
-                                    Color.White.copy(alpha = 0.35f),
+                                    KrasRedBright.copy(alpha = 0.55f),
+                                    Color(0xFFF8FAFC).copy(alpha = 0.95f),
+                                    Color(0xFFCBD5E1).copy(alpha = 0.65f),
+                                    KrasRed.copy(alpha = 0.45f),
                                     Color.Transparent
                                 ),
                                 start = Offset(travel, 0f),
                                 end = Offset(travel + beamWidth, h)
                             ),
-                            blendMode = BlendMode.SrcIn
+                            blendMode = BlendMode.SrcAtop
                         )
                     }
                 },
+            wordSweepProgress = wordSweepProgress.value,
             onKPositioned = { kCoords ->
                 val pos = kCoords.positionInRoot()
                 kSlotCenter = Offset(
@@ -365,7 +406,7 @@ fun SplashScreen(
 }
 
 /**
- * Thin red ribbon light streaks fanning out symmetrically behind the K in Step 2.
+ * Subtle volumetric red & silver light streaks fanning behind the 3D K during the 0.8–1.3s light sweep.
  */
 @Composable
 private fun RibbonLightStreaks(
@@ -380,28 +421,29 @@ private fun RibbonLightStreaks(
         (1f - (progress - 0.35f) / 0.65f)
     }.coerceIn(0f, 1f)
 
-    val beamLengthRatio = (0.35f + 0.65f * progress)
+    val beamLengthRatio = (0.38f + 0.62f * progress)
 
     Canvas(modifier = modifier) {
         val centerX = size.width / 2f
         val centerY = size.height / 2f
-        val maxBeamLength = size.width.coerceAtLeast(size.height) * 0.85f * beamLengthRatio
+        val maxBeamLength = size.width.coerceAtLeast(size.height) * 0.82f * beamLengthRatio
 
-        val beamAngles = listOf(-38f, -25f, -12f, 0f, 12f, 25f, 38f)
-        val beamWidths = listOf(10f, 14f, 18f, 22f, 18f, 14f, 10f)
+        val beamAngles = listOf(-36f, -22f, -10f, 0f, 10f, 22f, 36f)
+        val beamWidths = listOf(8f, 12f, 16f, 20f, 16f, 12f, 8f)
 
         for (i in beamAngles.indices) {
             val angleDeg = beamAngles[i]
-            val bWidth = beamWidths[i] * (0.8f + 0.4f * (1f - progress))
+            val bWidth = beamWidths[i] * (0.8f + 0.35f * (1f - progress))
 
             rotate(degrees = angleDeg, pivot = Offset(centerX, centerY)) {
-                // Primary upward beam
+                // Primary upward volumetric ray
                 drawRect(
                     brush = Brush.verticalGradient(
                         colors = listOf(
                             Color.Transparent,
-                            KrasRedBright.copy(alpha = 0.70f * alpha),
-                            KrasRed.copy(alpha = 0.50f * alpha),
+                            KrasRedBright.copy(alpha = 0.58f * alpha),
+                            Color(0xFFCBD5E1).copy(alpha = 0.22f * alpha),
+                            KrasRed.copy(alpha = 0.42f * alpha),
                             Color.Transparent
                         ),
                         startY = centerY - maxBeamLength,
@@ -411,19 +453,19 @@ private fun RibbonLightStreaks(
                     size = Size(bWidth, maxBeamLength)
                 )
 
-                // Secondary downward flare
+                // Secondary downward volumetric ray
                 drawRect(
                     brush = Brush.verticalGradient(
                         colors = listOf(
                             Color.Transparent,
-                            KrasRed.copy(alpha = 0.45f * alpha),
+                            KrasRed.copy(alpha = 0.38f * alpha),
                             Color.Transparent
                         ),
                         startY = centerY,
-                        endY = centerY + maxBeamLength * 0.7f
+                        endY = centerY + maxBeamLength * 0.68f
                     ),
                     topLeft = Offset(centerX - bWidth * 0.4f, centerY),
-                    size = Size(bWidth * 0.8f, maxBeamLength * 0.7f)
+                    size = Size(bWidth * 0.8f, maxBeamLength * 0.68f)
                 )
             }
         }

@@ -23,7 +23,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -32,19 +31,20 @@ import androidx.core.content.ContextCompat
 import com.example.R
 import com.example.ui.theme.KrasRed
 import com.example.ui.theme.KrasRedBright
+import com.example.ui.theme.OutfitFontFamily
 
 /**
- * Kras TV Canonical Wordmark "KRAS TV"
+ * Kras TV Canonical 3D Glass & Metallic Silver Wordmark "KRAS TV"
  *
- * Requirements:
- * 1. Single reusable composable drawing the word "KRAS TV" exactly like the final frame
- *    of the intro animation:
- *    - The glossy glass red K from ic_kras_k
- *    - "RAS TV" in bold wide font with matching red gradient (#FF3A44 -> #E50914 -> #B20710 -> #7A0409)
- *      and soft white glass specular sheen clipped strictly to the letter shapes (no rectangle or box).
- *    - Consistent height, weight, baseline, and letter spacing forming one clean word "KRAS TV".
- * 2. Scales smoothly to any requested height (e.g., 28.dp for Home header, 44.dp for Login, 36.dp for Intro).
- * 3. Static and crisp by default; supports optional letter animation hooks for the intro sequence.
+ * Features:
+ * 1. Single reusable composable drawing the word "KRAS TV" identically across the opening
+ *    intro animation, Home header, Login screen, and Video Player:
+ *    - Sculpted 3D glossy red crystal K from ic_kras_k with metallic silver rim reflections.
+ *    - "RAS TV" in bold geometric Outfit Black typography with 3D extruded bevel depth,
+ *      glossy red crystal gradient (#FF525D -> #E50914 -> #B20710 -> #5E0206), and
+ *      metallic silver & platinum glass reflections clipped strictly to the letter shapes.
+ * 2. Scales cleanly to any requested height (e.g., 28.dp for Home header, 44.dp for Login, 42.dp for Intro).
+ * 3. Supports per-letter reveal and reflective light sweep hooks for the 2.2s cinematic intro.
  */
 @Composable
 fun KrasLogo(
@@ -53,11 +53,12 @@ fun KrasLogo(
     kModifier: Modifier = Modifier,
     letterAlphaProvider: ((Char) -> Float)? = null,
     letterOffsetProvider: ((Char) -> Float)? = null,
+    wordSweepProgress: Float = 0f,
     onKPositioned: ((LayoutCoordinates) -> Unit)? = null
 ) {
     // Exact aspect ratio of the K glyph in ic_kras_k is 44.5 / 54 ≈ 0.824
     val kWidth = height * (44.5f / 54f)
-    val spacerLetter = height * 0.12f
+    val spacerLetter = height * 0.13f
     val spacerWord = height * 0.28f
 
     Row(
@@ -65,7 +66,7 @@ fun KrasLogo(
         horizontalArrangement = Arrangement.Center,
         modifier = modifier.testTag("kras_tv_logo")
     ) {
-        // 1. THE GLOSSY GLASS RED 'K'
+        // 1. THE 3D GLOSSY RED CRYSTAL & METALLIC SILVER 'K'
         Box(
             modifier = Modifier
                 .size(width = kWidth, height = height)
@@ -81,10 +82,37 @@ fun KrasLogo(
 
         Spacer(modifier = Modifier.width(spacerLetter))
 
-        // 2. "RAS TV"
+        // 2. "RAS TV" 3D Glass & Metallic Silver Letters
         if (letterAlphaProvider != null) {
-            // Animated per-letter reveal mode (used in Intro sequence)
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Animated per-letter reveal mode with reflective light sweep (used in Intro sequence)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                    .drawWithContent {
+                        drawContent()
+                        if (wordSweepProgress > 0.01f && wordSweepProgress < 0.99f) {
+                            val w = size.width
+                            val h = size.height
+                            val beamWidth = w * 0.38f
+                            val startX = (wordSweepProgress * (w + beamWidth * 2f)) - beamWidth
+                            drawRect(
+                                brush = Brush.linearGradient(
+                                    colors = listOf(
+                                        Color.Transparent,
+                                        Color(0x55E2E8F0),
+                                        Color(0xE6FFFFFF),
+                                        Color(0x88FF4D58),
+                                        Color.Transparent
+                                    ),
+                                    start = Offset(startX, 0f),
+                                    end = Offset(startX + beamWidth, h)
+                                ),
+                                blendMode = BlendMode.SrcAtop
+                            )
+                        }
+                    }
+            ) {
                 listOf('R', 'A', 'S').forEach { ch ->
                     KrasLogoLetter(
                         char = ch,
@@ -104,7 +132,7 @@ fun KrasLogo(
                 }
             }
         } else {
-            // Static crisp mode (used in Home header, Login, Dialogs, etc.)
+            // Static crisp mode (used in Home header, Login, Video Player, etc.)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 KrasLogoText(text = "RAS", height = height)
                 Spacer(modifier = Modifier.width(spacerWord))
@@ -115,9 +143,9 @@ fun KrasLogo(
 }
 
 /**
- * Renders the EXACT vector drawable "ic_kras_k" via Android Native VectorDrawable.
+ * Renders the vector drawable "ic_kras_k" via Android Native VectorDrawable.
  * Automatically fits the K glyph (viewport X: 32..76.5, Y: 27..81) to the canvas bounds
- * so there is zero empty padding around the letter, aligning perfectly with surrounding letters.
+ * so there is zero empty padding around the letter, aligning seamlessly with "RAS TV".
  */
 @Composable
 fun SharedGlassK(
@@ -156,8 +184,9 @@ fun SharedGlassK(
 }
 
 /**
- * Text renderer for static wordmark segments ("RAS", "TV") with deep glossy red gradient
- * and subtle glass top highlight clipped strictly to the text shape.
+ * 3D Glass & Metallic Silver text renderer for static wordmark segments ("RAS", "TV")
+ * with sculpted depth extrusion, ruby crystal gradient, and platinum-silver specular highlight
+ * strictly clipped to the letter shapes.
  */
 @Composable
 private fun KrasLogoText(
@@ -165,61 +194,102 @@ private fun KrasLogoText(
     height: Dp,
     modifier: Modifier = Modifier
 ) {
-    val fontSize = (height.value * 1.167f).sp
-    val letterSpacing = (height.value * 0.05f).sp
-    val shadowBlur = height.value * 0.18f
-    val shadowOffset = height.value * 0.05f
+    val fontSize = (height.value * 1.15f).sp
+    val letterSpacing = (height.value * 0.045f).sp
+    val shadowBlur = height.value * 0.20f
+    val shadowOffset = height.value * 0.055f
+    val depthOffsetDp = (height.value * 0.032f).dp
 
-    val glossyRedBrush = remember {
+    val crystalRedBrush = remember {
         Brush.verticalGradient(
             colors = listOf(
-                Color(0xFFFF3A44),
+                Color(0xFFFF525D),
                 KrasRedBright,
                 KrasRed,
-                Color(0xFF7A0409)
+                Color(0xFF9E040B),
+                Color(0xFF590206)
             )
         )
     }
 
-    Text(
-        text = text,
-        style = TextStyle(
-            brush = glossyRedBrush,
-            fontSize = fontSize,
-            fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.SansSerif,
-            letterSpacing = letterSpacing,
-            platformStyle = PlatformTextStyle(includeFontPadding = false),
-            shadow = Shadow(
-                color = KrasRed.copy(alpha = 0.5f),
-                offset = Offset(0f, shadowOffset),
-                blurRadius = shadowBlur
+    val extrusionBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF64748B),
+                Color(0xFF3B0205),
+                Color(0xFF1F0103)
             )
-        ),
-        modifier = modifier
-            .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
-            .drawWithContent {
-                drawContent()
-                // Soft white glass highlight across upper half of the letters (clipped to letter glyphs)
-                val h = size.height
-                drawRect(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.35f),
-                            Color.White.copy(alpha = 0.08f),
-                            Color.Transparent
-                        ),
-                        startY = 0f,
-                        endY = h * 0.50f
-                    ),
-                    blendMode = BlendMode.SrcAtop
+        )
+    }
+
+    Box(modifier = modifier) {
+        // 1. 3D Extruded Bevel Depth Layer
+        Text(
+            text = text,
+            style = TextStyle(
+                brush = extrusionBrush,
+                fontSize = fontSize,
+                fontWeight = FontWeight.Black,
+                fontFamily = OutfitFontFamily,
+                letterSpacing = letterSpacing,
+                platformStyle = PlatformTextStyle(includeFontPadding = false)
+            ),
+            modifier = Modifier.offset(x = depthOffsetDp * 0.75f, y = depthOffsetDp)
+        )
+
+        // 2. Main Glossy Red Crystal Body + Metallic Silver Specular Reflections (clipped to glyph)
+        Text(
+            text = text,
+            style = TextStyle(
+                brush = crystalRedBrush,
+                fontSize = fontSize,
+                fontWeight = FontWeight.Black,
+                fontFamily = OutfitFontFamily,
+                letterSpacing = letterSpacing,
+                platformStyle = PlatformTextStyle(includeFontPadding = false),
+                shadow = Shadow(
+                    color = KrasRed.copy(alpha = 0.55f),
+                    offset = Offset(0f, shadowOffset),
+                    blurRadius = shadowBlur
                 )
-            }
-    )
+            ),
+            modifier = Modifier
+                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                .drawWithContent {
+                    drawContent()
+                    val h = size.height
+                    // Upper metallic silver & crystal glass reflection
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xFFF8FAFC).copy(alpha = 0.44f),
+                                Color(0xFFCBD5E1).copy(alpha = 0.14f),
+                                Color.Transparent
+                            ),
+                            startY = 0f,
+                            endY = h * 0.48f
+                        ),
+                        blendMode = BlendMode.SrcAtop
+                    )
+                    // Subtle lower metallic silver rim reflection
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                Color(0xFFCBD5E1).copy(alpha = 0.18f)
+                            ),
+                            startY = h * 0.82f,
+                            endY = h
+                        ),
+                        blendMode = BlendMode.SrcAtop
+                    )
+                }
+        )
+    }
 }
 
 /**
- * Individual animated letter for the opening intro reveal.
+ * Individual 3D glass & metallic silver animated letter for the opening intro reveal.
  */
 @Composable
 private fun KrasLogoLetter(
@@ -229,58 +299,101 @@ private fun KrasLogoLetter(
     offsetY: Float,
     modifier: Modifier = Modifier
 ) {
-    val fontSize = (height.value * 1.167f).sp
-    val letterSpacing = (height.value * 0.05f).sp
-    val shadowBlur = height.value * 0.18f
-    val shadowOffset = height.value * 0.05f
+    val fontSize = (height.value * 1.15f).sp
+    val letterSpacing = (height.value * 0.045f).sp
+    val shadowBlur = height.value * 0.20f
+    val shadowOffset = height.value * 0.055f
+    val depthOffsetDp = (height.value * 0.032f).dp
 
-    val glossyRedBrush = remember {
+    val crystalRedBrush = remember {
         Brush.verticalGradient(
             colors = listOf(
-                Color(0xFFFF3A44),
+                Color(0xFFFF525D),
                 KrasRedBright,
                 KrasRed,
-                Color(0xFF7A0409)
+                Color(0xFF9E040B),
+                Color(0xFF590206)
             )
         )
     }
 
-    Text(
-        text = char.toString(),
-        style = TextStyle(
-            brush = glossyRedBrush,
-            fontSize = fontSize,
-            fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.SansSerif,
-            letterSpacing = letterSpacing,
-            platformStyle = PlatformTextStyle(includeFontPadding = false),
-            shadow = Shadow(
-                color = KrasRed.copy(alpha = 0.5f),
-                offset = Offset(0f, shadowOffset),
-                blurRadius = shadowBlur
+    val extrusionBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xFF64748B),
+                Color(0xFF3B0205),
+                Color(0xFF1F0103)
             )
-        ),
-        modifier = modifier
-            .graphicsLayer {
-                this.alpha = alpha
-                this.translationY = offsetY
-                this.compositingStrategy = CompositingStrategy.Offscreen
-            }
-            .drawWithContent {
-                drawContent()
-                val h = size.height
-                drawRect(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.35f),
-                            Color.White.copy(alpha = 0.08f),
-                            Color.Transparent
-                        ),
-                        startY = 0f,
-                        endY = h * 0.50f
-                    ),
-                    blendMode = BlendMode.SrcAtop
+        )
+    }
+
+    Box(
+        modifier = modifier.graphicsLayer {
+            this.alpha = alpha
+            this.translationY = offsetY
+        }
+    ) {
+        // 1. 3D Extruded Bevel Depth Layer
+        Text(
+            text = char.toString(),
+            style = TextStyle(
+                brush = extrusionBrush,
+                fontSize = fontSize,
+                fontWeight = FontWeight.Black,
+                fontFamily = OutfitFontFamily,
+                letterSpacing = letterSpacing,
+                platformStyle = PlatformTextStyle(includeFontPadding = false)
+            ),
+            modifier = Modifier.offset(x = depthOffsetDp * 0.75f, y = depthOffsetDp)
+        )
+
+        // 2. Main Glossy Red Crystal Body + Metallic Silver Specular Reflections (clipped to glyph)
+        Text(
+            text = char.toString(),
+            style = TextStyle(
+                brush = crystalRedBrush,
+                fontSize = fontSize,
+                fontWeight = FontWeight.Black,
+                fontFamily = OutfitFontFamily,
+                letterSpacing = letterSpacing,
+                platformStyle = PlatformTextStyle(includeFontPadding = false),
+                shadow = Shadow(
+                    color = KrasRed.copy(alpha = 0.55f),
+                    offset = Offset(0f, shadowOffset),
+                    blurRadius = shadowBlur
                 )
-            }
-    )
+            ),
+            modifier = Modifier
+                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                .drawWithContent {
+                    drawContent()
+                    val h = size.height
+                    // Upper metallic silver & crystal glass reflection
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xFFF8FAFC).copy(alpha = 0.44f),
+                                Color(0xFFCBD5E1).copy(alpha = 0.14f),
+                                Color.Transparent
+                            ),
+                            startY = 0f,
+                            endY = h * 0.48f
+                        ),
+                        blendMode = BlendMode.SrcAtop
+                    )
+                    // Subtle lower metallic silver rim reflection
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                Color(0xFFCBD5E1).copy(alpha = 0.18f)
+                            ),
+                            startY = h * 0.82f,
+                            endY = h
+                        ),
+                        blendMode = BlendMode.SrcAtop
+                    )
+                }
+        )
+    }
 }
