@@ -30,6 +30,15 @@ data class VideoQualityVariant(
     val trackIndex: Int = -1
 )
 
+data class PlayerTrackOption(
+    val id: String,
+    val label: String,
+    val language: String = "",
+    val groupIndex: Int = -1,
+    val trackIndex: Int = -1,
+    val isOff: Boolean = false
+)
+
 @OptIn(UnstableApi::class)
 class ExoPlayerWrapper(private val context: Context) {
 
@@ -89,6 +98,21 @@ class ExoPlayerWrapper(private val context: Context) {
 
     private val _selectedVideoVariant = MutableStateFlow(autoVariant)
     val selectedVideoVariant = _selectedVideoVariant.asStateFlow()
+
+    // Audio & Subtitle tracks from Media3
+    private val defaultAudioOption = PlayerTrackOption(id = "default_audio", label = "Original Audio (Default)")
+    private val _availableAudioTracks = MutableStateFlow(listOf(defaultAudioOption))
+    val availableAudioTracks = _availableAudioTracks.asStateFlow()
+
+    private val _selectedAudioTrack = MutableStateFlow(defaultAudioOption)
+    val selectedAudioTrack = _selectedAudioTrack.asStateFlow()
+
+    private val offSubtitleOption = PlayerTrackOption(id = "sub_off", label = "Off", isOff = true)
+    private val _availableSubtitleTracks = MutableStateFlow(listOf(offSubtitleOption))
+    val availableSubtitleTracks = _availableSubtitleTracks.asStateFlow()
+
+    private val _selectedSubtitleTrack = MutableStateFlow(offSubtitleOption)
+    val selectedSubtitleTrack = _selectedSubtitleTrack.asStateFlow()
 
     private var retryCount = 0
     private var lastMediaUrl: String? = null
@@ -180,6 +204,10 @@ class ExoPlayerWrapper(private val context: Context) {
     private fun extractTracksAndVariants(player: ExoPlayer, tracks: Tracks) {
         try {
             val variantsByHeight = LinkedHashMap<Int, VideoQualityVariant>()
+            val audioOptions = mutableListOf<PlayerTrackOption>()
+            val subtitleOptions = mutableListOf(offSubtitleOption)
+            var activeAudioOption: PlayerTrackOption? = null
+            var activeSubtitleOption: PlayerTrackOption? = null
             var selectedTrackHeight = 0
             var selectedTrackFps = 0f
             var selectedCodec = ""
@@ -222,11 +250,58 @@ class ExoPlayerWrapper(private val context: Context) {
                     }
                     C.TRACK_TYPE_AUDIO -> {
                         for (trackIndex in 0 until group.length) {
+                            val format = group.getTrackFormat(trackIndex)
+                            val ch = format.channelCount
+                            val lang = format.language?.takeIf { it.isNotBlank() && it != "und" }?.uppercase() ?: "Track ${audioOptions.size + 1}"
+                            val chLabel = when {
+                                ch >= 6 -> "5.1 Surround"
+                                ch == 2 -> "Stereo 2.0"
+                                ch == 1 -> "Mono"
+                                else -> ""
+                            }
+                            val label = listOfNotNull(
+                                format.label?.takeIf { it.isNotBlank() },
+                                lang,
+                                chLabel.takeIf { it.isNotBlank() }
+                            ).distinct().joinToString(" • ").ifBlank { "Audio Track ${audioOptions.size + 1}" }
+
+                            val option = PlayerTrackOption(
+                                id = "audio_${groupIndex}_$trackIndex",
+                                label = label,
+                                language = lang,
+                                groupIndex = groupIndex,
+                                trackIndex = trackIndex
+                            )
+                            audioOptions.add(option)
+
                             if (group.isTrackSelected(trackIndex)) {
-                                val format = group.getTrackFormat(trackIndex)
-                                if (format.channelCount > 0) {
-                                    selectedAudioCh = format.channelCount
+                                if (ch > 0) {
+                                    selectedAudioCh = ch
                                 }
+                                activeAudioOption = option
+                            }
+                        }
+                    }
+                    C.TRACK_TYPE_TEXT -> {
+                        for (trackIndex in 0 until group.length) {
+                            val format = group.getTrackFormat(trackIndex)
+                            val lang = format.language?.takeIf { it.isNotBlank() && it != "und" }?.uppercase() ?: "CC ${subtitleOptions.size}"
+                            val label = listOfNotNull(
+                                format.label?.takeIf { it.isNotBlank() },
+                                lang
+                            ).distinct().joinToString(" • ").ifBlank { "Subtitle ${subtitleOptions.size}" }
+
+                            val option = PlayerTrackOption(
+                                id = "sub_${groupIndex}_$trackIndex",
+                                label = label,
+                                language = lang,
+                                groupIndex = groupIndex,
+                                trackIndex = trackIndex
+                            )
+                            subtitleOptions.add(option)
+
+                            if (group.isTrackSelected(trackIndex)) {
+                                activeSubtitleOption = option
                             }
                         }
                     }
@@ -235,6 +310,20 @@ class ExoPlayerWrapper(private val context: Context) {
 
             val sortedVariants = variantsByHeight.values.sortedByDescending { it.height }
             _availableVideoVariants.value = listOf(autoVariant) + sortedVariants
+
+            if (audioOptions.isNotEmpty()) {
+                _availableAudioTracks.value = audioOptions
+                if (activeAudioOption != null) {
+                    _selectedAudioTrack.value = activeAudioOption!!
+                }
+            } else {
+                _availableAudioTracks.value = listOf(defaultAudioOption)
+            }
+
+            _availableSubtitleTracks.value = subtitleOptions
+            if (activeSubtitleOption != null && !_selectedSubtitleTrack.value.isOff) {
+                _selectedSubtitleTrack.value = activeSubtitleOption!!
+            }
 
             if (selectedTrackHeight > 0) currentVideoHeight = selectedTrackHeight
             if (selectedTrackFps > 0f) currentFrameRate = selectedTrackFps
@@ -309,6 +398,51 @@ class ExoPlayerWrapper(private val context: Context) {
         }
     }
 
+    fun selectAudioTrack(option: PlayerTrackOption) {
+        try {
+            _selectedAudioTrack.value = option
+            val player = exoPlayer ?: return
+            val builder = trackSelector.parameters.buildUpon()
+            builder.clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+            if (option.groupIndex >= 0 && option.trackIndex >= 0) {
+                val group = player.currentTracks.groups.getOrNull(option.groupIndex)
+                if (group != null && group.type == C.TRACK_TYPE_AUDIO && option.trackIndex in 0 until group.length) {
+                    builder.setOverrideForType(
+                        TrackSelectionOverride(group.mediaTrackGroup, listOf(option.trackIndex))
+                    )
+                }
+            }
+            trackSelector.setParameters(builder)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun selectSubtitleTrack(option: PlayerTrackOption) {
+        try {
+            _selectedSubtitleTrack.value = option
+            val player = exoPlayer ?: return
+            val builder = trackSelector.parameters.buildUpon()
+            builder.clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            if (option.isOff) {
+                builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            } else {
+                builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                if (option.groupIndex >= 0 && option.trackIndex >= 0) {
+                    val group = player.currentTracks.groups.getOrNull(option.groupIndex)
+                    if (group != null && group.type == C.TRACK_TYPE_TEXT && option.trackIndex in 0 until group.length) {
+                        builder.setOverrideForType(
+                            TrackSelectionOverride(group.mediaTrackGroup, listOf(option.trackIndex))
+                        )
+                    }
+                }
+            }
+            trackSelector.setParameters(builder)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     fun selectVideoQuality(variant: VideoQualityVariant) {
         try {
             _selectedVideoVariant.value = variant
@@ -348,6 +482,10 @@ class ExoPlayerWrapper(private val context: Context) {
         _detectedQualityBadge.value = ""
         _availableVideoVariants.value = listOf(autoVariant)
         _selectedVideoVariant.value = autoVariant
+        _availableAudioTracks.value = listOf(defaultAudioOption)
+        _selectedAudioTrack.value = defaultAudioOption
+        _availableSubtitleTracks.value = listOf(offSubtitleOption)
+        _selectedSubtitleTrack.value = offSubtitleOption
         _errorMessage.value = null
         _isBuffering.value = true
 

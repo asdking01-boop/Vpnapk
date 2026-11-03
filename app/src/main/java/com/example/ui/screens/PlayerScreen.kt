@@ -1,35 +1,67 @@
 package com.example.ui.screens
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.provider.Settings
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
-import android.view.WindowManager
+import android.widget.Toast
 import androidx.annotation.OptIn
-import androidx.compose.animation.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -39,15 +71,20 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import coil.compose.AsyncImage
 import com.example.data.local.KrasRepository
 import com.example.data.model.*
 import com.example.player.ExoPlayerWrapper
+import com.example.player.VideoQualityVariant
 import com.example.player.PlayerImmersiveHelper
+import com.example.ui.components.KrasLogo
 import com.example.ui.components.ResolutionBadge
+import com.example.ui.components.liquidGlassPanel
+import com.example.ui.components.liquidPressClickable
 import com.example.ui.theme.*
 import kotlinx.coroutines.delay
 
-@OptIn(UnstableApi::class)
+@OptIn(UnstableApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(
     mediaItem: MediaItem,
@@ -58,12 +95,17 @@ fun PlayerScreen(
     liveChannels: List<MediaItem>,
     onSwitchChannel: (MediaItem) -> Unit,
     onDownloadClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    seriesDetails: SeriesDetails? = null,
+    moviesPlaylist: List<MediaItem> = emptyList(),
+    onPlayEpisode: ((Episode) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
     val view = LocalView.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val repository = remember { KrasRepository(context) }
 
     // Immersive Fullscreen & Do Not Disturb management while playing
@@ -81,7 +123,7 @@ fun PlayerScreen(
         }
     }
 
-    // Re-apply immersive fullscreen on Window Focus change (e.g. returning to app, after PiP, dialog dismiss)
+    // Re-apply immersive fullscreen on Window Focus change
     DisposableEffect(view) {
         val listener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
             if (hasFocus) {
@@ -116,6 +158,10 @@ fun PlayerScreen(
     val detectedQualityBadge by playerWrapper.detectedQualityBadge.collectAsState()
     val availableVariants by playerWrapper.availableVideoVariants.collectAsState()
     val selectedVariant by playerWrapper.selectedVideoVariant.collectAsState()
+    val availableAudioTracks by playerWrapper.availableAudioTracks.collectAsState()
+    val selectedAudioTrack by playerWrapper.selectedAudioTrack.collectAsState()
+    val availableSubtitleTracks by playerWrapper.availableSubtitleTracks.collectAsState()
+    val selectedSubtitleTrack by playerWrapper.selectedSubtitleTrack.collectAsState()
 
     val effectiveQualityString = remember(detectedQualityBadge, episode?.quality, mediaItem.quality, mediaItem.resolution) {
         detectedQualityBadge.ifBlank {
@@ -126,22 +172,50 @@ fun PlayerScreen(
 
     var controlsVisible by remember { mutableStateOf(true) }
     var currentAspectRatio by remember { mutableStateOf(userSettings.defaultAspectRatio) }
-    var playbackSpeed by remember { mutableStateOf(1.0f) }
-    var isLandscapeLocked by remember { mutableStateOf(false) }
+    var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
+    var isFullscreenLandscape by remember { mutableStateOf(isLandscape) }
 
-    // Dialog sheets
+    // Interactive scrubbing state for smooth timeline seeking
+    var isScrubbing by remember { mutableStateOf(false) }
+    var scrubFraction by remember { mutableFloatStateOf(0f) }
+
+    // Subtle visual cue when 10s rewind / forward is triggered
+    var seekFeedbackText by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(seekFeedbackText) {
+        if (seekFeedbackText != null) {
+            delay(650)
+            seekFeedbackText = null
+        }
+    }
+
+    // Dialog / Sheet states
     var showSpeedDialog by remember { mutableStateOf(false) }
     var showQualityDialog by remember { mutableStateOf(false) }
-    var showAudioDialog by remember { mutableStateOf(false) }
-    var selectedAudioTrack by remember { mutableStateOf("Stereo 2.0 (Default)") }
+    var showAudioSubtitleDialog by remember { mutableStateOf(false) }
+    var showPlaylistDialog by remember { mutableStateOf(false) }
+    var showCastDialog by remember { mutableStateOf(false) }
 
-    // Auto-hide controls after 4 seconds
-    LaunchedEffect(controlsVisible, isPlaying) {
-        if (controlsVisible && isPlaying) {
+    val anyModalOpen = showSpeedDialog || showQualityDialog || showAudioSubtitleDialog || showPlaylistDialog || showCastDialog
+
+    // Auto-hide controls after 4 seconds of inactivity while video is playing
+    LaunchedEffect(controlsVisible, isPlaying, isScrubbing, anyModalOpen) {
+        if (controlsVisible && isPlaying && !isScrubbing && !anyModalOpen) {
             delay(4000)
             controlsVisible = false
         }
     }
+
+    // Gentle breathing red glow for the center Play/Pause button
+    val glowTransition = rememberInfiniteTransition(label = "player_red_glow")
+    val glowPulse by glowTransition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glow_pulse"
+    )
 
     Box(
         modifier = modifier
@@ -155,7 +229,7 @@ fun PlayerScreen(
             }
             .testTag("player_screen")
     ) {
-        // Video Surface (ExoPlayer PlayerView)
+        // 1. Video Surface (Media3 ExoPlayer PlayerView)
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
@@ -186,126 +260,216 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Buffering Spinner / Loading
-        if (isBuffering) {
+        // 2. Buffering Spinner / Loading Overlay
+        AnimatedVisibility(
+            visible = isBuffering,
+            enter = fadeIn(tween(200)),
+            exit = fadeOut(tween(200)),
+            modifier = Modifier.align(Alignment.Center)
+        ) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.35f)),
+                    .size(110.dp)
+                    .liquidGlassPanel(
+                        cornerRadius = 28.dp,
+                        tintColor = Color(0xFF0A0B10),
+                        surfaceAlpha = 0.72f,
+                        borderAlpha = 0.45f,
+                        accentGlow = KrasRed
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(
                         color = KrasRed,
+                        trackColor = Color.White.copy(alpha = 0.15f),
                         strokeWidth = 3.dp,
-                        modifier = Modifier.size(54.dp)
+                        modifier = Modifier.size(42.dp)
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "Smart Buffering...",
-                        color = Color.White,
-                        fontSize = 13.sp,
+                        text = "Loading Stream",
+                        color = Color.White.copy(alpha = 0.9f),
+                        fontSize = 11.sp,
+                        fontFamily = OutfitFontFamily,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
             }
         }
 
-        // Error Banner
-        if (errorMessage != null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 70.dp, start = 20.dp, end = 20.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(KrasRedDark.copy(alpha = 0.9f))
-                    .padding(12.dp)
-            ) {
-                Text(
-                    text = errorMessage!!,
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
-
-        // Animated Controls Overlay
+        // 3. Stream Reconnect / Error Banner
         AnimatedVisibility(
-            visible = controlsVisible,
+            visible = errorMessage != null,
             enter = fadeIn(),
             exit = fadeOut(),
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 74.dp, start = 24.dp, end = 24.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            0.0f to Color.Black.copy(alpha = 0.75f),
-                            0.3f to Color.Transparent,
-                            0.7f to Color.Transparent,
-                            1.0f to Color.Black.copy(alpha = 0.85f)
-                        )
-                    )
-            ) {
-                // Top Bar: Back, Title, Resolution, Aspect Ratio, Rotation, Settings
-                Row(
+            if (errorMessage != null) {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .displayCutoutPadding()
-                        .statusBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .liquidGlassPanel(
+                            cornerRadius = 16.dp,
+                            tintColor = KrasRedDark,
+                            surfaceAlpha = 0.85f,
+                            borderAlpha = 0.55f
+                        )
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.weight(1f, fill = false)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        IconButton(
-                            onClick = onClose,
-                            modifier = Modifier.testTag("player_back_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Close Player",
-                                tint = Color.White
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.Default.ErrorOutline,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = errorMessage!!,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontFamily = PlusJakartaSansFontFamily,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        }
 
-                        Column {
+        // 4. Main Cinematic Controls Overlay (Top Bar, Center Controls, Bottom Timeline & Pill Bar)
+        AnimatedVisibility(
+            visible = controlsVisible,
+            enter = fadeIn(animationSpec = tween(260, easing = FastOutSlowInEasing)),
+            exit = fadeOut(animationSpec = tween(260, easing = FastOutSlowInEasing)),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            val horizontalEdgePadding = if (isLandscape) 28.dp else 18.dp
+            val verticalEdgePadding = if (isLandscape) 14.dp else 16.dp
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .drawWithCache {
+                        val topScrim = Brush.verticalGradient(
+                            0.0f to Color.Black.copy(alpha = 0.86f),
+                            0.26f to Color.Black.copy(alpha = 0.28f),
+                            0.50f to Color.Black.copy(alpha = 0.35f),
+                            0.74f to Color.Black.copy(alpha = 0.45f),
+                            1.0f to Color.Black.copy(alpha = 0.92f)
+                        )
+                        val ambientRedGlow = Brush.radialGradient(
+                            colors = listOf(
+                                KrasRed.copy(alpha = 0.14f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * 0.5f, size.height * 0.5f),
+                            radius = size.minDimension * 0.55f
+                        )
+                        onDrawBehind {
+                            drawRect(topScrim)
+                            drawRect(ambientRedGlow)
+                        }
+                    }
+            ) {
+                // =========================================================================
+                // TOP CONTROL BAR: Back | KRAS TV Logo + Title & Specs | Cast | CC | Fullscreen
+                // =========================================================================
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        .displayCutoutPadding()
+                        .statusBarsPadding()
+                        .padding(horizontal = horizontalEdgePadding, vertical = verticalEdgePadding),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Left Side: Back Button + KRAS TV Custom Logo + Stream Title & Badges
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        // Back Arrow Button
+                        PlayerGlassIconButton(
+                            icon = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            onClick = onClose,
+                            size = 42.dp,
+                            iconSize = 20.dp,
+                            modifier = Modifier.testTag("player_back_button")
+                        )
+
+                        // KRAS TV Custom Wordmark Logo
+                        KrasLogo(
+                            height = if (isLandscape) 22.dp else 20.dp,
+                            modifier = Modifier.testTag("player_kras_logo")
+                        )
+
+                        // Subtle Vertical Divider
+                        Box(
+                            modifier = Modifier
+                                .width(1.dp)
+                                .height(22.dp)
+                                .background(Color.White.copy(alpha = 0.22f))
+                        )
+
+                        // Media Title + Episode Info + Real Resolution Badge
+                        Column(
+                            modifier = Modifier.weight(1f, fill = false),
+                            verticalArrangement = Arrangement.Center
+                        ) {
                             Text(
                                 text = episode?.title ?: mediaItem.name,
                                 color = Color.White,
-                                fontSize = 15.sp,
+                                fontSize = if (isLandscape) 15.sp else 13.sp,
+                                fontFamily = OutfitFontFamily,
                                 fontWeight = FontWeight.Bold,
-                                maxLines = 1
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
+
+                            Spacer(modifier = Modifier.height(2.dp))
+
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 if (episode != null) {
                                     Text(
-                                        text = "${mediaItem.name} • S${episode.seasonNumber}:E${episode.episodeNum}",
-                                        color = TextSecondary,
-                                        fontSize = 11.sp
+                                        text = "S${episode.seasonNumber}:E${episode.episodeNum}",
+                                        color = KrasRedBright,
+                                        fontSize = 10.sp,
+                                        fontFamily = OutfitFontFamily,
+                                        fontWeight = FontWeight.Bold
                                     )
                                 }
+
+                                ResolutionBadge(
+                                    resolution = effectiveQualityString,
+                                    isLive = mediaItem.type == MediaType.LIVE,
+                                    maxExtraTags = if (isLandscape) 2 else 1
+                                )
+
                                 if (realResolutionOverlay.isNotBlank()) {
                                     Box(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(4.dp))
-                                            .background(Color.White.copy(alpha = 0.16f))
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            .background(Color.White.copy(alpha = 0.14f))
+                                            .border(0.5.dp, Color.White.copy(alpha = 0.28f), RoundedCornerShape(4.dp))
+                                            .padding(horizontal = 5.dp, vertical = 1.5.dp)
                                             .testTag("player_real_resolution_overlay")
                                     ) {
                                         Text(
                                             text = realResolutionOverlay,
                                             color = Color.White,
-                                            fontSize = 10.sp,
+                                            fontSize = 9.sp,
+                                            fontFamily = OutfitFontFamily,
                                             fontWeight = FontWeight.SemiBold
                                         )
                                     }
@@ -314,39 +478,21 @@ fun PlayerScreen(
                         }
                     }
 
-                    // Top Action Badges & Aspect Ratio
+                    Spacer(modifier = Modifier.width(10.dp))
+
+                    // Right Side: Cast | Subtitles / CC | Aspect Ratio | Fullscreen
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        ResolutionBadge(
-                            resolution = effectiveQualityString,
-                            isLive = mediaItem.type == MediaType.LIVE
-                        )
-
-                        // Quality Selector Button (available in both Live TV & VOD)
+                        // Aspect Ratio Cycle Chip (compact glass pill)
                         Box(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(Color.White.copy(alpha = 0.15f))
-                                .clickable { showQualityDialog = true }
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                                .testTag("player_quality_button")
-                        ) {
-                            Text(
-                                text = selectedVariant.label,
-                                color = Color.White,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        // Aspect Ratio Cycle Button
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(Color.White.copy(alpha = 0.15f))
-                                .clickable {
+                                .height(36.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(Color(0x9912141E))
+                                .border(1.dp, Color.White.copy(alpha = 0.24f), RoundedCornerShape(18.dp))
+                                .liquidPressClickable {
                                     currentAspectRatio = when (currentAspectRatio) {
                                         AspectRatioMode.FIT -> AspectRatioMode.FILL
                                         AspectRatioMode.FILL -> AspectRatioMode.STRETCH
@@ -354,328 +500,600 @@ fun PlayerScreen(
                                         else -> AspectRatioMode.FIT
                                     }
                                 }
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                                .testTag("player_aspect_ratio_button")
+                                .padding(horizontal = 10.dp)
+                                .testTag("player_aspect_ratio_button"),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = currentAspectRatio.name,
-                                color = Color.White,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        // Orientation toggle
-                        IconButton(onClick = {
-                            isLandscapeLocked = !isLandscapeLocked
-                            activity?.requestedOrientation = if (isLandscapeLocked) {
-                                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-                            } else {
-                                ActivityInfo.SCREEN_ORIENTATION_SENSOR
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AspectRatio,
+                                    contentDescription = "Aspect Ratio",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = currentAspectRatio.name,
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    fontFamily = OutfitFontFamily,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
-                            PlayerImmersiveHelper.enterImmersiveMode(activity)
-                        }) {
-                            Icon(
-                                imageVector = if (isLandscapeLocked) Icons.Default.ScreenRotation else Icons.Default.ScreenLockRotation,
-                                contentDescription = "Toggle Rotation",
-                                tint = Color.White,
-                                modifier = Modifier.size(20.dp)
-                            )
                         }
 
-                        // Audio/Subtitle Track selector
-                        IconButton(onClick = { showAudioDialog = true }) {
-                            Icon(
-                                imageVector = Icons.Default.Subtitles,
-                                contentDescription = "Audio & Subtitles",
-                                tint = Color.White,
-                                modifier = Modifier.size(20.dp)
+                        // Cast Button
+                        PlayerGlassIconButton(
+                            icon = Icons.Default.Cast,
+                            contentDescription = "Cast to Device",
+                            onClick = { showCastDialog = true },
+                            size = 40.dp,
+                            iconSize = 19.dp,
+                            modifier = Modifier.testTag("player_cast_button")
+                        )
+
+                        // Subtitle / CC & Audio Button
+                        Box {
+                            PlayerGlassIconButton(
+                                icon = Icons.Default.Subtitles,
+                                contentDescription = "Subtitles and Audio",
+                                onClick = { showAudioSubtitleDialog = true },
+                                size = 40.dp,
+                                iconSize = 19.dp,
+                                isHighlighted = !selectedSubtitleTrack.isOff,
+                                modifier = Modifier.testTag("player_subtitles_button")
                             )
+                            if (!selectedSubtitleTrack.isOff) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(3.dp)
+                                        .size(7.dp)
+                                        .clip(CircleShape)
+                                        .background(KrasRedBright)
+                                )
+                            }
                         }
+
+                        // Fullscreen / Orientation Toggle Button
+                        PlayerGlassIconButton(
+                            icon = if (isFullscreenLandscape) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                            contentDescription = "Toggle Fullscreen",
+                            onClick = {
+                                isFullscreenLandscape = !isFullscreenLandscape
+                                activity?.requestedOrientation = if (isFullscreenLandscape) {
+                                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                } else {
+                                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                                }
+                                PlayerImmersiveHelper.enterImmersiveMode(activity)
+                            },
+                            size = 40.dp,
+                            iconSize = 21.dp,
+                            modifier = Modifier.testTag("player_fullscreen_button")
+                        )
                     }
                 }
 
-                // Center Controls: Rewind 10s, Play/Pause, Forward 10s
-                Row(
+                // =========================================================================
+                // CENTER PLAYER CONTROLS: 10s Rewind | Glowing Play/Pause | 10s Forward
+                // =========================================================================
+                Column(
                     modifier = Modifier.align(Alignment.Center),
-                    horizontalArrangement = Arrangement.spacedBy(28.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    if (mediaItem.type != MediaType.LIVE) {
-                        IconButton(
-                            onClick = { playerWrapper.seekBackward(10_000) },
-                            modifier = Modifier
-                                .size(50.dp)
-                                .clip(CircleShape)
-                                .background(Color.Black.copy(alpha = 0.5f))
-                                .testTag("player_rewind_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Replay10,
-                                contentDescription = "Rewind 10 seconds",
-                                tint = Color.White,
-                                modifier = Modifier.size(30.dp)
-                            )
-                        }
-                    }
-
-                    // Main Play/Pause Button
-                    IconButton(
-                        onClick = { playerWrapper.togglePlayPause() },
-                        modifier = Modifier
-                            .size(72.dp)
-                            .clip(CircleShape)
-                            .background(KrasRed)
-                            .testTag("player_play_pause_button")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(if (isLandscape) 44.dp else 32.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (isPlaying) "Pause" else "Play",
-                            tint = Color.White,
-                            modifier = Modifier.size(42.dp)
+                        // Left: Smooth 10-Second Rewind Button
+                        CenterSeekButton(
+                            icon = Icons.Default.Replay10,
+                            contentDescription = "Rewind 10 seconds",
+                            onClick = {
+                                playerWrapper.seekBackward(10_000)
+                                seekFeedbackText = "-10s"
+                            },
+                            modifier = Modifier.testTag("player_rewind_button")
+                        )
+
+                        // Center: Large Circular Play/Pause Button with Dark Translucent Glass & Red Glowing Border
+                        CenterPlayPauseButton(
+                            isPlaying = isPlaying,
+                            glowPulse = glowPulse,
+                            onClick = { playerWrapper.togglePlayPause() },
+                            modifier = Modifier.testTag("player_play_pause_button")
+                        )
+
+                        // Right: Smooth 10-Second Forward Button
+                        CenterSeekButton(
+                            icon = Icons.Default.Forward10,
+                            contentDescription = "Forward 10 seconds",
+                            onClick = {
+                                playerWrapper.seekForward(10_000)
+                                seekFeedbackText = "+10s"
+                            },
+                            modifier = Modifier.testTag("player_forward_button")
                         )
                     }
 
-                    if (mediaItem.type != MediaType.LIVE) {
-                        IconButton(
-                            onClick = { playerWrapper.seekForward(10_000) },
-                            modifier = Modifier
-                                .size(50.dp)
-                                .clip(CircleShape)
-                                .background(Color.Black.copy(alpha = 0.5f))
-                                .testTag("player_forward_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Forward10,
-                                contentDescription = "Forward 10 seconds",
-                                tint = Color.White,
-                                modifier = Modifier.size(30.dp)
-                            )
+                    // Subtle seek feedback pill (-10s / +10s)
+                    AnimatedVisibility(
+                        visible = seekFeedbackText != null,
+                        enter = fadeIn(tween(120)) + scaleIn(initialScale = 0.85f),
+                        exit = fadeOut(tween(180)) + scaleOut(targetScale = 0.9f)
+                    ) {
+                        if (seekFeedbackText != null) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 10.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(KrasRed.copy(alpha = 0.85f))
+                                    .border(0.8.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(50))
+                                    .padding(horizontal = 12.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = seekFeedbackText!!,
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontFamily = OutfitFontFamily,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
 
-                // Bottom Panel: Live Channels Drawer (if Live TV) OR Seekbar & Speed (if VOD)
+                // =========================================================================
+                // BOTTOM PANEL: Live Channel Strip (optional) + Timeline + 4 Equal Pill Buttons
+                // =========================================================================
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.BottomCenter)
                         .displayCutoutPadding()
                         .navigationBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                        .padding(horizontal = horizontalEdgePadding, vertical = verticalEdgePadding),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (mediaItem.type == MediaType.LIVE) {
-                        // Quick Channel Switching Bar for Live TV
-                        Text(
-                            text = "Channel Switcher",
-                            color = TextSecondary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
+                    // Quick Live TV Channel Carousel when watching Live TV
+                    if (mediaItem.type == MediaType.LIVE && liveChannels.isNotEmpty()) {
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            items(liveChannels, key = { it.id }) { ch ->
+                            items(liveChannels.take(25), key = { it.id }) { ch ->
                                 val isSelected = ch.id == mediaItem.id
                                 Row(
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSelected) KrasRed else Color.White.copy(alpha = 0.15f))
+                                        .clip(RoundedCornerShape(50))
+                                        .background(
+                                            if (isSelected) {
+                                                Brush.horizontalGradient(listOf(KrasRed, KrasRedDark))
+                                            } else {
+                                                Brush.horizontalGradient(
+                                                    listOf(
+                                                        Color(0x99141824),
+                                                        Color(0x990D1018)
+                                                    )
+                                                )
+                                            }
+                                        )
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (isSelected) Color.White.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.16f),
+                                            shape = RoundedCornerShape(50)
+                                        )
                                         .clickable { onSwitchChannel(ch) }
                                         .padding(horizontal = 12.dp, vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
+                                    if (isSelected) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(Color.White)
+                                        )
+                                    }
                                     Text(
                                         text = ch.name,
                                         color = Color.White,
                                         fontSize = 11.sp,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                        fontFamily = OutfitFontFamily,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1
                                     )
-                                    val chQ = ch.quality.ifBlank { ch.resolution }
-                                    if (chQ.isNotBlank()) {
-                                        ResolutionBadge(resolution = chQ, isLive = false)
-                                    }
                                 }
                             }
                         }
-                        Spacer(modifier = Modifier.height(6.dp))
-                    } else {
-                        // VOD / Series Seekbar
-                        val dur = duration.coerceAtLeast(1L)
-                        val pos = currentPos.coerceIn(0L, dur)
+                    }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
+                    // PLAYBACK TIMELINE: Current Time | Thin Red Progress Bar + Smooth Circular Handle | Total Duration
+                    val safeDuration = duration.coerceAtLeast(1L)
+                    val safePosition = currentPos.coerceIn(0L, safeDuration)
+                    val liveProgressFraction = if (mediaItem.type == MediaType.LIVE && duration <= 0L) {
+                        1f
+                    } else {
+                        (safePosition.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
+                    }
+                    val displayedFraction = if (isScrubbing) scrubFraction else liveProgressFraction
+                    val smoothFraction by animateFloatAsState(
+                        targetValue = displayedFraction,
+                        animationSpec = tween(durationMillis = if (isScrubbing) 0 else 150),
+                        label = "timeline_progress"
+                    )
+                    val displayedTimeMs = if (isScrubbing) {
+                        (scrubFraction * safeDuration).toLong()
+                    } else {
+                        currentPos.coerceAtLeast(0L)
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // Current playback time on the left
+                        Text(
+                            text = formatTime(displayedTimeMs),
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontFamily = OutfitFontFamily,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.widthIn(min = 44.dp)
+                        )
+
+                        // Thin elegant progress bar with Red indicator and smooth circular seek handle
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(28.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = formatTime(pos),
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold
+                            val thumbScale by animateFloatAsState(
+                                targetValue = if (isScrubbing) 1.35f else 1.0f,
+                                animationSpec = spring(stiffness = Spring.StiffnessMedium),
+                                label = "thumb_scale"
                             )
 
+                            // Custom sleek track & glowing circular thumb drawn behind the interactive Slider
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(22.dp)
+                                    .drawWithCache {
+                                        val trackHeight = 4.dp.toPx()
+                                        val trackRadius = CornerRadius(trackHeight / 2f, trackHeight / 2f)
+                                        val activeGrad = Brush.horizontalGradient(
+                                            colors = listOf(KrasRedDark, KrasRed, KrasRedBright)
+                                        )
+                                        onDrawBehind {
+                                            val cy = size.height / 2f
+                                            val trackTop = cy - trackHeight / 2f
+                                            // Inactive track
+                                            drawRoundRect(
+                                                color = Color.White.copy(alpha = 0.24f),
+                                                topLeft = Offset(0f, trackTop),
+                                                size = androidx.compose.ui.geometry.Size(size.width, trackHeight),
+                                                cornerRadius = trackRadius
+                                            )
+                                            // Active red progress indicator
+                                            val activeWidth = (size.width * smoothFraction).coerceIn(0f, size.width)
+                                            if (activeWidth > 0f) {
+                                                drawRoundRect(
+                                                    brush = activeGrad,
+                                                    topLeft = Offset(0f, trackTop),
+                                                    size = androidx.compose.ui.geometry.Size(activeWidth, trackHeight),
+                                                    cornerRadius = trackRadius
+                                                )
+                                            }
+                                            // Subtle red glow halo around circular seek handle
+                                            val thumbX = activeWidth.coerceIn(6.dp.toPx(), (size.width - 6.dp.toPx()).coerceAtLeast(6.dp.toPx()))
+                                            drawCircle(
+                                                color = KrasRed.copy(alpha = 0.42f),
+                                                radius = 10.dp.toPx() * thumbScale,
+                                                center = Offset(thumbX, cy)
+                                            )
+                                            // Crisp circular seek handle with white core & red rim
+                                            drawCircle(
+                                                color = KrasRedBright,
+                                                radius = 6.5.dp.toPx() * thumbScale,
+                                                center = Offset(thumbX, cy)
+                                            )
+                                            drawCircle(
+                                                color = Color.White,
+                                                radius = 3.dp.toPx() * thumbScale,
+                                                center = Offset(thumbX, cy)
+                                            )
+                                        }
+                                    }
+                            )
+
+                            // Functional ExoPlayer Slider (transparent colors so our custom track/handle shines while preserving full touch/drag & testTag)
                             Slider(
-                                value = (pos.toFloat() / dur.toFloat()).coerceIn(0f, 1f),
+                                value = displayedFraction,
                                 onValueChange = { frac ->
-                                    val target = (frac * dur).toLong()
+                                    isScrubbing = true
+                                    scrubFraction = frac.coerceIn(0f, 1f)
+                                    val target = (scrubFraction * safeDuration).toLong()
                                     playerWrapper.seekTo(target)
                                 },
+                                onValueChangeFinished = {
+                                    isScrubbing = false
+                                },
                                 colors = SliderDefaults.colors(
-                                    thumbColor = KrasRed,
-                                    activeTrackColor = KrasRed,
-                                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+                                    thumbColor = Color.Transparent,
+                                    activeTrackColor = Color.Transparent,
+                                    inactiveTrackColor = Color.Transparent
                                 ),
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .padding(horizontal = 8.dp)
+                                    .fillMaxWidth()
                                     .testTag("player_seek_bar")
                             )
+                        }
 
+                        // Total duration on the right (or LIVE badge if live stream has no fixed duration)
+                        if (mediaItem.type == MediaType.LIVE && duration <= 0L) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(KrasRed.copy(alpha = 0.22f))
+                                    .border(0.8.dp, KrasRedBright.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(KrasRedBright)
+                                )
+                                Text(
+                                    text = "LIVE",
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    fontFamily = OutfitFontFamily,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        } else {
                             Text(
-                                text = formatTime(dur),
+                                text = formatTime(safeDuration),
                                 color = TextSecondary,
-                                fontSize = 11.sp
+                                fontSize = 12.sp,
+                                fontFamily = OutfitFontFamily,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.widthIn(min = 44.dp)
                             )
                         }
+                    }
 
-                        // Bottom Actions: Speed, Quality, Offline Download
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Playback speed button
-                            TextButton(onClick = { showSpeedDialog = true }) {
-                                Text(
-                                    text = "Speed: ${playbackSpeed}x",
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-
-                            // Quality Selector
-                            TextButton(onClick = { showQualityDialog = true }) {
-                                Text(
-                                    text = if (realResolutionOverlay.isNotBlank() && selectedVariant.label == "Auto") {
-                                        "Quality: Auto ($realResolutionOverlay)"
-                                    } else {
-                                        "Quality: ${selectedVariant.label}"
-                                    },
-                                    color = Color.White,
-                                    fontSize = 12.sp
-                                )
-                            }
-
-                            // Download for offline playback
-                            IconButton(onClick = onDownloadClick) {
-                                Icon(
-                                    imageVector = Icons.Default.FileDownload,
-                                    contentDescription = "Download Offline",
-                                    tint = Color.White
-                                )
-                            }
+                    // =====================================================================
+                    // BOTTOM SETTINGS BAR: 4 Equally Sized Rounded Pill Buttons
+                    // 1. Speed (1.0x) | 2. Quality (Auto) | 3. Download | 4. Playlist/Episodes
+                    // =====================================================================
+                    val qualityPillLabel = remember(selectedVariant, realResolutionOverlay) {
+                        if (selectedVariant.label.equals("Auto", ignoreCase = true) && realResolutionOverlay.isNotBlank()) {
+                            "Auto (${realResolutionOverlay.substringBefore(" ")})"
+                        } else {
+                            selectedVariant.label
                         }
+                    }
+
+                    val playlistPillLabel = remember(mediaItem.type) {
+                        when (mediaItem.type) {
+                            MediaType.SERIES -> "Episodes"
+                            MediaType.LIVE -> "Channels"
+                            MediaType.MOVIE -> "Playlist"
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // 1. Playback Speed Pill Button
+                        BottomSettingPillButton(
+                            icon = Icons.Default.Speed,
+                            label = "${playbackSpeed}x",
+                            onClick = { showSpeedDialog = true },
+                            isActive = playbackSpeed != 1.0f,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("player_speed_button")
+                        )
+
+                        // 2. Video Quality Pill Button
+                        BottomSettingPillButton(
+                            icon = Icons.Default.HighQuality,
+                            label = qualityPillLabel,
+                            onClick = { showQualityDialog = true },
+                            isActive = !selectedVariant.label.equals("Auto", ignoreCase = true),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("player_quality_button")
+                        )
+
+                        // 3. Download Pill Button
+                        BottomSettingPillButton(
+                            icon = Icons.Default.FileDownload,
+                            label = "Download",
+                            onClick = {
+                                onDownloadClick()
+                                Toast.makeText(
+                                    context,
+                                    "Added \"${episode?.title ?: mediaItem.name}\" to Downloads",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("player_download_button")
+                        )
+
+                        // 4. Playlist / Episodes Pill Button
+                        BottomSettingPillButton(
+                            icon = Icons.AutoMirrored.Filled.PlaylistPlay,
+                            label = playlistPillLabel,
+                            onClick = { showPlaylistDialog = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("player_playlist_button")
+                        )
                     }
                 }
             }
         }
     }
 
-    // Playback Speed Dialog
+    // =========================================================================
+    // DIALOGS & SHEETS (Speed, Quality, Audio & Subtitles, Playlist/Episodes, Cast)
+    // =========================================================================
+
+    // 1. Playback Speed Dialog
     if (showSpeedDialog) {
         AlertDialog(
             onDismissRequest = { showSpeedDialog = false },
-            title = { Text("Playback Speed", color = Color.White) },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.Speed, contentDescription = null, tint = KrasRedBright)
+                    Text(
+                        text = "Playback Speed",
+                        color = Color.White,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 19.sp
+                    )
+                }
+            },
             text = {
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { speed ->
+                        val isSelected = (playbackSpeed == speed)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isSelected) KrasRed.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.05f))
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isSelected) KrasRedBright else Color.Transparent,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
                                 .clickable {
                                     playbackSpeed = speed
                                     playerWrapper.setPlaybackSpeed(speed)
                                     showSpeedDialog = false
                                 }
-                                .padding(vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
+                            Text(
+                                text = if (speed == 1.0f) "1.0x (Normal)" else "${speed}x",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontFamily = OutfitFontFamily,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                            )
                             RadioButton(
-                                selected = (playbackSpeed == speed),
+                                selected = isSelected,
                                 onClick = {
                                     playbackSpeed = speed
                                     playerWrapper.setPlaybackSpeed(speed)
                                     showSpeedDialog = false
                                 },
-                                colors = RadioButtonDefaults.colors(selectedColor = KrasRed)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "${speed}x ${if (speed == 1.0f) "(Normal)" else ""}",
-                                color = Color.White,
-                                fontSize = 14.sp
+                                colors = RadioButtonDefaults.colors(
+                                    selectedColor = KrasRedBright,
+                                    unselectedColor = TextSecondary
+                                )
                             )
                         }
                     }
                 }
             },
-            confirmButton = {},
-            containerColor = CinemaDark
+            confirmButton = {
+                TextButton(onClick = { showSpeedDialog = false }) {
+                    Text("Close", color = TextSecondary)
+                }
+            },
+            containerColor = CinemaDark,
+            shape = RoundedCornerShape(22.dp)
         )
     }
 
-    // Quality Selector Dialog (lists HLS/manifest variants: Auto, 1080p, 720p, 480p, etc.)
+    // 2. Video Quality Selector Dialog (Auto + real detected stream variants)
     if (showQualityDialog) {
         val variantsToShow = remember(availableVariants) {
             if (availableVariants.size > 1) {
                 availableVariants
             } else {
                 listOf(
-                    com.example.player.VideoQualityVariant("Auto", 0),
-                    com.example.player.VideoQualityVariant("1080p", 1080),
-                    com.example.player.VideoQualityVariant("720p", 720),
-                    com.example.player.VideoQualityVariant("480p", 480)
+                    VideoQualityVariant("Auto", 0),
+                    VideoQualityVariant("1080p", 1080),
+                    VideoQualityVariant("720p", 720),
+                    VideoQualityVariant("480p", 480)
                 )
             }
         }
         AlertDialog(
             onDismissRequest = { showQualityDialog = false },
-            title = { Text("Select Stream Quality", color = Color.White) },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.HighQuality, contentDescription = null, tint = KrasRedBright)
+                    Text(
+                        text = "Select Video Quality",
+                        color = Color.White,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 19.sp
+                    )
+                }
+            },
             text = {
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (realResolutionOverlay.isNotBlank()) {
                         Text(
-                            text = "Current stream: $realResolutionOverlay",
-                            color = TextSecondary,
+                            text = "Active stream output: $realResolutionOverlay",
+                            color = KrasRedBright,
                             fontSize = 12.sp,
-                            modifier = Modifier.padding(bottom = 8.dp)
+                            fontFamily = OutfitFontFamily,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(bottom = 4.dp)
                         )
                     }
                     variantsToShow.forEach { variant ->
+                        val isSelected = (selectedVariant.label == variant.label)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isSelected) KrasRed.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.05f))
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isSelected) KrasRedBright else Color.Transparent,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
                                 .clickable {
                                     playerWrapper.selectVideoQuality(variant)
                                     showQualityDialog = false
                                 }
-                                .padding(vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            RadioButton(
-                                selected = (selectedVariant.label == variant.label),
-                                onClick = {
-                                    playerWrapper.selectVideoQuality(variant)
-                                    showQualityDialog = false
-                                },
-                                colors = RadioButtonDefaults.colors(selectedColor = KrasRed)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = if (variant.height == 0 && realResolutionOverlay.isNotBlank()) {
                                     "Auto ($realResolutionOverlay)"
@@ -683,76 +1101,777 @@ fun PlayerScreen(
                                     variant.label
                                 },
                                 color = Color.White,
-                                fontSize = 14.sp
+                                fontSize = 14.sp,
+                                fontFamily = OutfitFontFamily,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                            )
+                            RadioButton(
+                                selected = isSelected,
+                                onClick = {
+                                    playerWrapper.selectVideoQuality(variant)
+                                    showQualityDialog = false
+                                },
+                                colors = RadioButtonDefaults.colors(
+                                    selectedColor = KrasRedBright,
+                                    unselectedColor = TextSecondary
+                                )
                             )
                         }
                     }
                 }
             },
-            confirmButton = {},
-            containerColor = CinemaDark
+            confirmButton = {
+                TextButton(onClick = { showQualityDialog = false }) {
+                    Text("Close", color = TextSecondary)
+                }
+            },
+            containerColor = CinemaDark,
+            shape = RoundedCornerShape(22.dp)
         )
     }
 
-    // Audio & Subtitle Dialog
-    if (showAudioDialog) {
+    // 3. Audio & Subtitles Track Selector Dialog (Connected to Media3 TrackSelector)
+    if (showAudioSubtitleDialog) {
         AlertDialog(
-            onDismissRequest = { showAudioDialog = false },
-            title = { Text("Audio & Subtitle Tracks", color = Color.White) },
+            onDismissRequest = { showAudioSubtitleDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.Subtitles, contentDescription = null, tint = KrasRedBright)
+                    Text(
+                        text = "Audio & Subtitles",
+                        color = Color.White,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 19.sp
+                    )
+                }
+            },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Audio Track:", color = TextSecondary, fontSize = 12.sp)
-                    listOf("Original English (5.1 Dolby)", "Arabic (Dubbed)", "Stereo 2.0 (Default)").forEach { track ->
+                    Text(
+                        text = "AUDIO TRACKS",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp
+                    )
+                    availableAudioTracks.forEach { track ->
+                        val isSel = (selectedAudioTrack.id == track.id)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { selectedAudioTrack = track }
-                                .padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isSel) KrasRed.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.05f))
+                                .clickable { playerWrapper.selectAudioTrack(track) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            RadioButton(
-                                selected = (selectedAudioTrack == track),
-                                onClick = { selectedAudioTrack = track },
-                                colors = RadioButtonDefaults.colors(selectedColor = KrasRed)
+                            Text(
+                                text = track.label,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontFamily = OutfitFontFamily,
+                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium,
+                                modifier = Modifier.weight(1f)
                             )
-                            Text(track, color = Color.White, fontSize = 13.sp)
+                            RadioButton(
+                                selected = isSel,
+                                onClick = { playerWrapper.selectAudioTrack(track) },
+                                colors = RadioButtonDefaults.colors(selectedColor = KrasRedBright)
+                            )
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text("Subtitles:", color = TextSecondary, fontSize = 12.sp)
-                    listOf("Off", "English [CC]", "Arabic").forEach { sub ->
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = "SUBTITLES / CC",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp
+                    )
+                    availableSubtitleTracks.forEach { sub ->
+                        val isSel = (selectedSubtitleTrack.id == sub.id)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isSel) KrasRed.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.05f))
+                                .clickable { playerWrapper.selectSubtitleTrack(sub) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            RadioButton(
-                                selected = sub == "Off",
-                                onClick = {},
-                                colors = RadioButtonDefaults.colors(selectedColor = KrasRed)
+                            Text(
+                                text = sub.label,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontFamily = OutfitFontFamily,
+                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium,
+                                modifier = Modifier.weight(1f)
                             )
-                            Text(sub, color = Color.White, fontSize = 13.sp)
+                            RadioButton(
+                                selected = isSel,
+                                onClick = { playerWrapper.selectSubtitleTrack(sub) },
+                                colors = RadioButtonDefaults.colors(selectedColor = KrasRedBright)
+                            )
                         }
                     }
                 }
             },
             confirmButton = {
                 Button(
-                    onClick = { showAudioDialog = false },
-                    colors = ButtonDefaults.buttonColors(containerColor = KrasRed)
+                    onClick = { showAudioSubtitleDialog = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = KrasRed),
+                    shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("Done", color = Color.White)
+                    Text("Done", color = Color.White, fontFamily = OutfitFontFamily, fontWeight = FontWeight.Bold)
                 }
             },
-            containerColor = CinemaDark
+            containerColor = CinemaDark,
+            shape = RoundedCornerShape(22.dp)
+        )
+    }
+
+    // 4. Playlist / Episodes / Live Channels Drawer Modal
+    if (showPlaylistDialog) {
+        val allSeriesEpisodes = remember(seriesDetails) {
+            seriesDetails?.seasons?.flatMap { it.episodes }.orEmpty()
+        }
+
+        AlertDialog(
+            onDismissRequest = { showPlaylistDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.PlaylistPlay,
+                        contentDescription = null,
+                        tint = KrasRedBright
+                    )
+                    Text(
+                        text = when (mediaItem.type) {
+                            MediaType.SERIES -> "Episodes • ${mediaItem.name}"
+                            MediaType.LIVE -> "Live TV Channels (${liveChannels.size})"
+                            MediaType.MOVIE -> "Up Next in Cinema"
+                        },
+                        color = Color.White,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            },
+            text = {
+                Box(modifier = Modifier.heightIn(max = 340.dp)) {
+                    when {
+                        mediaItem.type == MediaType.SERIES && allSeriesEpisodes.isNotEmpty() -> {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(allSeriesEpisodes, key = { it.id }) { ep ->
+                                    val isCurrent = (episode?.id == ep.id)
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(if (isCurrent) KrasRed.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.06f))
+                                            .border(
+                                                1.dp,
+                                                if (isCurrent) KrasRedBright else GlassBorder,
+                                                RoundedCornerShape(12.dp)
+                                            )
+                                            .clickable {
+                                                showPlaylistDialog = false
+                                                onPlayEpisode?.invoke(ep)
+                                            }
+                                            .padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.PlayCircleFilled,
+                                            contentDescription = null,
+                                            tint = if (isCurrent) KrasRedBright else Color.White,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "S${ep.seasonNumber}:E${ep.episodeNum} • ${ep.title}",
+                                                color = Color.White,
+                                                fontSize = 13.sp,
+                                                fontFamily = OutfitFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (ep.plot.isNotBlank()) {
+                                                Text(
+                                                    text = ep.plot,
+                                                    color = TextSecondary,
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        mediaItem.type == MediaType.LIVE && liveChannels.isNotEmpty() -> {
+                            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(liveChannels.take(60), key = { it.id }) { ch ->
+                                    val isCurrent = (ch.id == mediaItem.id)
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(if (isCurrent) KrasRed.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.06f))
+                                            .border(
+                                                1.dp,
+                                                if (isCurrent) KrasRedBright else GlassBorder,
+                                                RoundedCornerShape(12.dp)
+                                            )
+                                            .clickable {
+                                                showPlaylistDialog = false
+                                                onSwitchChannel(ch)
+                                            }
+                                            .padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        val iconUrl = ch.streamIcon.ifBlank { ch.backdrop }.takeIf { it.isNotBlank() }
+                                        if (iconUrl != null) {
+                                            AsyncImage(
+                                                model = iconUrl,
+                                                contentDescription = ch.name,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier
+                                                    .size(36.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(CinemaBlack)
+                                            )
+                                        }
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = ch.name,
+                                                color = Color.White,
+                                                fontSize = 13.sp,
+                                                fontFamily = OutfitFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = ch.categoryName,
+                                                color = TextSecondary,
+                                                fontSize = 11.sp,
+                                                maxLines = 1
+                                            )
+                                        }
+                                        ResolutionBadge(
+                                            resolution = ch.quality.ifBlank { ch.resolution },
+                                            isLive = true
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        else -> {
+                            val listItems = moviesPlaylist.ifEmpty { liveChannels }.take(30)
+                            if (listItems.isEmpty()) {
+                                Text(
+                                    text = "Now playing: ${episode?.title ?: mediaItem.name}",
+                                    color = TextSecondary,
+                                    fontSize = 13.sp
+                                )
+                            } else {
+                                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    items(listItems, key = { it.id }) { item ->
+                                        val isCurrent = (item.id == mediaItem.id)
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(if (isCurrent) KrasRed.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.06f))
+                                                .border(
+                                                    1.dp,
+                                                    if (isCurrent) KrasRedBright else GlassBorder,
+                                                    RoundedCornerShape(12.dp)
+                                                )
+                                                .clickable {
+                                                    showPlaylistDialog = false
+                                                    onSwitchChannel(item)
+                                                }
+                                                .padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Movie,
+                                                contentDescription = null,
+                                                tint = if (isCurrent) KrasRedBright else Color.White,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Text(
+                                                text = item.name,
+                                                color = Color.White,
+                                                fontSize = 13.sp,
+                                                fontFamily = OutfitFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            ResolutionBadge(
+                                                resolution = item.quality.ifBlank { item.resolution },
+                                                isLive = false
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPlaylistDialog = false }) {
+                    Text("Close", color = TextSecondary)
+                }
+            },
+            containerColor = CinemaDark,
+            shape = RoundedCornerShape(22.dp)
+        )
+    }
+
+    // 5. Cast / Wireless Display Dialog
+    if (showCastDialog) {
+        AlertDialog(
+            onDismissRequest = { showCastDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.Cast, contentDescription = null, tint = KrasRedBright)
+                    Text(
+                        text = "Cast to Smart TV",
+                        color = Color.White,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 19.sp
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Stream \"${episode?.title ?: mediaItem.name}\" to a Smart TV, Chromecast, or Wireless Display on the same Wi-Fi network.",
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.White.copy(alpha = 0.06f))
+                            .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                            .clickable {
+                                showCastDialog = false
+                                try {
+                                    val castIntent = Intent(Settings.ACTION_CAST_SETTINGS).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(castIntent)
+                                } catch (_: Exception) {
+                                    Toast.makeText(context, "Wireless Display settings unavailable on this device", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(Icons.Default.ConnectedTv, contentDescription = null, tint = KrasRedBright)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Open Wireless Cast Display",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontFamily = OutfitFontFamily,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Connect to Chromecast / Miracast TV",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    val activeStreamUrl = episode?.streamUrl?.ifBlank { mediaItem.streamUrl } ?: mediaItem.streamUrl
+                    if (activeStreamUrl.isNotBlank()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color.White.copy(alpha = 0.06f))
+                                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                                .clickable {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("KRAS TV Stream URL", activeStreamUrl))
+                                    Toast.makeText(context, "Stream URL copied for external DLNA/Cast player", Toast.LENGTH_SHORT).show()
+                                    showCastDialog = false
+                                }
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, tint = Color.White)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Copy Direct Stream URL",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontFamily = OutfitFontFamily,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Use with external DLNA or network receivers",
+                                    color = TextSecondary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showCastDialog = false }) {
+                    Text("Close", color = TextSecondary)
+                }
+            },
+            containerColor = CinemaDark,
+            shape = RoundedCornerShape(22.dp)
         )
     }
 }
 
+/**
+ * Circular translucent glassmorphic top-bar icon button with subtle 3D specular border.
+ */
+@Composable
+private fun PlayerGlassIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 40.dp,
+    iconSize: Dp = 20.dp,
+    isHighlighted: Boolean = false
+) {
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .drawWithCache {
+                val r = this.size.minDimension / 2f
+                val fillBrush = Brush.verticalGradient(
+                    colors = if (isHighlighted) {
+                        listOf(KrasRed.copy(alpha = 0.45f), Color(0xCC12141E))
+                    } else {
+                        listOf(Color(0xB31E2230), Color(0xCC0D0F17))
+                    }
+                )
+                val rimBrush = Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.45f),
+                        Color.White.copy(alpha = 0.12f),
+                        if (isHighlighted) KrasRedBright.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.22f)
+                    ),
+                    start = Offset.Zero,
+                    end = Offset(this.size.width, this.size.height)
+                )
+                onDrawBehind {
+                    drawCircle(brush = fillBrush, radius = r)
+                    drawCircle(
+                        brush = rimBrush,
+                        radius = r - 0.5.dp.toPx(),
+                        style = Stroke(width = 1.dp.toPx())
+                    )
+                }
+            }
+            .liquidPressClickable(pressedScale = 0.90f, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = Color.White,
+            modifier = Modifier.size(iconSize)
+        )
+    }
+}
+
+/**
+ * Center 10-second rewind / forward button with dark translucent glass & 3D rim.
+ */
+@Composable
+private fun CenterSeekButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.88f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "seek_btn_scale"
+    )
+
+    Box(
+        modifier = modifier
+            .size(58.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clip(CircleShape)
+            .drawWithCache {
+                val r = size.minDimension / 2f
+                val bgBrush = Brush.radialGradient(
+                    colors = listOf(
+                        Color(0xBF1A1E2B),
+                        Color(0xD9090B10)
+                    )
+                )
+                val borderBrush = Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.45f),
+                        Color.White.copy(alpha = 0.10f),
+                        KrasRed.copy(alpha = 0.35f)
+                    ),
+                    start = Offset.Zero,
+                    end = Offset(size.width, size.height)
+                )
+                onDrawBehind {
+                    drawCircle(brush = bgBrush, radius = r)
+                    drawCircle(
+                        brush = borderBrush,
+                        radius = r - 0.6.dp.toPx(),
+                        style = Stroke(width = 1.2.dp.toPx())
+                    )
+                }
+            }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = Color.White,
+            modifier = Modifier.size(28.dp)
+        )
+    }
+}
+
+/**
+ * Large circular center Play/Pause control with dark translucent background,
+ * subtle red glowing border, and 3D inner specular reflection.
+ */
+@Composable
+private fun CenterPlayPauseButton(
+    isPlaying: Boolean,
+    glowPulse: Float,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.91f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "play_pause_scale"
+    )
+
+    Box(
+        modifier = modifier
+            .size(84.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .drawWithCache {
+                val r = size.minDimension / 2f
+                val innerRadius = r * 0.84f
+                val outerGlowBrush = Brush.radialGradient(
+                    colors = listOf(
+                        KrasRed.copy(alpha = 0.42f * glowPulse),
+                        KrasRed.copy(alpha = 0.14f * glowPulse),
+                        Color.Transparent
+                    ),
+                    center = Offset(size.width / 2f, size.height / 2f),
+                    radius = r
+                )
+                val darkGlassFill = Brush.radialGradient(
+                    colors = listOf(
+                        Color(0xD9220A0E),
+                        Color(0xEC0B0D14)
+                    ),
+                    center = Offset(size.width * 0.35f, size.height * 0.3f),
+                    radius = innerRadius * 1.3f
+                )
+                val redGlowingBorder = Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.72f),
+                        KrasRedBright,
+                        KrasRed,
+                        KrasRedBright.copy(alpha = 0.85f)
+                    ),
+                    start = Offset.Zero,
+                    end = Offset(size.width, size.height)
+                )
+                onDrawBehind {
+                    // Subtle outer red glow halo
+                    drawCircle(brush = outerGlowBrush, radius = r)
+                    // Dark translucent glass core
+                    drawCircle(brush = darkGlassFill, radius = innerRadius)
+                    // Glowing red + specular rim border
+                    drawCircle(
+                        brush = redGlowingBorder,
+                        radius = innerRadius - 1.dp.toPx(),
+                        style = Stroke(width = 1.8.dp.toPx())
+                    )
+                }
+            }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+            contentDescription = if (isPlaying) "Pause" else "Play",
+            tint = Color.White,
+            modifier = Modifier.size(38.dp)
+        )
+    }
+}
+
+/**
+ * Equal-sized rounded pill button for the Bottom Settings Bar
+ * (Playback Speed, Video Quality, Download, Playlist/Episodes).
+ */
+@Composable
+private fun BottomSettingPillButton(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    isActive: Boolean = false
+) {
+    Box(
+        modifier = modifier
+            .height(42.dp)
+            .clip(RoundedCornerShape(50))
+            .drawWithCache {
+                val corner = CornerRadius(size.height / 2f, size.height / 2f)
+                val fillBrush = Brush.verticalGradient(
+                    colors = if (isActive) {
+                        listOf(
+                            KrasRed.copy(alpha = 0.32f),
+                            Color(0xD910131C)
+                        )
+                    } else {
+                        listOf(
+                            Color(0xBF1B1F2E),
+                            Color(0xD90C0E16)
+                        )
+                    }
+                )
+                val borderBrush = Brush.linearGradient(
+                    colors = if (isActive) {
+                        listOf(
+                            Color.White.copy(alpha = 0.55f),
+                            KrasRedBright.copy(alpha = 0.7f)
+                        )
+                    } else {
+                        listOf(
+                            Color.White.copy(alpha = 0.35f),
+                            Color.White.copy(alpha = 0.10f),
+                            Color.White.copy(alpha = 0.22f)
+                        )
+                    },
+                    start = Offset.Zero,
+                    end = Offset(size.width, size.height)
+                )
+                onDrawBehind {
+                    drawRoundRect(brush = fillBrush, cornerRadius = corner)
+                    drawRoundRect(
+                        brush = borderBrush,
+                        cornerRadius = corner,
+                        style = Stroke(width = 1.dp.toPx())
+                    )
+                }
+            }
+            .liquidPressClickable(pressedScale = 0.95f, onClick = onClick)
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (isActive) KrasRedBright else Color.White.copy(alpha = 0.92f),
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = label,
+                color = Color.White,
+                fontSize = 11.sp,
+                fontFamily = OutfitFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
 private fun formatTime(millis: Long): String {
-    val totalSec = millis / 1000
+    val totalSec = (millis / 1000).coerceAtLeast(0L)
     val sec = totalSec % 60
     val min = (totalSec / 60) % 60
     val hrs = totalSec / 3600

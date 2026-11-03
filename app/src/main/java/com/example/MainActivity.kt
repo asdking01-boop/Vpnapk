@@ -266,6 +266,11 @@ class MainActivity : ComponentActivity() {
                         },
                         onDownloadClick = {
                             viewModel.downloadItem(nowPlayingItem!!)
+                        },
+                        seriesDetails = currentSeriesDetails,
+                        moviesPlaylist = movies,
+                        onPlayEpisode = { ep ->
+                            viewModel.startPlayback(nowPlayingItem!!, ep)
                         }
                     )
                 } else if (isLoginOpen) {
