@@ -108,12 +108,18 @@ class MainActivity : ComponentActivity() {
                 val accounts by viewModel.accounts.collectAsState()
                 val movies by viewModel.movies.collectAsState()
                 val movieCategories by viewModel.movieCategories.collectAsState()
+                val latestMoviesForCategory by viewModel.latestMoviesForCategory.collectAsState()
+                val latestMoviesByCategoryMap by viewModel.latestMoviesByCategoryMap.collectAsState()
                 val series by viewModel.series.collectAsState()
                 val seriesCategories by viewModel.seriesCategories.collectAsState()
+                val latestSeriesForCategory by viewModel.latestSeriesForCategory.collectAsState()
+                val latestSeriesByCategoryMap by viewModel.latestSeriesByCategoryMap.collectAsState()
                 val currentSeriesDetails by viewModel.currentSeriesDetails.collectAsState()
                 val isSeriesDetailsLoading by viewModel.isSeriesDetailsLoading.collectAsState()
                 val liveStreams by viewModel.liveStreams.collectAsState()
                 val liveCategories by viewModel.liveCategories.collectAsState()
+                val activeLiveChannel by viewModel.activeLiveChannel.collectAsState()
+                val isLiveFullscreen by viewModel.isLiveFullscreen.collectAsState()
                 val favorites by viewModel.favorites.collectAsState()
                 val searchResults by viewModel.searchResults.collectAsState()
                 val watchHistory by viewModel.watchHistory.collectAsState()
@@ -146,10 +152,16 @@ class MainActivity : ComponentActivity() {
                 BackHandler {
                     when {
                         nowPlayingItem != null -> viewModel.stopPlayback()
+                        currentScreen == NavScreen.LIVE_TV && isLiveFullscreen -> viewModel.setLiveFullscreen(false)
                         selectedSeriesForDetails != null -> selectedSeriesForDetails = null
                         isSearchOpen -> isSearchOpen = false
                         isLoginOpen -> isLoginOpen = false
-                        currentScreen != NavScreen.HOME -> currentScreen = NavScreen.HOME
+                        currentScreen != NavScreen.HOME -> {
+                            if (currentScreen == NavScreen.LIVE_TV && activeLiveChannel != null) {
+                                viewModel.stopLiveChannelPlayback()
+                            }
+                            currentScreen = NavScreen.HOME
+                        }
                         else -> finish()
                     }
                 }
@@ -285,11 +297,19 @@ class MainActivity : ComponentActivity() {
                         isFavorite = { id -> viewModel.isFavorite(id) },
                         onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                         onMediaClick = { item ->
-                            if (item.type == MediaType.SERIES) {
-                                viewModel.loadSeriesDetails(item)
-                                selectedSeriesForDetails = item
-                            } else {
-                                viewModel.startPlayback(item)
+                            when (item.type) {
+                                MediaType.SERIES -> {
+                                    viewModel.loadSeriesDetails(item)
+                                    selectedSeriesForDetails = item
+                                }
+                                MediaType.LIVE -> {
+                                    isSearchOpen = false
+                                    currentScreen = NavScreen.LIVE_TV
+                                    viewModel.selectLiveChannel(item)
+                                }
+                                MediaType.MOVIE -> {
+                                    viewModel.startPlayback(item)
+                                }
                             }
                         },
                         onClose = { isSearchOpen = false },
@@ -305,12 +325,17 @@ class MainActivity : ComponentActivity() {
                         containerColor = CinemaBlack,
                         contentWindowInsets = WindowInsets(0, 0, 0, 0),
                         bottomBar = {
-                            BottomNavBar(
-                                currentScreen = currentScreen,
-                                onScreenSelected = { screen ->
-                                    currentScreen = screen
-                                }
-                            )
+                            if (!(currentScreen == NavScreen.LIVE_TV && isLiveFullscreen)) {
+                                BottomNavBar(
+                                    currentScreen = currentScreen,
+                                    onScreenSelected = { screen ->
+                                        if (currentScreen == NavScreen.LIVE_TV && screen != NavScreen.LIVE_TV && activeLiveChannel != null) {
+                                            viewModel.stopLiveChannelPlayback()
+                                        }
+                                        currentScreen = screen
+                                    }
+                                )
+                            }
                         }
                     ) { innerPadding ->
                         Box(
@@ -349,11 +374,18 @@ class MainActivity : ComponentActivity() {
                                         isFavorite = { id -> viewModel.isFavorite(id) },
                                         onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                                         onMediaClick = { item ->
-                                            if (item.type == MediaType.SERIES) {
-                                                viewModel.loadSeriesDetails(item)
-                                                selectedSeriesForDetails = item
-                                            } else {
-                                                viewModel.startPlayback(item)
+                                            when (item.type) {
+                                                MediaType.SERIES -> {
+                                                    viewModel.loadSeriesDetails(item)
+                                                    selectedSeriesForDetails = item
+                                                }
+                                                MediaType.LIVE -> {
+                                                    currentScreen = NavScreen.LIVE_TV
+                                                    viewModel.selectLiveChannel(item)
+                                                }
+                                                MediaType.MOVIE -> {
+                                                    viewModel.startPlayback(item)
+                                                }
                                             }
                                         },
                                         onSearchClick = { isSearchOpen = true },
@@ -374,6 +406,8 @@ class MainActivity : ComponentActivity() {
                                         onMovieClick = { movie -> viewModel.startPlayback(movie) },
                                         cardStyle = userSettings.cardStyle,
                                         totalCount = totalMoviesCount,
+                                        latestMoviesForCategory = latestMoviesForCategory,
+                                        latestMoviesByCategoryMap = latestMoviesByCategoryMap,
                                         onLoadMore = { viewModel.loadMoreMovies() },
                                         onFilterChanged = { cat, q, rating, yr, qFilter, sortQ ->
                                             viewModel.filterMovies(cat, q, rating, yr, qFilter, sortQ)
@@ -391,6 +425,9 @@ class MainActivity : ComponentActivity() {
                                         },
                                         cardStyle = userSettings.cardStyle,
                                         totalCount = totalSeriesCount,
+                                        latestSeriesForCategory = latestSeriesForCategory,
+                                        latestSeriesByCategoryMap = latestSeriesByCategoryMap,
+                                        watchHistory = watchHistory,
                                         onLoadMore = { viewModel.loadMoreSeries() },
                                         onFilterChanged = { cat, q, rating, yr, qFilter, sortQ ->
                                             viewModel.filterSeries(cat, q, rating, yr, qFilter, sortQ)
@@ -402,9 +439,15 @@ class MainActivity : ComponentActivity() {
                                         categories = liveCategories,
                                         isFavorite = { id -> viewModel.isFavorite(id) },
                                         onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
-                                        onChannelClick = { channel -> viewModel.startPlayback(channel) },
+                                        onChannelClick = { channel -> viewModel.selectLiveChannel(channel) },
                                         totalCount = totalLiveCount,
                                         liveChannelOrder = userSettings.liveChannelOrder,
+                                        activeChannel = activeLiveChannel,
+                                        playerWrapper = viewModel.playerWrapper,
+                                        isFullscreen = isLiveFullscreen,
+                                        onToggleFullscreen = { fullscreen -> viewModel.setLiveFullscreen(fullscreen) },
+                                        onRetryPlayback = { viewModel.retryLiveChannel() },
+                                        defaultAspectRatio = userSettings.defaultAspectRatio,
                                         onLoadMore = { viewModel.loadMoreLive() },
                                         onFilterChanged = { cat, q, qFilter, sortQ ->
                                             viewModel.filterLive(cat, q, qFilter, sortQ)
@@ -590,22 +633,23 @@ class MainActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && viewModel.nowPlayingItem.value != null) {
+        if (hasFocus && (viewModel.nowPlayingItem.value != null || viewModel.isLiveFullscreen.value)) {
             PlayerImmersiveHelper.enterImmersiveMode(this)
         }
     }
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
-        if (!isInPictureInPictureMode && viewModel.nowPlayingItem.value != null) {
+        if (!isInPictureInPictureMode && (viewModel.nowPlayingItem.value != null || viewModel.isLiveFullscreen.value)) {
             PlayerImmersiveHelper.enterImmersiveMode(this)
         }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        if (viewModel.nowPlayingItem.value != null) {
+        if (viewModel.nowPlayingItem.value != null || viewModel.isLiveFullscreen.value) {
             PlayerImmersiveHelper.enterImmersiveMode(this)
         }
     }
 }
+

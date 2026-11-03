@@ -30,7 +30,8 @@ import com.example.data.model.MediaType
         Index(value = ["accountId", "type", "groupKey", "seq", "name"]),
         Index(value = ["accountId", "type", "categoryId", "groupKey", "seq", "name"]),
         Index(value = ["accountId", "type", "serverOrder", "name"]),
-        Index(value = ["accountId", "type", "categoryId", "serverOrder", "name"])
+        Index(value = ["accountId", "type", "categoryId", "serverOrder", "name"]),
+        Index(value = ["accountId", "type", "categoryId", "addedTimestamp"])
     ]
 )
 data class MediaItemEntity(
@@ -52,6 +53,7 @@ data class MediaItemEntity(
     val streamUrl: String,
     val containerExtension: String,
     val addedTimestamp: Long,
+    val hasServerAddedDate: Boolean = true,
     val groupKey: String = ChannelNameNormalizer.normalize(name).groupKey,
     val seq: Int = ChannelNameNormalizer.normalize(name).seq,
     val groupOrder: Int = 0,
@@ -76,6 +78,7 @@ data class MediaItemEntity(
             streamUrl = streamUrl,
             containerExtension = containerExtension,
             addedTimestamp = addedTimestamp,
+            hasServerAddedDate = hasServerAddedDate,
             groupKey = groupKey,
             seq = seq,
             groupOrder = groupOrder,
@@ -120,6 +123,7 @@ data class MediaItemEntity(
                 explicitQuality = item.quality,
                 explicitResolution = item.resolution
             )
+            val hasServerDate = item.addedTimestamp > 0L && item.hasServerAddedDate
             return MediaItemEntity(
                 id = if (item.id.isNotBlank()) item.id else "${item.type.name.lowercase()}_${item.streamId}",
                 accountId = accountId,
@@ -137,7 +141,8 @@ data class MediaItemEntity(
                 quality = detectedQuality,
                 streamUrl = item.streamUrl,
                 containerExtension = item.containerExtension,
-                addedTimestamp = if (item.addedTimestamp > 0) item.addedTimestamp else System.currentTimeMillis(),
+                addedTimestamp = item.addedTimestamp,
+                hasServerAddedDate = hasServerDate,
                 groupKey = item.groupKey.ifBlank { norm.groupKey },
                 seq = if (item.groupKey.isNotBlank()) item.seq else norm.seq,
                 groupOrder = groupOrderOverride ?: item.groupOrder,
@@ -155,6 +160,7 @@ data class MediaItemEntity(
                     explicitQuality = item.quality,
                     explicitResolution = item.resolution
                 )
+                val hasServerDate = item.addedTimestamp > 0L && item.hasServerAddedDate
                 MediaItemEntity(
                     id = if (item.id.isNotBlank()) item.id else "${item.type.name.lowercase()}_${item.streamId}",
                     accountId = accountId,
@@ -172,7 +178,8 @@ data class MediaItemEntity(
                     quality = detectedQuality,
                     streamUrl = item.streamUrl,
                     containerExtension = item.containerExtension,
-                    addedTimestamp = if (item.addedTimestamp > 0) item.addedTimestamp else System.currentTimeMillis(),
+                    addedTimestamp = item.addedTimestamp,
+                    hasServerAddedDate = hasServerDate,
                     groupKey = info.groupKey,
                     seq = info.seq,
                     groupOrder = info.groupOrder,

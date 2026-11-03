@@ -1,6 +1,6 @@
 {
-  "name": "Kras TV",
-  "description": "Modern Netflix-style IPTV streaming app with Xtream Codes API support, Live TV, Movies, Series, and custom player.",
+  "name": "KRAS TV",
+  "description": "Premium Netflix-inspired IPTV streaming platform for Live TV, Movies, and Series with 4K UHD playback.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

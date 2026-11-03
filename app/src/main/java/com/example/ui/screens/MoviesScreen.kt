@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -7,23 +8,34 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.local.QualityDetector
@@ -36,6 +48,55 @@ import com.example.ui.components.LiquidGlassChip
 import com.example.ui.components.MediaCard
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.theme.*
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+internal fun formatAddedDateBadge(timestampMs: Long, hasServerAddedDate: Boolean): String {
+    if (timestampMs <= 0L) {
+        return if (hasServerAddedDate) "Server Added" else "First Seen"
+    }
+    val dateStr = try {
+        SimpleDateFormat("MMM d", Locale.US).format(Date(timestampMs))
+    } catch (_: Exception) {
+        ""
+    }
+    val prefix = if (hasServerAddedDate) "Server Added" else "First Seen"
+    return if (dateStr.isNotEmpty()) "$prefix • $dateStr" else prefix
+}
+
+internal fun computeFallbackLatest20(
+    items: List<MediaItem>,
+    categoryId: String,
+    limit: Int = 20
+): List<MediaItem> {
+    val categoryFiltered = items.filter { item ->
+        categoryId == "all" ||
+                categoryId == "vod_all" ||
+                categoryId == "series_all" ||
+                item.categoryId == categoryId ||
+                item.categoryName.contains(categoryId, ignoreCase = true)
+    }
+    val sorted = categoryFiltered.sortedWith(
+        compareByDescending<MediaItem> { it.hasServerAddedDate }
+            .thenByDescending { it.addedTimestamp }
+            .thenByDescending { it.streamId }
+            .thenBy { it.name }
+    )
+    val seenIds = HashSet<String>()
+    val seenStreamIds = HashSet<Int>()
+    val seenTitles = HashSet<String>()
+    val result = ArrayList<MediaItem>(limit)
+    for (item in sorted) {
+        if (!seenIds.add(item.id)) continue
+        if (item.streamId > 0 && !seenStreamIds.add(item.streamId)) continue
+        val titleKey = "${item.categoryId}_${item.name.trim().lowercase()}"
+        if (!seenTitles.add(titleKey)) continue
+        result.add(item)
+        if (result.size >= limit) break
+    }
+    return result
+}
 
 @Composable
 fun MoviesScreen(
@@ -48,15 +109,19 @@ fun MoviesScreen(
     cardStyle: CardStyle,
     modifier: Modifier = Modifier,
     totalCount: Int = movies.size,
+    latestMoviesForCategory: List<MediaItem> = emptyList(),
+    latestMoviesByCategoryMap: Map<String, List<MediaItem>> = emptyMap(),
     onLoadMore: (() -> Unit)? = null,
     onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String, qualityFilter: String, sortByQuality: Boolean) -> Unit)? = null
 ) {
-    var selectedCategoryId by remember { mutableStateOf("all") }
-    var searchQuery by remember { mutableStateOf("") }
-    var minRating by remember { mutableStateOf(0.0) }
-    var selectedYear by remember { mutableStateOf("All") }
-    var selectedQualityFilter by remember { mutableStateOf("All") }
-    var sortByQuality by remember { mutableStateOf(false) }
+    var selectedCategoryId by rememberSaveable { mutableStateOf("all") }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var minRating by rememberSaveable { mutableStateOf(0.0) }
+    var selectedYear by rememberSaveable { mutableStateOf("All") }
+    var selectedQualityFilter by rememberSaveable { mutableStateOf("All") }
+    var sortByQuality by rememberSaveable { mutableStateOf(false) }
+    var showOnlyLatest20 by rememberSaveable { mutableStateOf(false) }
+    var showLatest20ViewAllScreen by rememberSaveable { mutableStateOf(false) }
     var showFilterDialog by remember { mutableStateOf(false) }
 
     val qualityFilterOptions = remember { listOf("All", "4K", "FHD", "HD", "SD") }
@@ -64,24 +129,49 @@ fun MoviesScreen(
     val gridState = rememberLazyGridState()
     val listState = rememberLazyListState()
 
+    val activeCategoryName = remember(selectedCategoryId, categories) {
+        if (selectedCategoryId == "all" || selectedCategoryId == "vod_all") {
+            "All Movies"
+        } else {
+            categories.find { it.categoryId == selectedCategoryId }?.categoryName ?: "Selected Category"
+        }
+    }
+
     // Trigger filter update when controls change
     LaunchedEffect(selectedCategoryId, searchQuery, minRating, selectedYear, selectedQualityFilter, sortByQuality) {
-        if (onFilterChanged != null) {
-            onFilterChanged(selectedCategoryId, searchQuery, minRating, selectedYear, selectedQualityFilter, sortByQuality)
+        onFilterChanged?.invoke(selectedCategoryId, searchQuery, minRating, selectedYear, selectedQualityFilter, sortByQuality)
+    }
+
+    // Resolve the Latest 20 Movies for the active category (sorted by server date_added or first-seen timestamp)
+    val resolvedLatest20Movies = remember(
+        latestMoviesForCategory,
+        latestMoviesByCategoryMap,
+        movies,
+        selectedCategoryId
+    ) {
+        val fromMap = latestMoviesByCategoryMap[selectedCategoryId]
+        when {
+            !fromMap.isNullOrEmpty() -> fromMap.take(20)
+            latestMoviesForCategory.isNotEmpty() -> computeFallbackLatest20(latestMoviesForCategory, selectedCategoryId, 20)
+            else -> computeFallbackLatest20(movies, selectedCategoryId, 20)
         }
     }
 
     val filteredMovies = remember(
         movies,
+        resolvedLatest20Movies,
         selectedCategoryId,
         searchQuery,
         minRating,
         selectedYear,
         selectedQualityFilter,
         sortByQuality,
+        showOnlyLatest20,
         onFilterChanged
     ) {
-        if (onFilterChanged != null) {
+        val baseSource = if (showOnlyLatest20) {
+            resolvedLatest20Movies
+        } else if (onFilterChanged != null) {
             movies
         } else {
             val filtered = movies.filter { movie ->
@@ -105,25 +195,67 @@ fun MoviesScreen(
                 filtered
             }
         }
+
+        if (showOnlyLatest20) {
+            baseSource.filter { movie ->
+                val matchSearch = searchQuery.isEmpty() ||
+                        movie.name.contains(searchQuery, ignoreCase = true) ||
+                        movie.genre.contains(searchQuery, ignoreCase = true)
+                val matchRating = movie.rating >= minRating
+                val matchYear = selectedYear == "All" || movie.year == selectedYear
+                val matchQuality = QualityDetector.matchesQualityFilter(
+                    movie.quality.ifBlank { movie.resolution },
+                    selectedQualityFilter
+                )
+                matchSearch && matchRating && matchYear && matchQuality
+            }
+        } else {
+            baseSource
+        }
     }
 
     // Scroll pagination triggers
-    LaunchedEffect(gridState.canScrollForward, filteredMovies.size) {
-        val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (lastVisible >= filteredMovies.size - 6 && filteredMovies.isNotEmpty()) {
-            onLoadMore?.invoke()
+    LaunchedEffect(gridState.canScrollForward, filteredMovies.size, showOnlyLatest20) {
+        if (!showOnlyLatest20) {
+            val lastVisible = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            if (lastVisible >= filteredMovies.size - 6 && filteredMovies.isNotEmpty()) {
+                onLoadMore?.invoke()
+            }
         }
     }
 
-    LaunchedEffect(listState.canScrollForward, filteredMovies.size) {
-        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-        if (lastVisible >= filteredMovies.size - 6 && filteredMovies.isNotEmpty()) {
-            onLoadMore?.invoke()
+    LaunchedEffect(listState.canScrollForward, filteredMovies.size, showOnlyLatest20) {
+        if (!showOnlyLatest20) {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            if (lastVisible >= filteredMovies.size - 6 && filteredMovies.isNotEmpty()) {
+                onLoadMore?.invoke()
+            }
         }
     }
 
-    val ambientPosterUrl = remember(filteredMovies) {
-        filteredMovies.firstOrNull()?.let { it.backdrop.ifBlank { it.streamIcon } }
+    val ambientPosterUrl = remember(resolvedLatest20Movies, filteredMovies) {
+        (resolvedLatest20Movies.firstOrNull() ?: filteredMovies.firstOrNull())?.let {
+            it.backdrop.ifBlank { it.streamIcon }
+        }
+    }
+
+    if (showLatest20ViewAllScreen) {
+        BackHandler {
+            showLatest20ViewAllScreen = false
+        }
+        Latest20DedicatedGridScreen(
+            title = "Latest 20 Movies",
+            categoryLabel = activeCategoryName,
+            items = resolvedLatest20Movies,
+            cardStyle = cardStyle,
+            isFavorite = isFavorite,
+            onToggleFavorite = onToggleFavorite,
+            onItemClick = onMovieClick,
+            watchHistory = watchHistory,
+            onBack = { showLatest20ViewAllScreen = false },
+            screenTestTag = "latest_movies_grid_screen"
+        )
+        return
     }
 
     Box(
@@ -180,7 +312,7 @@ fun MoviesScreen(
 
                 Spacer(modifier = Modifier.width(10.dp))
 
-                val hasActiveExtraFilter = minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality
+                val hasActiveExtraFilter = minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality || showOnlyLatest20
                 Box(
                     modifier = Modifier
                         .size(48.dp)
@@ -217,23 +349,34 @@ fun MoviesScreen(
                     )
                 }
 
-                items(categories, key = { it.categoryId }) { cat ->
+                items(categories.filter { !it.categoryId.equals("vod_all", ignoreCase = true) }, key = { it.categoryId }) { cat ->
                     LiquidGlassChip(
                         text = cat.categoryName,
                         isSelected = selectedCategoryId == cat.categoryId,
                         onClick = { selectedCategoryId = cat.categoryId },
-                        activeColor = MaterialTheme.colorScheme.primary
+                        activeColor = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.testTag("movie_category_chip_${cat.categoryId}")
                     )
                 }
             }
 
-            // Quality Filter & Sort by Quality Chip Row (combinable with Category filter)
+            // Latest 20 Movies Option + Quality Filter & Sort by Quality Chip Row
             LazyRow(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.testTag("movies_quality_filter_row")
             ) {
+                item(key = "latest_20_movies_chip") {
+                    LiquidGlassChip(
+                        text = "★ Latest 20 Movies",
+                        isSelected = showOnlyLatest20,
+                        onClick = { showOnlyLatest20 = !showOnlyLatest20 },
+                        activeColor = KrasRedBright,
+                        modifier = Modifier.testTag("movies_latest_20_chip")
+                    )
+                }
+
                 items(qualityFilterOptions, key = { "q_$it" }) { qOpt ->
                     val isSelected = selectedQualityFilter == qOpt
                     val activeColor = when (qOpt) {
@@ -263,7 +406,7 @@ fun MoviesScreen(
                 }
             }
 
-            // Results Count
+            // Results Count & Filter Summary
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -272,13 +415,17 @@ fun MoviesScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "${totalCount.coerceAtLeast(filteredMovies.size)} Movies available",
+                    text = if (showOnlyLatest20) {
+                        "Latest ${filteredMovies.size} Movies in $activeCategoryName"
+                    } else {
+                        "${totalCount.coerceAtLeast(filteredMovies.size)} Movies available"
+                    },
                     color = TextSecondary,
                     fontSize = 12.sp,
                     fontFamily = OutfitFontFamily,
                     fontWeight = FontWeight.Medium
                 )
-                if (minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality) {
+                if (minRating > 0.0 || selectedYear != "All" || selectedQualityFilter != "All" || sortByQuality || showOnlyLatest20) {
                     Text(
                         text = "Clear filters",
                         color = KrasRedBright,
@@ -290,13 +437,14 @@ fun MoviesScreen(
                             selectedYear = "All"
                             selectedQualityFilter = "All"
                             sortByQuality = false
+                            showOnlyLatest20 = false
                         }
                     )
                 }
             }
 
-            // Movies Grid / List
-            if (filteredMovies.isEmpty()) {
+            // Movies Grid / List with Dedicated "Latest 20 Movies" Carousel inside every category
+            if (filteredMovies.isEmpty() && resolvedLatest20Movies.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -332,6 +480,23 @@ fun MoviesScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
+                        if (resolvedLatest20Movies.isNotEmpty() && searchQuery.isEmpty() && !showOnlyLatest20) {
+                            item(key = "latest_20_movies_carousel_header") {
+                                Latest20CarouselSection(
+                                    sectionTitle = "Latest 20 Movies",
+                                    categoryLabel = activeCategoryName,
+                                    items = resolvedLatest20Movies,
+                                    isFavorite = isFavorite,
+                                    onToggleFavorite = onToggleFavorite,
+                                    onItemClick = onMovieClick,
+                                    watchHistory = watchHistory,
+                                    onViewAllClick = { showLatest20ViewAllScreen = true },
+                                    carouselTestTag = "latest_movies_carousel",
+                                    viewAllTestTag = "latest_movies_view_all"
+                                )
+                            }
+                        }
+
                         items(filteredMovies, key = { it.id }) { movie ->
                             MediaCard(
                                 item = movie,
@@ -352,6 +517,26 @@ fun MoviesScreen(
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
+                        if (resolvedLatest20Movies.isNotEmpty() && searchQuery.isEmpty() && !showOnlyLatest20) {
+                            item(
+                                key = "latest_20_movies_carousel_span",
+                                span = { GridItemSpan(maxLineSpan) }
+                            ) {
+                                Latest20CarouselSection(
+                                    sectionTitle = "Latest 20 Movies",
+                                    categoryLabel = activeCategoryName,
+                                    items = resolvedLatest20Movies,
+                                    isFavorite = isFavorite,
+                                    onToggleFavorite = onToggleFavorite,
+                                    onItemClick = onMovieClick,
+                                    watchHistory = watchHistory,
+                                    onViewAllClick = { showLatest20ViewAllScreen = true },
+                                    carouselTestTag = "latest_movies_carousel",
+                                    viewAllTestTag = "latest_movies_view_all"
+                                )
+                            }
+                        }
+
                         items(filteredMovies, key = { it.id }) { movie ->
                             MediaCard(
                                 item = movie,
@@ -442,5 +627,329 @@ fun MoviesScreen(
             },
             containerColor = CinemaDark
         )
+    }
+}
+
+@Composable
+internal fun Latest20CarouselSection(
+    sectionTitle: String,
+    categoryLabel: String,
+    items: List<MediaItem>,
+    isFavorite: (String) -> Boolean,
+    onToggleFavorite: (MediaItem) -> Unit,
+    onItemClick: (MediaItem) -> Unit,
+    watchHistory: List<WatchProgress>,
+    onViewAllClick: () -> Unit,
+    carouselTestTag: String,
+    viewAllTestTag: String
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp)
+            .liquidGlassPanel(
+                cornerRadius = 18.dp,
+                surfaceAlpha = 0.55f,
+                borderAlpha = 0.38f,
+                accentGlow = KrasRed
+            )
+            .padding(vertical = 12.dp)
+            .testTag(carouselTestTag)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = KrasRedBright,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = sectionTitle,
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(KrasRed.copy(alpha = 0.25f))
+                            .border(0.8.dp, KrasRedBright.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "${items.size} NEW",
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "$categoryLabel • Sorted by server addition date (newest first)",
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(KrasRed.copy(alpha = 0.2f))
+                    .border(1.dp, KrasRedBright.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                    .clickable(onClick = onViewAllClick)
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .testTag(viewAllTestTag),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "View All",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontFamily = OutfitFontFamily,
+                    fontWeight = FontWeight.Bold
+                )
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "View All",
+                    tint = KrasRedBright,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            itemsIndexed(items, key = { _, item -> "latest_${item.id}" }) { index, item ->
+                Latest20PosterItem(
+                    rank = index + 1,
+                    item = item,
+                    isFavorite = isFavorite(item.id),
+                    onToggleFavorite = { onToggleFavorite(item) },
+                    watchProgress = watchHistory.find { it.mediaId == item.id },
+                    onClick = { onItemClick(item) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun Latest20PosterItem(
+    rank: Int,
+    item: MediaItem,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
+    watchProgress: WatchProgress?,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(135.dp)
+            .testTag("latest_20_item_${item.id}")
+    ) {
+        Box {
+            MediaCard(
+                item = item,
+                onClick = onClick,
+                cardStyle = CardStyle.POSTER,
+                isFavorite = isFavorite,
+                onToggleFavorite = onToggleFavorite,
+                watchProgress = watchProgress
+            )
+
+            // Rank & Date Source Badge
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = 34.dp, start = 6.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(
+                        Brush.horizontalGradient(
+                            colors = listOf(KrasRed, Color(0xCC12141E))
+                        )
+                    )
+                    .border(0.6.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = "#$rank",
+                    color = Color.White,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // Server Addition Date vs Locally Tracked First-Seen Date Indicator
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Schedule,
+                contentDescription = null,
+                tint = if (item.hasServerAddedDate) KrasRedBright else AccentGold,
+                modifier = Modifier.size(11.dp)
+            )
+            Text(
+                text = formatAddedDateBadge(item.addedTimestamp, item.hasServerAddedDate),
+                color = if (item.hasServerAddedDate) TextSecondary else AccentGold,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+internal fun Latest20DedicatedGridScreen(
+    title: String,
+    categoryLabel: String,
+    items: List<MediaItem>,
+    cardStyle: CardStyle,
+    isFavorite: (String) -> Boolean,
+    onToggleFavorite: (MediaItem) -> Unit,
+    onItemClick: (MediaItem) -> Unit,
+    watchHistory: List<WatchProgress>,
+    onBack: () -> Unit,
+    screenTestTag: String
+) {
+    val ambientArt = remember(items) {
+        items.firstOrNull()?.let { it.backdrop.ifBlank { it.streamIcon } }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(CinemaBlack)
+            .testTag(screenTestTag)
+    ) {
+        DynamicAmbientPosterBackdrop(
+            imageUrl = ambientArt,
+            ambientAlpha = 0.24f
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+        ) {
+            // Top Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x99141824))
+                        .border(1.dp, GlassBorder, CircleShape)
+                        .testTag("latest_20_back_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "$title — $categoryLabel",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "${items.size} most recently added • Newest server additions first",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = if (cardStyle == CardStyle.WIDE) 180.dp else 118.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 100.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                itemsIndexed(items, key = { _, item -> "grid_latest_${item.id}" }) { index, item ->
+                    Column {
+                        Box {
+                            MediaCard(
+                                item = item,
+                                onClick = { onItemClick(item) },
+                                cardStyle = cardStyle,
+                                isFavorite = isFavorite(item.id),
+                                onToggleFavorite = { onToggleFavorite(item) },
+                                watchProgress = watchHistory.find { it.mediaId == item.id }
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(top = 34.dp, start = 6.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(KrasRed)
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "#${index + 1}",
+                                    color = Color.White,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = formatAddedDateBadge(item.addedTimestamp, item.hasServerAddedDate),
+                            color = if (item.hasServerAddedDate) TextSecondary else AccentGold,
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
     }
 }
