@@ -377,7 +377,8 @@ class KrasRepository(context: Context) {
             parentalEnabled = prefs.getBoolean("parentalEnabled", false),
             playIntroSound = prefs.getBoolean("playIntroSound", true),
             silenceNotificationsWhileWatching = prefs.getBoolean("silenceNotificationsWhileWatching", false),
-            liveChannelOrder = liveOrder
+            liveChannelOrder = liveOrder,
+            autoCheckUpdates = prefs.getBoolean("autoCheckUpdates", true)
         )
     }
 
@@ -395,7 +396,24 @@ class KrasRepository(context: Context) {
             putBoolean("playIntroSound", settings.playIntroSound)
             putBoolean("silenceNotificationsWhileWatching", settings.silenceNotificationsWhileWatching)
             putString("liveChannelOrder", settings.liveChannelOrder.name)
+            putBoolean("autoCheckUpdates", settings.autoCheckUpdates)
         }.apply()
+    }
+
+    fun getLastUpdateCheckMs(): Long {
+        return prefs.getLong("last_update_check_ms", 0L)
+    }
+
+    fun saveLastUpdateCheckMs(timestampMs: Long) {
+        prefs.edit().putLong("last_update_check_ms", timestampMs).apply()
+    }
+
+    fun getLastKnownVersionCode(): Int {
+        return prefs.getInt("last_known_version_code", -1)
+    }
+
+    fun saveLastKnownVersionCode(versionCode: Int) {
+        prefs.edit().putInt("last_known_version_code", versionCode).apply()
     }
 
     fun getSavedInterruptionFilter(): Int? {

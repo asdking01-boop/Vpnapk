@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.BuildConfig
 import com.example.KrasApplication
 import com.example.data.api.XtreamClient
 import com.example.data.local.ChannelNameNormalizer
@@ -15,6 +16,10 @@ import com.example.data.model.*
 import com.example.data.sample.SampleData
 import com.example.player.ExoPlayerWrapper
 import com.example.sound.CinematicSoundPlayer
+import com.example.updater.AppUpdateUiState
+import com.example.updater.AppUpdater
+import com.example.updater.ReleaseCheckResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -22,6 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.text.SimpleDateFormat
@@ -32,6 +38,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = KrasRepository(application)
     private val apiClient = XtreamClient()
+    private val appUpdater = AppUpdater()
     val playerWrapper = ExoPlayerWrapper(application)
 
     // Accounts
@@ -107,8 +114,14 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val _nowPlayingEpisode = MutableStateFlow<Episode?>(null)
     val nowPlayingEpisode = _nowPlayingEpisode.asStateFlow()
 
+    // In-App Updater State
+    private val _updateState = MutableStateFlow(AppUpdateUiState())
+    val updateState = _updateState.asStateFlow()
+
     private var progressTrackingJob: Job? = null
     private var syncJob: Job? = null
+    private var updateCheckJob: Job? = null
+    private var updateDownloadJob: Job? = null
 
     // Pagination filter states
     private var moviePage = 0
@@ -188,6 +201,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Start background content sync
                 loadContentForAccount(active, isBackgroundRefresh = true)
+
+                // Clean up old downloaded APKs after update & run automatic 6-hour update check
+                checkForUpdatesOnLaunchIfNeeded()
             } catch (oom: OutOfMemoryError) {
                 handleOom(oom, "Initial loading out of memory")
             } catch (e: Exception) {
@@ -1186,10 +1202,253 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         _errorMessage.value = null
     }
 
+    // --- In-App GitHub Release Updater ---
+    private fun checkForUpdatesOnLaunchIfNeeded() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val app = getApplication<Application>()
+                AppUpdater.cleanupOldApksAfterUpdate(app, repository, BuildConfig.VERSION_CODE)
+
+                if (!_userSettings.value.autoCheckUpdates) return@launch
+
+                val lastCheckMs = repository.getLastUpdateCheckMs()
+                val now = System.currentTimeMillis()
+                if (now - lastCheckMs >= AppUpdater.SIX_HOURS_MS) {
+                    checkForUpdates(isManual = false)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun checkForUpdates(isManual: Boolean = true) {
+        if (_updateState.value.isChecking) return
+        updateCheckJob?.cancel()
+        updateCheckJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _updateState.value = _updateState.value.copy(
+                    isChecking = true,
+                    statusMessage = if (isManual) "Checking for updates..." else _updateState.value.statusMessage,
+                    isStatusError = false,
+                    errorMessage = null
+                )
+
+                val result = appUpdater.checkLatestRelease(BuildConfig.VERSION_CODE)
+                repository.saveLastUpdateCheckMs(System.currentTimeMillis())
+
+                when (result) {
+                    is ReleaseCheckResult.UpdateAvailable -> {
+                        _updateState.value = _updateState.value.copy(
+                            isChecking = false,
+                            availableRelease = result.release,
+                            showUpdateDialog = true,
+                            statusMessage = "New version ${result.release.tagName} available",
+                            isStatusError = false,
+                            errorMessage = null
+                        )
+                    }
+                    is ReleaseCheckResult.UpToDate -> {
+                        _updateState.value = _updateState.value.copy(
+                            isChecking = false,
+                            statusMessage = if (isManual) "You are up to date" else _updateState.value.statusMessage,
+                            isStatusError = false
+                        )
+                    }
+                    is ReleaseCheckResult.RateLimited -> {
+                        _updateState.value = _updateState.value.copy(
+                            isChecking = false,
+                            statusMessage = if (isManual) result.message else null,
+                            isStatusError = isManual
+                        )
+                    }
+                    is ReleaseCheckResult.MissingAsset -> {
+                        _updateState.value = _updateState.value.copy(
+                            isChecking = false,
+                            statusMessage = if (isManual) result.message else null,
+                            isStatusError = isManual
+                        )
+                    }
+                    is ReleaseCheckResult.NetworkError -> {
+                        _updateState.value = _updateState.value.copy(
+                            isChecking = false,
+                            statusMessage = if (isManual) result.message else null,
+                            isStatusError = isManual
+                        )
+                    }
+                    is ReleaseCheckResult.Error -> {
+                        _updateState.value = _updateState.value.copy(
+                            isChecking = false,
+                            statusMessage = if (isManual) result.message else null,
+                            isStatusError = isManual
+                        )
+                    }
+                }
+            } catch (ce: CancellationException) {
+                _updateState.value = _updateState.value.copy(isChecking = false)
+            } catch (e: Exception) {
+                _updateState.value = _updateState.value.copy(
+                    isChecking = false,
+                    statusMessage = if (isManual) (e.message ?: "Unable to check for updates.") else null,
+                    isStatusError = isManual
+                )
+            }
+        }
+    }
+
+    fun startUpdateDownload() {
+        val release = _updateState.value.availableRelease ?: return
+        if (_updateState.value.isDownloading) return
+
+        updateDownloadJob?.cancel()
+        updateDownloadJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _updateState.value = _updateState.value.copy(
+                    isDownloading = true,
+                    downloadProgress = 0,
+                    downloadedBytes = 0L,
+                    totalBytes = release.assetSize,
+                    errorMessage = null
+                )
+
+                val downloadResult = appUpdater.downloadApk(
+                    context = getApplication(),
+                    release = release
+                ) { pct, downloaded, total ->
+                    _updateState.value = _updateState.value.copy(
+                        downloadProgress = pct,
+                        downloadedBytes = downloaded,
+                        totalBytes = total
+                    )
+                }
+
+                downloadResult.onSuccess { apkFile ->
+                    _updateState.value = _updateState.value.copy(
+                        isDownloading = false,
+                        downloadProgress = 100,
+                        pendingInstallFile = apkFile,
+                        errorMessage = null
+                    )
+                    triggerInstallOrRequestPermission(apkFile)
+                }.onFailure { err ->
+                    _updateState.value = _updateState.value.copy(
+                        isDownloading = false,
+                        errorMessage = err.message ?: "Download failed. Please try again."
+                    )
+                }
+            } catch (ce: CancellationException) {
+                _updateState.value = _updateState.value.copy(
+                    isDownloading = false,
+                    downloadProgress = 0,
+                    downloadedBytes = 0L
+                )
+            } catch (e: Exception) {
+                _updateState.value = _updateState.value.copy(
+                    isDownloading = false,
+                    errorMessage = e.message ?: "Download failed. Please try again."
+                )
+            }
+        }
+    }
+
+    fun cancelUpdateDownload() {
+        try {
+            appUpdater.cancelActiveDownload()
+            updateDownloadJob?.cancel()
+        } catch (_: Exception) {
+        }
+        _updateState.value = _updateState.value.copy(
+            isDownloading = false,
+            downloadProgress = 0,
+            downloadedBytes = 0L,
+            errorMessage = null
+        )
+    }
+
+    fun dismissUpdateDialog() {
+        if (_updateState.value.isDownloading) {
+            cancelUpdateDownload()
+        }
+        _updateState.value = _updateState.value.copy(
+            showUpdateDialog = false,
+            errorMessage = null
+        )
+    }
+
+    fun triggerInstallOrRequestPermission(apkFile: File? = _updateState.value.pendingInstallFile) {
+        val file = apkFile ?: return
+        val app = getApplication<Application>()
+        try {
+            if (!file.exists()) {
+                _updateState.value = _updateState.value.copy(
+                    showInstallPermissionDialog = false,
+                    showUpdateDialog = true,
+                    errorMessage = "Downloaded update file was not found. Tap Retry to download again."
+                )
+                return
+            }
+
+            if (!AppUpdater.canRequestPackageInstalls(app)) {
+                _updateState.value = _updateState.value.copy(
+                    pendingInstallFile = file,
+                    showInstallPermissionDialog = true
+                )
+                return
+            }
+
+            val installIntent = AppUpdater.createInstallApkIntent(app, file)
+            app.startActivity(installIntent)
+            _updateState.value = _updateState.value.copy(
+                showInstallPermissionDialog = false,
+                showUpdateDialog = false,
+                pendingInstallFile = null,
+                errorMessage = null
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            _updateState.value = _updateState.value.copy(
+                showInstallPermissionDialog = false,
+                showUpdateDialog = true,
+                errorMessage = "Could not launch package installer: ${e.message ?: "Unknown error"}"
+            )
+        }
+    }
+
+    fun openInstallPermissionSettings(context: Context) {
+        try {
+            val intent = AppUpdater.createManageUnknownAppSourcesIntent(context)
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            _updateState.value = _updateState.value.copy(
+                showInstallPermissionDialog = false,
+                showUpdateDialog = true,
+                errorMessage = "Unable to open system settings: ${e.message ?: "Unknown error"}"
+            )
+        }
+    }
+
+    fun dismissInstallPermissionDialog() {
+        _updateState.value = _updateState.value.copy(
+            showInstallPermissionDialog = false
+        )
+    }
+
+    fun onResumeCheckPendingInstall() {
+        val pendingFile = _updateState.value.pendingInstallFile ?: return
+        val app = getApplication<Application>()
+        if (AppUpdater.canRequestPackageInstalls(app)) {
+            triggerInstallOrRequestPermission(pendingFile)
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         progressTrackingJob?.cancel()
         syncJob?.cancel()
+        updateCheckJob?.cancel()
+        updateDownloadJob?.cancel()
+        appUpdater.cancelActiveDownload()
         playerWrapper.release()
     }
 }

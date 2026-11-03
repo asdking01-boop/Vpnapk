@@ -169,7 +169,8 @@ data class UserSettings(
     val parentalEnabled: Boolean = false,
     val playIntroSound: Boolean = true,
     val silenceNotificationsWhileWatching: Boolean = false,
-    val liveChannelOrder: LiveChannelOrder = LiveChannelOrder.SMART
+    val liveChannelOrder: LiveChannelOrder = LiveChannelOrder.SMART,
+    val autoCheckUpdates: Boolean = true
 )
 
 // Xtream Codes API DTOs

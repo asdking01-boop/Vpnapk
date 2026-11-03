@@ -440,5 +440,87 @@ class ExampleRobolectricTest {
       assertEquals("8K | HEVC | 60 FPS", afterOverride.first().quality)
     }
   }
+
+  @Test
+  fun `github release updater parses tag_name release notes and KrasTV apk asset`() {
+    assertEquals("asdking01-boop", BuildConfig.GITHUB_OWNER)
+    assertEquals("Vpnapk", BuildConfig.GITHUB_REPO)
+    assertEquals(
+      "https://api.github.com/repos/asdking01-boop/Vpnapk/releases/latest",
+      com.example.updater.AppUpdater.latestReleaseApiUrl
+    )
+
+    assertEquals(12, com.example.updater.AppUpdater.parseTagVersionNumber("v12"))
+    assertEquals(5, com.example.updater.AppUpdater.parseTagVersionNumber("V5"))
+
+    val sampleReleaseJson = """
+      {
+        "tag_name": "v12",
+        "body": "- Faster 4K playback\n- Updated EPG parser",
+        "assets": [
+          {
+            "name": "KrasTV.apk",
+            "browser_download_url": "https://github.com/asdking01-boop/Vpnapk/releases/download/v12/KrasTV.apk",
+            "size": 18452992
+          }
+        ]
+      }
+    """.trimIndent()
+
+    // When tag_name version (12) > currentVersionCode (1), UpdateAvailable is returned
+    val updateResult = com.example.updater.AppUpdater.parseReleaseJson(sampleReleaseJson, currentVersionCode = 1)
+    assertTrue(updateResult is com.example.updater.ReleaseCheckResult.UpdateAvailable)
+    val release = (updateResult as com.example.updater.ReleaseCheckResult.UpdateAvailable).release
+    assertEquals("v12", release.tagName)
+    assertEquals(12, release.versionNumber)
+    assertEquals("KrasTV.apk", release.assetName)
+    assertEquals(18452992L, release.assetSize)
+    assertTrue(release.body.contains("Faster 4K playback"))
+
+    // When tag_name version (12) <= currentVersionCode (12), UpToDate is returned
+    val upToDateResult = com.example.updater.AppUpdater.parseReleaseJson(sampleReleaseJson, currentVersionCode = 12)
+    assertTrue(upToDateResult is com.example.updater.ReleaseCheckResult.UpToDate)
+
+    // When KrasTV.apk asset is missing, MissingAsset is returned
+    val noApkJson = """
+      {
+        "tag_name": "v15",
+        "body": "Notes",
+        "assets": []
+      }
+    """.trimIndent()
+    val missingResult = com.example.updater.AppUpdater.parseReleaseJson(noApkJson, currentVersionCode = 1)
+    assertTrue(missingResult is com.example.updater.ReleaseCheckResult.MissingAsset)
+  }
+
+  @Test
+  fun `updater cleans up old apks after update and builds fileprovider install intent`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+
+    // Default autoCheckUpdates is true
+    assertTrue(repo.getUserSettings().autoCheckUpdates)
+    repo.saveUserSettings(repo.getUserSettings().copy(autoCheckUpdates = false))
+    assertFalse(repo.getUserSettings().autoCheckUpdates)
+
+    // Simulate an old APK in cacheDir/updates from versionCode 1
+    repo.saveLastKnownVersionCode(1)
+    val updatesDir = com.example.updater.AppUpdater.getUpdatesDir(context)
+    val dummyApk = java.io.File(updatesDir, "KrasTV.apk")
+    dummyApk.writeBytes(byteArrayOf(0x50, 0x4B, 0x03, 0x04))
+    assertTrue(dummyApk.exists())
+
+    // Verify FileProvider URI and install intent creation
+    val installIntent = com.example.updater.AppUpdater.createInstallApkIntent(context, dummyApk)
+    assertEquals(android.content.Intent.ACTION_VIEW, installIntent.action)
+    assertEquals("application/vnd.android.package-archive", installIntent.type)
+    assertNotNull(installIntent.data)
+    assertTrue((installIntent.flags and android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0)
+
+    // Simulate app launch on upgraded versionCode 2 -> old APK must be deleted
+    com.example.updater.AppUpdater.cleanupOldApksAfterUpdate(context, repo, currentVersionCode = 2)
+    assertFalse(dummyApk.exists())
+    assertEquals(2, repo.getLastKnownVersionCode())
+  }
 }
 

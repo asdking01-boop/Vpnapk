@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.BuildConfig
 import com.example.data.model.Account
 import com.example.data.model.AspectRatioMode
 import com.example.data.model.CardStyle
@@ -34,6 +35,7 @@ import com.example.data.model.UserSettings
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.KrasLogo
 import com.example.ui.theme.*
+import com.example.updater.AppUpdateUiState
 
 @Composable
 fun SettingsScreen(
@@ -45,7 +47,9 @@ fun SettingsScreen(
     onAddAccountClick: () -> Unit,
     onRemoveAccount: (String) -> Unit,
     onClearCache: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    updateState: AppUpdateUiState = AppUpdateUiState(),
+    onCheckForUpdatesClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -565,6 +569,126 @@ fun SettingsScreen(
 
                     Divider(color = GlassBorder)
 
+                    // Check for updates automatically toggle
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(
+                                text = "Check for updates automatically",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "Checks GitHub Releases in the background at most once every 6 hours",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = userSettings.autoCheckUpdates,
+                            onCheckedChange = { enabled ->
+                                onUpdateSettings(userSettings.copy(autoCheckUpdates = enabled))
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = KrasRed,
+                                checkedTrackColor = KrasRedDark
+                            ),
+                            modifier = Modifier.testTag("settings_auto_check_updates_switch")
+                        )
+                    }
+
+                    // Manual Check for updates button showing current version
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White.copy(alpha = 0.06f))
+                            .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
+                            .clickable(enabled = !updateState.isChecking) {
+                                onCheckForUpdatesClick()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                            .testTag("settings_check_updates_button"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Check for updates",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Current version: v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                        if (updateState.isChecking) {
+                            CircularProgressIndicator(
+                                color = KrasRedBright,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SystemUpdate,
+                                    contentDescription = "Check for updates",
+                                    tint = KrasRedBright,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Check",
+                                    color = KrasRedBright,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    if (!updateState.statusMessage.isNullOrBlank()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp)
+                                .testTag("settings_update_status_message"),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = updateState.statusMessage,
+                                color = if (updateState.isStatusError) Color(0xFFFF8A80) else AccentEmerald,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (updateState.isStatusError && !updateState.isChecking) {
+                                Text(
+                                    text = "Retry",
+                                    color = KrasRedBright,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .clickable { onCheckForUpdatesClick() }
+                                        .padding(start = 8.dp)
+                                        .testTag("settings_update_retry_button")
+                                )
+                            }
+                        }
+                    }
+
+                    Divider(color = GlassBorder)
+
                     // About Kras TV
                     Row(
                         modifier = Modifier
@@ -646,7 +770,7 @@ fun SettingsScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     KrasLogo(height = 24.dp)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("v2.4", color = TextSecondary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text("v${BuildConfig.VERSION_NAME}", color = TextSecondary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
             },
             text = {

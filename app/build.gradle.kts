@@ -16,8 +16,11 @@ android {
     applicationId = "com.aistudio.krastv.vmzsqx"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
+    versionName = (project.findProperty("versionName") as String?) ?: "1.0.0"
+
+    buildConfigField("String", "GITHUB_OWNER", "\"asdking01-boop\"")
+    buildConfigField("String", "GITHUB_REPO", "\"Vpnapk\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

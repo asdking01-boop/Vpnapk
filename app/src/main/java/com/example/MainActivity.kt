@@ -36,6 +36,7 @@ import com.example.data.local.KrasRepository
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
 import com.example.player.PlayerImmersiveHelper
+import com.example.ui.components.AppUpdateDialogs
 import com.example.ui.components.BottomNavBar
 import com.example.ui.components.NavScreen
 import com.example.ui.screens.*
@@ -110,6 +111,7 @@ class MainActivity : ComponentActivity() {
                 val totalMoviesCount by viewModel.totalMoviesCount.collectAsState()
                 val totalSeriesCount by viewModel.totalSeriesCount.collectAsState()
                 val totalLiveCount by viewModel.totalLiveCount.collectAsState()
+                val updateState by viewModel.updateState.collectAsState()
 
                 // Play original cinematic intro sound on cold start launch only
                 LaunchedEffect(Unit) {
@@ -209,6 +211,23 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         containerColor = CinemaDark
+                    )
+                }
+
+                // In-App GitHub Release Update & Download Dialogs
+                if (!isSplashActive) {
+                    AppUpdateDialogs(
+                        updateState = updateState,
+                        onStartUpdate = { viewModel.startUpdateDownload() },
+                        onDismissDialog = { viewModel.dismissUpdateDialog() },
+                        onCancelDownload = { viewModel.cancelUpdateDownload() },
+                        onRetryDownload = { viewModel.startUpdateDownload() },
+                        onOpenInstallPermissionSettings = {
+                            viewModel.openInstallPermissionSettings(context)
+                        },
+                        onDismissInstallPermissionDialog = {
+                            viewModel.dismissInstallPermissionDialog()
+                        }
                     )
                 }
 
@@ -377,7 +396,9 @@ class MainActivity : ComponentActivity() {
                                     onSwitchAccount = { accId -> viewModel.switchAccount(accId) },
                                     onAddAccountClick = { isLoginOpen = true },
                                     onRemoveAccount = { accId -> viewModel.removeAccount(accId) },
-                                    onClearCache = { viewModel.clearCache() }
+                                    onClearCache = { viewModel.clearCache() },
+                                    updateState = updateState,
+                                    onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) }
                                 )
                             }
 
@@ -488,6 +509,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.onResumeCheckPendingInstall()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
