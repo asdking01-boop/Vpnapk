@@ -177,9 +177,7 @@ object SampleData {
             plot = "In a neon-drenched metropolis governed by synthetic intelligence, a rogue operative uncovers a conspiracy that threatens to overwrite human consciousness.",
             genre = "Cyberpunk / Sci-Fi / Action",
             duration = "2h 14m",
-            streamUrl = STREAM_TEARS_OF_STEEL,
-            addedTimestamp = 1741564800000L,
-            hasServerAddedDate = true
+            streamUrl = STREAM_TEARS_OF_STEEL
         ),
         MediaItem(
             id = "vod_2",
@@ -198,9 +196,7 @@ object SampleData {
             plot = "A solo astronaut on deep reconnaissance past Neptune discovers an enigmatic Dyson ring pulsating with unknown quantum signals.",
             genre = "Sci-Fi / Adventure",
             duration = "2h 31m",
-            streamUrl = STREAM_SINTEL,
-            addedTimestamp = 1741392000000L,
-            hasServerAddedDate = true
+            streamUrl = STREAM_SINTEL
         ),
         MediaItem(
             id = "vod_3",
@@ -219,9 +215,7 @@ object SampleData {
             plot = "A forensic psychologist retreats to an isolated coastal hamlet, only to find herself drawn into a cold case that echoes her own family tragedy.",
             genre = "Mystery / Psychological Thriller",
             duration = "1h 56m",
-            streamUrl = STREAM_ELEPHANTS_DREAM,
-            addedTimestamp = 1741478400000L,
-            hasServerAddedDate = true
+            streamUrl = STREAM_ELEPHANTS_DREAM
         ),
         MediaItem(
             id = "vod_4",
@@ -240,9 +234,7 @@ object SampleData {
             plot = "A spirited young alchemist journeys into an ancient enchanted woodland to restore the fading spirit tree and save her homeland.",
             genre = "Animation / Fantasy",
             duration = "1h 38m",
-            streamUrl = STREAM_BIG_BUCK_BUNNY,
-            addedTimestamp = 1741219200000L,
-            hasServerAddedDate = true
+            streamUrl = STREAM_BIG_BUCK_BUNNY
         ),
         MediaItem(
             id = "vod_5",
@@ -261,9 +253,7 @@ object SampleData {
             plot = "An international crew of master thieves attempts the impossible: breaching the subterranean gold depository beneath Zurich during an eclipse.",
             genre = "Heist / Thriller",
             duration = "2h 05m",
-            streamUrl = STREAM_FOR_BIGGER_BLAZES,
-            addedTimestamp = 1741651200000L, // Older 2023 release year, but NEWEST server addition date in Action!
-            hasServerAddedDate = true
+            streamUrl = STREAM_FOR_BIGGER_BLAZES
         ),
         MediaItem(
             id = "vod_6",
@@ -282,9 +272,7 @@ object SampleData {
             plot = "Two cellists separated by three centuries communicate through resonant frequencies discovered hidden in an antique Stradivarius.",
             genre = "Romance / Drama / Sci-Fi",
             duration = "2h 19m",
-            streamUrl = STREAM_SUBARU,
-            addedTimestamp = 1741305600000L,
-            hasServerAddedDate = true
+            streamUrl = STREAM_SUBARU
         )
     )
 
@@ -305,9 +293,7 @@ object SampleData {
             quality = "4K UHD | HEVC | 5.1",
             plot = "When temporal fractures begin appearing across major global cities, an elite task force must venture into rewritten timelines to prevent the unraveling of existence.",
             genre = "Sci-Fi / Thriller",
-            duration = "3 Seasons",
-            addedTimestamp = 1741564800000L,
-            hasServerAddedDate = true
+            duration = "3 Seasons"
         ),
         MediaItem(
             id = "series_2",
@@ -325,9 +311,7 @@ object SampleData {
             quality = "FHD | 5.1",
             plot = "A disgraced undercover detective navigates the brutal underworld of international arms trafficking while seeking redemption for his past mistakes.",
             genre = "Crime / Drama / Action",
-            duration = "2 Seasons",
-            addedTimestamp = 1741651200000L,
-            hasServerAddedDate = true
+            duration = "2 Seasons"
         ),
         MediaItem(
             id = "series_3",
@@ -345,9 +329,7 @@ object SampleData {
             quality = "4K UHD",
             plot = "An epic saga chronicling the unification of the northern clans and their voyage across perilous uncharted seas toward an ancient mythical land.",
             genre = "Historical / Drama",
-            duration = "4 Seasons",
-            addedTimestamp = 1741478400000L,
-            hasServerAddedDate = true
+            duration = "4 Seasons"
         ),
         MediaItem(
             id = "series_4",
@@ -365,9 +347,7 @@ object SampleData {
             quality = "HD",
             plot = "Scientists aboard a lunar research station intercept a dormant artificial probe that begins self-assembling using base moon regolith.",
             genre = "Sci-Fi / Mystery",
-            duration = "1 Season",
-            addedTimestamp = 1741392000000L,
-            hasServerAddedDate = true
+            duration = "1 Season"
         )
     )
 

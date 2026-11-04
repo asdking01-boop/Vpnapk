@@ -7,20 +7,11 @@ import androidx.room.Query
 import com.example.data.local.entity.CategoryEntity
 import com.example.data.local.entity.MediaItemEntity
 
-data class ExistingTimestampTuple(
-    val id: String,
-    val addedTimestamp: Long,
-    val hasServerAddedDate: Boolean
-)
-
 @Dao
 interface MediaDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(items: List<MediaItemEntity>)
-
-    @Query("SELECT id, addedTimestamp, hasServerAddedDate FROM media_items WHERE accountId = :accountId AND type = :type")
-    suspend fun getExistingTimestamps(accountId: String, type: String): List<ExistingTimestampTuple>
 
     @Query("DELETE FROM media_items WHERE accountId = :accountId AND type = :type")
     suspend fun deleteByAccountAndType(accountId: String, type: String)
@@ -35,29 +26,8 @@ interface MediaDao {
     @Query("SELECT * FROM media_items WHERE accountId = :accountId AND type = :type ORDER BY rating DESC, addedTimestamp DESC LIMIT :limit")
     suspend fun getTopRated(accountId: String, type: String, limit: Int = 20): List<MediaItemEntity>
 
-    @Query("SELECT * FROM media_items WHERE accountId = :accountId AND type IN ('MOVIE', 'SERIES') ORDER BY hasServerAddedDate DESC, addedTimestamp DESC, streamId DESC LIMIT :limit")
+    @Query("SELECT * FROM media_items WHERE accountId = :accountId AND type IN ('MOVIE', 'SERIES') ORDER BY year DESC, addedTimestamp DESC LIMIT :limit")
     suspend fun getRecentlyAdded(accountId: String, limit: Int = 20): List<MediaItemEntity>
-
-    @Query("""
-        SELECT * FROM media_items 
-        WHERE accountId = :accountId 
-          AND type = :type 
-          AND (
-              :categoryId = 'all' 
-              OR :categoryId = 'vod_all' 
-              OR :categoryId = 'series_all' 
-              OR categoryId = :categoryId 
-              OR categoryName LIKE '%' || :categoryId || '%'
-          )
-        ORDER BY hasServerAddedDate DESC, addedTimestamp DESC, streamId DESC, name ASC 
-        LIMIT :limit
-    """)
-    suspend fun getLatestByCategory(
-        accountId: String,
-        type: String,
-        categoryId: String,
-        limit: Int = 40
-    ): List<MediaItemEntity>
 
     @Query("SELECT * FROM media_items WHERE accountId = :accountId AND type = :type AND (categoryId = :categoryId OR :categoryId = 'all') ORDER BY rating DESC, addedTimestamp DESC LIMIT :limit")
     suspend fun getByCategory(accountId: String, type: String, categoryId: String, limit: Int = 15): List<MediaItemEntity>

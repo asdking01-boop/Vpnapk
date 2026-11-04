@@ -12,7 +12,7 @@ import com.example.data.local.entity.MediaItemEntity
 
 @Database(
     entities = [MediaItemEntity::class, CategoryEntity::class],
-    version = 4,
+    version = 3,
     exportSchema = false
 )
 abstract class KrasDatabase : RoomDatabase() {
@@ -49,13 +49,6 @@ abstract class KrasDatabase : RoomDatabase() {
             }
         }
 
-        val MIGRATION_3_4 = object : Migration(3, 4) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE media_items ADD COLUMN hasServerAddedDate INTEGER NOT NULL DEFAULT 1")
-                db.execSQL("CREATE INDEX IF NOT EXISTS index_media_items_accountId_type_categoryId_addedTimestamp ON media_items(accountId, type, categoryId, addedTimestamp)")
-            }
-        }
-
         fun getInstance(context: Context): KrasDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -63,7 +56,7 @@ abstract class KrasDatabase : RoomDatabase() {
                     KrasDatabase::class.java,
                     "kras_tv_media.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

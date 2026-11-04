@@ -428,116 +428,46 @@ class KrasRepository(context: Context) {
         }
     }
 
-    // --- First-Seen Timestamp Tracking (Preserved across catalog refreshes when server date_added is missing) ---
-    private val firstSeenMemoryCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
-
-    private fun loadPersistedFirstSeenMap(accountId: String): MutableMap<String, Long> {
-        val map = mutableMapOf<String, Long>()
-        val raw = prefs.getString("first_seen_map_$accountId", null) ?: return map
-        try {
-            val obj = JSONObject(raw)
-            val keys = obj.keys()
-            while (keys.hasNext()) {
-                val k = keys.next()
-                val v = obj.optLong(k, 0L)
-                if (v > 0L) {
-                    map[k] = v
-                    firstSeenMemoryCache["${accountId}_$k"] = v
-                }
-            }
-        } catch (_: Exception) {
-        }
-        return map
-    }
-
-    private fun savePersistedFirstSeenMap(accountId: String, map: Map<String, Long>) {
-        try {
-            if (map.size > 5000) return // Avoid bloating SharedPreferences on huge catalogs (Room snapshot handles huge catalogs)
-            val obj = JSONObject()
-            for ((k, v) in map) {
-                obj.put(k, v)
-            }
-            prefs.edit().putString("first_seen_map_$accountId", obj.toString()).apply()
-        } catch (_: Exception) {
-        }
-    }
-
-    fun resolveOrTrackFirstSeenTimestamp(accountId: String, itemId: String, fallbackClockMs: Long = System.currentTimeMillis()): Long {
-        val cacheKey = "${accountId}_$itemId"
-        firstSeenMemoryCache[cacheKey]?.let { if (it > 0L) return it }
-        val persisted = loadPersistedFirstSeenMap(accountId)
-        val existing = persisted[itemId]
-        if (existing != null && existing > 0L) {
-            firstSeenMemoryCache[cacheKey] = existing
-            return existing
-        }
-        val assigned = if (fallbackClockMs > 0L) fallbackClockMs else System.currentTimeMillis()
-        firstSeenMemoryCache[cacheKey] = assigned
-        persisted[itemId] = assigned
-        savePersistedFirstSeenMap(accountId, persisted)
-        return assigned
-    }
-
     // --- Room Database Batch Operations ---
 
     suspend fun insertMediaBatch(items: List<MediaItemEntity>) = withContext(Dispatchers.IO) {
         if (items.isEmpty()) return@withContext
-        val accountId = items.first().accountId
-        val persistedFirstSeen = loadPersistedFirstSeenMap(accountId)
-        var firstSeenModified = false
-        val batchBaseClock = System.currentTimeMillis()
-
         val needsOrderComputation = items.size > 1 && items.all { it.serverOrder == 0 && it.groupOrder == 0 }
         val tracker = if (needsOrderComputation) ChannelNameNormalizer.ChannelGroupingTracker() else null
 
-        val processed = items.mapIndexed { idx, item ->
+        val processed = items.map { item ->
             val canonicalQuality = MediaItemEntity.computeCanonicalQuality(
                 name = item.name,
                 categoryName = item.categoryName,
                 explicitQuality = item.quality,
                 explicitResolution = item.resolution
             )
-
-            // Resolve reliable addition timestamp:
-            // 1. If server provided a valid addition date (hasServerAddedDate && addedTimestamp > 0), use it.
-            // 2. Otherwise, use locally tracked first-seen timestamp (preserved across catalog re-syncs)
-            //    and mark hasServerAddedDate = false.
-            val hasServerDate = item.hasServerAddedDate && item.addedTimestamp > 0L
-            val resolvedTimestamp = if (hasServerDate) {
-                item.addedTimestamp
+            if (tracker != null) {
+                val info = tracker.nextChannel(item.name)
+                item.copy(
+                    groupKey = info.groupKey,
+                    seq = info.seq,
+                    groupOrder = info.groupOrder,
+                    serverOrder = info.serverOrder,
+                    quality = canonicalQuality,
+                    resolution = canonicalQuality
+                )
+            } else if (item.groupKey.isEmpty()) {
+                val norm = ChannelNameNormalizer.normalize(item.name)
+                item.copy(
+                    groupKey = norm.groupKey,
+                    seq = norm.seq,
+                    quality = canonicalQuality,
+                    resolution = canonicalQuality
+                )
+            } else if (item.quality != canonicalQuality || item.resolution != canonicalQuality) {
+                item.copy(
+                    quality = canonicalQuality,
+                    resolution = canonicalQuality
+                )
             } else {
-                val cacheKey = "${item.accountId}_${item.id}"
-                val cachedFirstSeen = firstSeenMemoryCache[cacheKey] ?: persistedFirstSeen[item.id]
-                if (cachedFirstSeen != null && cachedFirstSeen > 0L) {
-                    firstSeenMemoryCache[cacheKey] = cachedFirstSeen
-                    cachedFirstSeen
-                } else {
-                    val newFirstSeen = if (item.addedTimestamp > 0L) item.addedTimestamp else (batchBaseClock - idx)
-                    firstSeenMemoryCache[cacheKey] = newFirstSeen
-                    if (persistedFirstSeen.size < 5000) {
-                        persistedFirstSeen[item.id] = newFirstSeen
-                        firstSeenModified = true
-                    }
-                    newFirstSeen
-                }
+                item
             }
-
-            val info = tracker?.nextChannel(item.name)
-            val norm = if (info == null && item.groupKey.isEmpty()) ChannelNameNormalizer.normalize(item.name) else null
-
-            item.copy(
-                groupKey = info?.groupKey ?: norm?.groupKey ?: item.groupKey,
-                seq = info?.seq ?: norm?.seq ?: item.seq,
-                groupOrder = info?.groupOrder ?: item.groupOrder,
-                serverOrder = info?.serverOrder ?: item.serverOrder,
-                quality = canonicalQuality,
-                resolution = canonicalQuality,
-                addedTimestamp = resolvedTimestamp,
-                hasServerAddedDate = hasServerDate
-            )
-        }
-        if (firstSeenModified) {
-            savePersistedFirstSeenMap(accountId, persistedFirstSeen)
         }
         mediaDao.insertAll(processed)
     }
@@ -559,16 +489,6 @@ class KrasRepository(context: Context) {
     }
 
     suspend fun clearOldRows(accountId: String, type: String) = withContext(Dispatchers.IO) {
-        try {
-            // Snapshot existing timestamps before clearing so first-seen timestamps survive catalog refresh
-            val existing = mediaDao.getExistingTimestamps(accountId, type)
-            for (row in existing) {
-                if (row.addedTimestamp > 0L) {
-                    firstSeenMemoryCache["${accountId}_${row.id}"] = row.addedTimestamp
-                }
-            }
-        } catch (_: Exception) {
-        }
         mediaDao.deleteByAccountAndType(accountId, type)
     }
 
@@ -586,62 +506,6 @@ class KrasRepository(context: Context) {
 
     suspend fun getRecentlyAdded(accountId: String, limit: Int = 20): List<MediaItem> = withContext(Dispatchers.IO) {
         mediaDao.getRecentlyAdded(accountId, limit).map { it.toMediaItem() }
-    }
-
-    /**
-     * Returns the Latest 20 (or up to [limit]) movies or series for a specific [categoryId]
-     * (or across all categories if [categoryId] is "all"), sorted strictly by server addition date
-     * (or locally tracked first-seen fallback when server addition date is absent), newest first,
-     * and deduplicated so the same title/streamId never appears twice in the same category.
-     */
-    suspend fun getLatestByCategory(
-        accountId: String,
-        type: String,
-        categoryId: String,
-        limit: Int = 20
-    ): List<MediaItem> = withContext(Dispatchers.IO) {
-        if (limit <= 0) return@withContext emptyList()
-        val rawEntities = mediaDao.getLatestByCategory(
-            accountId = accountId,
-            type = type,
-            categoryId = categoryId,
-            limit = (limit * 3).coerceAtLeast(60)
-        )
-        val seenIds = HashSet<String>()
-        val seenStreamIds = HashSet<Int>()
-        val seenTitlesInCat = HashSet<String>()
-        val deduplicated = ArrayList<MediaItem>(limit)
-
-        for (entity in rawEntities) {
-            if (!seenIds.add(entity.id)) continue
-            if (entity.streamId > 0 && !seenStreamIds.add(entity.streamId)) continue
-            val normalizedTitleKey = "${entity.categoryId}_${entity.name.trim().lowercase()}"
-            if (!seenTitlesInCat.add(normalizedTitleKey)) continue
-
-            deduplicated.add(entity.toMediaItem())
-            if (deduplicated.size >= limit) break
-        }
-        deduplicated
-    }
-
-    /**
-     * Computes a map of `categoryId -> Latest 20 items` for every category of the given [type]
-     * (plus `"all"` for the overall Latest 20).
-     */
-    suspend fun getLatestForAllCategories(
-        accountId: String,
-        type: String,
-        categories: List<Category>,
-        limitPerCategory: Int = 20
-    ): Map<String, List<MediaItem>> = withContext(Dispatchers.IO) {
-        val result = LinkedHashMap<String, List<MediaItem>>()
-        result["all"] = getLatestByCategory(accountId, type, "all", limitPerCategory)
-        for (cat in categories) {
-            if (cat.categoryId.isNotBlank() && !result.containsKey(cat.categoryId)) {
-                result[cat.categoryId] = getLatestByCategory(accountId, type, cat.categoryId, limitPerCategory)
-            }
-        }
-        result
     }
 
     suspend fun getByCategory(accountId: String, type: String, categoryId: String, limit: Int = 15): List<MediaItem> = withContext(Dispatchers.IO) {
@@ -773,8 +637,8 @@ class KrasRepository(context: Context) {
         val entities = MediaItemEntity.fromMediaItemList(normalizedItems, account.id)
         runBlocking(Dispatchers.IO) {
             try {
-                clearOldRows(account.id, type.name)
-                insertMediaBatch(entities)
+                mediaDao.deleteByAccountAndType(account.id, type.name)
+                mediaDao.insertAll(entities)
             } catch (e: Exception) {
                 e.printStackTrace()
             }

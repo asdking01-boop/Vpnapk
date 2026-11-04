@@ -321,44 +321,6 @@ class XtreamClient {
         totalCount
     }
 
-    companion object {
-        /**
-         * Parses an Xtream Codes / playlist server addition timestamp (`added`, `date_added`, `last_modified`)
-         * into epoch milliseconds. Returns 0L when missing or invalid so the repository can assign/preserve
-         * a locally tracked first-seen timestamp (clearly distinguished from a server upload timestamp).
-         */
-        fun parseServerTimestampMs(raw: String?): Long {
-            val cleaned = raw?.trim().orEmpty()
-            if (cleaned.isEmpty() || cleaned == "0" || cleaned.equals("null", ignoreCase = true)) {
-                return 0L
-            }
-            val numeric = cleaned.toLongOrNull()
-            if (numeric != null) {
-                return when {
-                    numeric <= 0L -> 0L
-                    numeric < 100_000_000_000L -> numeric * 1000L // Unix seconds -> milliseconds
-                    else -> numeric // Already epoch milliseconds
-                }
-            }
-            val dateFormats = arrayOf(
-                "yyyy-MM-dd HH:mm:ss",
-                "yyyy-MM-dd'T'HH:mm:ss",
-                "yyyy-MM-dd"
-            )
-            for (pattern in dateFormats) {
-                try {
-                    val sdf = java.text.SimpleDateFormat(pattern, java.util.Locale.US).apply {
-                        timeZone = java.util.TimeZone.getTimeZone("UTC")
-                    }
-                    val parsed = sdf.parse(cleaned)?.time ?: 0L
-                    if (parsed > 0L) return parsed
-                } catch (_: Exception) {
-                }
-            }
-            return 0L
-        }
-    }
-
     // --- Streamed Movies Parsing (No giant strings in RAM) ---
     suspend fun streamVodStreams(
         account: Account,
@@ -391,7 +353,7 @@ class XtreamClient {
                             var containerExt = "mp4"
                             var rating = 7.0
                             var year = "2024"
-                            var serverAddedMs = 0L
+                            var addedTime = System.currentTimeMillis()
 
                             while (reader.hasNext()) {
                                 val field = reader.nextName()
@@ -427,27 +389,18 @@ class XtreamClient {
                                             reader.nextString().toDoubleOrNull() ?: 7.0
                                         }
                                     }
-                                    "year", "releaseDate", "release_date" -> {
-                                        val rawYear = if (reader.peek() == JsonToken.NUMBER) {
+                                    "year" -> {
+                                        year = if (reader.peek() == JsonToken.NUMBER) {
                                             reader.nextInt().toString()
                                         } else {
                                             reader.nextString()
                                         }
-                                        if (rawYear.length >= 4) {
-                                            year = rawYear.substring(0, 4)
-                                        } else if (rawYear.isNotBlank()) {
-                                            year = rawYear
-                                        }
                                     }
-                                    "added", "date_added", "last_modified" -> {
-                                        val rawAdded = if (reader.peek() == JsonToken.NUMBER) {
-                                            reader.nextLong().toString()
+                                    "added" -> {
+                                        addedTime = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextLong() * 1000L
                                         } else {
-                                            reader.nextString()
-                                        }
-                                        val parsed = parseServerTimestampMs(rawAdded)
-                                        if (parsed > 0L) {
-                                            serverAddedMs = parsed
+                                            reader.nextString().toLongOrNull()?.let { it * 1000L } ?: System.currentTimeMillis()
                                         }
                                     }
                                     else -> reader.skipValue()
@@ -479,8 +432,7 @@ class XtreamClient {
                                         quality = detectedQuality,
                                         streamUrl = streamUrl,
                                         containerExtension = containerExt,
-                                        addedTimestamp = serverAddedMs,
-                                        hasServerAddedDate = serverAddedMs > 0L,
+                                        addedTimestamp = addedTime,
                                         groupKey = orderInfo.groupKey,
                                         seq = orderInfo.seq,
                                         groupOrder = orderInfo.groupOrder,
@@ -542,7 +494,6 @@ class XtreamClient {
                             var categoryId = ""
                             var rating = 8.0
                             var year = "2024"
-                            var serverAddedMs = 0L
 
                             while (reader.hasNext()) {
                                 val field = reader.nextName()
@@ -574,28 +525,9 @@ class XtreamClient {
                                             reader.nextString().toDoubleOrNull() ?: 8.0
                                         }
                                     }
-                                    "releaseDate", "release_date", "year" -> {
-                                        val rDate = if (reader.peek() == JsonToken.NUMBER) {
-                                            reader.nextInt().toString()
-                                        } else {
-                                            reader.nextString()
-                                        }
-                                        if (rDate.length >= 4) {
-                                            year = rDate.substring(0, 4)
-                                        } else if (rDate.isNotBlank()) {
-                                            year = rDate
-                                        }
-                                    }
-                                    "last_modified", "added", "date_added" -> {
-                                        val rawAdded = if (reader.peek() == JsonToken.NUMBER) {
-                                            reader.nextLong().toString()
-                                        } else {
-                                            reader.nextString()
-                                        }
-                                        val parsed = parseServerTimestampMs(rawAdded)
-                                        if (parsed > 0L) {
-                                            serverAddedMs = parsed
-                                        }
+                                    "releaseDate" -> {
+                                        val rDate = reader.nextString()
+                                        year = if (rDate.length >= 4) rDate.substring(0, 4) else "2024"
                                     }
                                     else -> reader.skipValue()
                                 }
@@ -625,8 +557,7 @@ class XtreamClient {
                                         quality = detectedQuality,
                                         streamUrl = "",
                                         containerExtension = "mp4",
-                                        addedTimestamp = serverAddedMs,
-                                        hasServerAddedDate = serverAddedMs > 0L,
+                                        addedTimestamp = System.currentTimeMillis(),
                                         groupKey = orderInfo.groupKey,
                                         seq = orderInfo.seq,
                                         groupOrder = orderInfo.groupOrder,
