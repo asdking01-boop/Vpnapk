@@ -180,7 +180,8 @@ data class UserSettings(
     val silenceNotificationsWhileWatching: Boolean = false,
     val liveChannelOrder: LiveChannelOrder = LiveChannelOrder.SMART,
     val autoCheckUpdates: Boolean = true,
-    val backgroundPlayback: Boolean = true
+    val backgroundPlayback: Boolean = true,
+    val liveSwipeGesturesEnabled: Boolean = true
 )
 
 // Xtream Codes API DTOs

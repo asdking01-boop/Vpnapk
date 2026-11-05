@@ -35,7 +35,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -122,11 +126,22 @@ class MainActivity : ComponentActivity() {
                 val liveCategories by viewModel.liveCategories.collectAsState()
                 val activeLiveChannel by viewModel.activeLiveChannel.collectAsState()
                 val isLiveFullscreen by viewModel.isLiveFullscreen.collectAsState()
+                val isLiveMiniPlayerActive by viewModel.isLiveMiniPlayerActive.collectAsState()
+                val recentLiveChannels by viewModel.recentLiveChannels.collectAsState()
+                val lastWatchedLiveChannel by viewModel.lastWatchedLiveChannel.collectAsState()
                 val favorites by viewModel.favorites.collectAsState()
                 val searchResults by viewModel.searchResults.collectAsState()
                 val watchHistory by viewModel.watchHistory.collectAsState()
                 val isRefreshing by viewModel.isRefreshing.collectAsState()
                 val isLoading by viewModel.isLoading.collectAsState()
+
+                val configuration = LocalConfiguration.current
+                val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+                val isInPip = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    isInPictureInPictureMode
+                } else {
+                    false
+                }
 
                 val nowPlayingItem by viewModel.nowPlayingItem.collectAsState()
                 val nowPlayingEpisode by viewModel.nowPlayingEpisode.collectAsState()
@@ -150,6 +165,45 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // Lifecycle-aware Live TV Background Audio & One UI Media Notification Management
+                val lifecycleOwner = LocalLifecycleOwner.current
+                val currentBgPlayback by rememberUpdatedState(userSettings.backgroundPlayback)
+                val currentActiveLive by rememberUpdatedState(activeLiveChannel)
+                val currentNowPlaying by rememberUpdatedState(nowPlayingItem)
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        when (event) {
+                            Lifecycle.Event.ON_RESUME -> {
+                                if (currentActiveLive != null && currentNowPlaying == null) {
+                                    viewModel.playerWrapper.setBackgroundAudioOnlyMode(false)
+                                    if (!currentBgPlayback) {
+                                        viewModel.playerWrapper.resumeForLifecycle()
+                                    }
+                                }
+                            }
+                            Lifecycle.Event.ON_STOP -> {
+                                val inPip = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                                    isInPictureInPictureMode
+                                } else {
+                                    false
+                                }
+                                if (!inPip && currentActiveLive != null && currentNowPlaying == null) {
+                                    if (currentBgPlayback) {
+                                        viewModel.playerWrapper.setBackgroundAudioOnlyMode(true)
+                                    } else {
+                                        viewModel.playerWrapper.pauseForLifecycle()
+                                    }
+                                }
+                            }
+                            else -> Unit
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose {
+                        lifecycleOwner.lifecycle.removeObserver(observer)
+                    }
+                }
+
                 // Android Back Handling
                 BackHandler {
                     when {
@@ -160,7 +214,7 @@ class MainActivity : ComponentActivity() {
                         isLoginOpen -> isLoginOpen = false
                         currentScreen != NavScreen.HOME -> {
                             if (currentScreen == NavScreen.LIVE_TV && activeLiveChannel != null) {
-                                viewModel.stopLiveChannelPlayback()
+                                viewModel.setLiveMiniPlayer(true)
                             }
                             currentScreen = NavScreen.HOME
                         }
@@ -327,12 +381,15 @@ class MainActivity : ComponentActivity() {
                         containerColor = CinemaBlack,
                         contentWindowInsets = WindowInsets(0, 0, 0, 0),
                         bottomBar = {
-                            if (!(currentScreen == NavScreen.LIVE_TV && isLiveFullscreen)) {
+                            val hideBottomBar = isInPip || (currentScreen == NavScreen.LIVE_TV && (isLiveFullscreen || isLandscape))
+                            if (!hideBottomBar) {
                                 BottomNavBar(
                                     currentScreen = currentScreen,
                                     onScreenSelected = { screen ->
                                         if (currentScreen == NavScreen.LIVE_TV && screen != NavScreen.LIVE_TV && activeLiveChannel != null) {
-                                            viewModel.stopLiveChannelPlayback()
+                                            viewModel.setLiveMiniPlayer(true)
+                                        } else if (screen == NavScreen.LIVE_TV) {
+                                            viewModel.setLiveMiniPlayer(false)
                                         }
                                         currentScreen = screen
                                     }
@@ -451,7 +508,25 @@ class MainActivity : ComponentActivity() {
                                         isFullscreen = isLiveFullscreen,
                                         onToggleFullscreen = { fullscreen -> viewModel.setLiveFullscreen(fullscreen) },
                                         onRetryPlayback = { viewModel.retryLiveChannel() },
+                                        onStopPlayback = { viewModel.stopLiveChannelPlayback() },
                                         defaultAspectRatio = userSettings.defaultAspectRatio,
+                                        recentChannels = recentLiveChannels,
+                                        lastWatchedChannel = lastWatchedLiveChannel,
+                                        swipeGesturesEnabled = userSettings.liveSwipeGesturesEnabled,
+                                        onToggleSwipeGestures = { enabled ->
+                                            viewModel.updateSettings(userSettings.copy(liveSwipeGesturesEnabled = enabled))
+                                        },
+                                        backgroundPlaybackEnabled = userSettings.backgroundPlayback,
+                                        onToggleBackgroundPlayback = { enabled ->
+                                            viewModel.updateSettings(userSettings.copy(backgroundPlayback = enabled))
+                                        },
+                                        onMinimizeToMiniPlayer = {
+                                            viewModel.setLiveMiniPlayer(true)
+                                            currentScreen = NavScreen.HOME
+                                        },
+                                        onEnterPip = {
+                                            PlayerImmersiveHelper.enterPictureInPicture(this@MainActivity)
+                                        },
                                         onLoadMore = { viewModel.loadMoreLive() },
                                         onFilterChanged = { cat, q, qFilter, sortQ ->
                                             viewModel.filterLive(cat, q, qFilter, sortQ)
@@ -471,6 +546,32 @@ class MainActivity : ComponentActivity() {
                                         onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) }
                                     )
                                 }
+                            }
+
+                            // Floating In-App Live TV Mini Player (shown when browsing other tabs while a live channel is playing)
+                            val showMiniPlayer = !isInPip &&
+                                    nowPlayingItem == null &&
+                                    activeLiveChannel != null &&
+                                    (currentScreen != NavScreen.LIVE_TV || isLiveMiniPlayerActive)
+                            if (showMiniPlayer && activeLiveChannel != null) {
+                                LiveMiniPlayerOverlay(
+                                    channel = activeLiveChannel!!,
+                                    playerWrapper = viewModel.playerWrapper,
+                                    onExpandClick = {
+                                        viewModel.setLiveMiniPlayer(false)
+                                        currentScreen = NavScreen.LIVE_TV
+                                    },
+                                    onNextChannelClick = {
+                                        viewModel.switchLiveChannelByOffset(1)
+                                    },
+                                    onCloseClick = {
+                                        viewModel.stopLiveChannelPlayback()
+                                    },
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .navigationBarsPadding()
+                                        .padding(bottom = 86.dp)
+                                )
                             }
 
                             // Non-blocking Liquid Glass sync progress indicator

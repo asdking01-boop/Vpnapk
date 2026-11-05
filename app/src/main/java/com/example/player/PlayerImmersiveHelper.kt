@@ -64,6 +64,22 @@ object PlayerImmersiveHelper {
     }
 
     /**
+     * Enters Android Picture-in-Picture (PiP) mode on compatible devices (Android 8.0+ / One UI).
+     */
+    fun enterPictureInPicture(activity: Activity?): Boolean {
+        if (activity == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        return try {
+            val params = android.app.PictureInPictureParams.Builder()
+                .setAspectRatio(android.util.Rational(16, 9))
+                .build()
+            activity.enterPictureInPictureMode(params)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    /**
      * Checks if Do Not Disturb (Notification Policy) access is granted.
      */
     fun isDndPermissionGranted(context: Context): Boolean {

@@ -862,6 +862,48 @@ class ExampleRobolectricTest {
       assertEquals(listOf("m_alpha_2024", "m_zeta_2024"), year2024AZ.map { it.id })
     }
   }
+
+  @Test
+  fun `live tv recent channels last watched channel mini player and swipe gesture settings`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val viewModel = com.example.viewmodel.KrasViewModel(app)
+    val repo = KrasRepository(app)
+
+    val chA = com.example.data.model.MediaItem(
+      id = "live_rec_a", streamId = 501, name = "Premier Sports 4K", type = MediaType.LIVE,
+      categoryId = "live_sports", categoryName = "Sports", plot = "Live Championship Final",
+      streamUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    )
+    val chB = com.example.data.model.MediaItem(
+      id = "live_rec_b", streamId = 502, name = "World News HD", type = MediaType.LIVE,
+      categoryId = "live_news", categoryName = "News", plot = "Global Evening Headlines",
+      streamUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    )
+
+    viewModel.selectLiveChannel(chA)
+    assertEquals("live_rec_a", viewModel.lastWatchedLiveChannel.value?.id)
+    assertTrue(viewModel.recentLiveChannels.value.any { it.id == "live_rec_a" })
+
+    viewModel.selectLiveChannel(chB)
+    assertEquals("live_rec_b", viewModel.lastWatchedLiveChannel.value?.id)
+    assertEquals(listOf("live_rec_b", "live_rec_a"), viewModel.recentLiveChannels.value.take(2).map { it.id })
+    assertEquals("live_rec_b", repo.getLastWatchedLiveChannel()?.id)
+
+    // Mini player state toggles cleanly while keeping active channel playing
+    viewModel.setLiveMiniPlayer(true)
+    assertTrue(viewModel.isLiveMiniPlayerActive.value)
+    assertFalse(viewModel.isLiveFullscreen.value)
+    assertEquals("live_rec_b", viewModel.activeLiveChannel.value?.id)
+
+    // Swipe gesture setting persists
+    val updatedSettings = viewModel.userSettings.value.copy(liveSwipeGesturesEnabled = false)
+    viewModel.updateSettings(updatedSettings)
+    assertFalse(viewModel.userSettings.value.liveSwipeGesturesEnabled)
+
+    viewModel.stopLiveChannelPlayback()
+    assertFalse(viewModel.isLiveMiniPlayerActive.value)
+    viewModel.playerWrapper.release()
+  }
 }
 
 

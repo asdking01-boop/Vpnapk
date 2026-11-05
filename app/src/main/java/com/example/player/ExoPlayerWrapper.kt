@@ -679,7 +679,8 @@ class ExoPlayerWrapper(private val context: Context) {
     fun play(
         url: String,
         startPositionMs: Long = 0L,
-        metadata: PlaybackNotificationMetadata? = null
+        metadata: PlaybackNotificationMetadata? = null,
+        keepLastFrameUntilReady: Boolean = false
     ) {
         if (url.isBlank()) {
             failWithError("Stream URL is unavailable for this title.")
@@ -712,11 +713,17 @@ class ExoPlayerWrapper(private val context: Context) {
         _availableSubtitleTracks.value = listOf(offSubtitleOption)
         _selectedSubtitleTrack.value = offSubtitleOption
         _errorMessage.value = null
-        _hasRenderedFirstFrame.value = false
+        if (!keepLastFrameUntilReady || !_hasRenderedFirstFrame.value) {
+            _hasRenderedFirstFrame.value = false
+        }
         _isBuffering.value = true
         _currentPosition.value = startPositionMs.coerceAtLeast(0L)
         _duration.value = 0L
-        _playerUiState.value = PlayerUiState.PREPARING
+        _playerUiState.value = if (keepLastFrameUntilReady && _hasRenderedFirstFrame.value) {
+            PlayerUiState.BUFFERING
+        } else {
+            PlayerUiState.PREPARING
+        }
 
         val player = getPlayer()
         val effectiveMetadata = metadata ?: KrasMediaPlaybackService.currentMetadata

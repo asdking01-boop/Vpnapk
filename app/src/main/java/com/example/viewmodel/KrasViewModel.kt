@@ -15,6 +15,8 @@ import com.example.data.local.entity.MediaItemEntity
 import com.example.data.model.*
 import com.example.data.sample.SampleData
 import com.example.player.ExoPlayerWrapper
+import com.example.player.KrasMediaPlaybackService
+import com.example.player.PlaybackNotificationMetadata
 import com.example.sound.CinematicSoundPlayer
 import com.example.updater.AppUpdateUiState
 import com.example.updater.AppUpdater
@@ -144,6 +146,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLiveFullscreen = MutableStateFlow(false)
     val isLiveFullscreen = _isLiveFullscreen.asStateFlow()
 
+    private val _isLiveMiniPlayerActive = MutableStateFlow(false)
+    val isLiveMiniPlayerActive = _isLiveMiniPlayerActive.asStateFlow()
+
+    private val _recentLiveChannels = MutableStateFlow<List<MediaItem>>(repository.getRecentLiveChannels())
+    val recentLiveChannels = _recentLiveChannels.asStateFlow()
+
+    private val _lastWatchedLiveChannel = MutableStateFlow<MediaItem?>(repository.getLastWatchedLiveChannel())
+    val lastWatchedLiveChannel = _lastWatchedLiveChannel.asStateFlow()
+
     // In-App Updater State
     private val _updateState = MutableStateFlow(AppUpdateUiState())
     val updateState = _updateState.asStateFlow()
@@ -184,6 +195,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val pageSize = 40
 
     init {
+        KrasMediaPlaybackService.backgroundPlaybackEnabled = _userSettings.value.backgroundPlayback
         playerWrapper.onRealQualityDetected = { realQuality ->
             onRealPlaybackQualityDetected(realQuality)
         }
@@ -224,6 +236,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _favorites.value = favs
                 _watchHistory.value = history
                 _downloads.value = dlList
+                _recentLiveChannels.value = withContext(Dispatchers.IO) { repository.getRecentLiveChannels() }
+                _lastWatchedLiveChannel.value = withContext(Dispatchers.IO) { repository.getLastWatchedLiveChannel() }
 
                 // Initialize player with buffer setting
                 playerWrapper.initPlayer(_userSettings.value.bufferSize)
@@ -1083,14 +1097,59 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         _nowPlayingEpisode.value = null
         _activeLiveChannel.value = channel
         _isLiveFullscreen.value = enterFullscreen
+        _isLiveMiniPlayerActive.value = false
+
+        repository.recordRecentLiveChannel(channel)
+        _recentLiveChannels.value = repository.getRecentLiveChannels()
+        _lastWatchedLiveChannel.value = channel
+
+        val notificationMeta = PlaybackNotificationMetadata(
+            mediaId = channel.id,
+            title = channel.name,
+            subtitle = channel.plot.ifBlank {
+                "KRAS TV • ${channel.categoryName.ifBlank { "Live Broadcast" }}"
+            },
+            artworkUrl = channel.streamIcon.ifBlank { channel.backdrop },
+            isLive = true
+        )
+        KrasMediaPlaybackService.updateChannelNavigationSupport(
+            canSkipPrevNext = true,
+            onPrevious = { switchLiveChannelByOffset(-1) },
+            onNext = { switchLiveChannelByOffset(1) },
+            onStop = { stopLiveChannelPlayback() }
+        )
 
         val urlToPlay = channel.streamUrl.trim()
-        playerWrapper.play(urlToPlay, 0L)
+        playerWrapper.play(
+            url = urlToPlay,
+            startPositionMs = 0L,
+            metadata = notificationMeta,
+            keepLastFrameUntilReady = true
+        )
         startPositionTracker()
+    }
+
+    fun switchLiveChannelByOffset(delta: Int) {
+        val list = _liveStreams.value.ifEmpty { SampleData.sampleLiveStreams }
+        if (list.isEmpty()) return
+        val currentId = _activeLiveChannel.value?.id
+        val curIdx = list.indexOfFirst { it.id == currentId }
+        val targetIdx = if (curIdx < 0) 0 else (curIdx + delta + list.size) % list.size
+        selectLiveChannel(list[targetIdx], _isLiveFullscreen.value)
     }
 
     fun setLiveFullscreen(fullscreen: Boolean) {
         _isLiveFullscreen.value = fullscreen
+        if (fullscreen) {
+            _isLiveMiniPlayerActive.value = false
+        }
+    }
+
+    fun setLiveMiniPlayer(active: Boolean) {
+        _isLiveMiniPlayerActive.value = active && _activeLiveChannel.value != null
+        if (active) {
+            _isLiveFullscreen.value = false
+        }
     }
 
     fun retryLiveChannel() {
@@ -1104,13 +1163,20 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopLiveChannelPlayback() {
         progressTrackingJob?.cancel()
+        KrasMediaPlaybackService.updateChannelNavigationSupport(
+            canSkipPrevNext = false,
+            onPrevious = null,
+            onNext = null
+        )
         playerWrapper.stop()
         _activeLiveChannel.value = null
         _isLiveFullscreen.value = false
+        _isLiveMiniPlayerActive.value = false
     }
 
     // --- Playback Control (Movies & Series Unified Fullscreen Player) ---
     fun startPlayback(mediaItem: MediaItem, episode: Episode? = null) {
+        _isLiveMiniPlayerActive.value = false
         if (mediaItem.type == MediaType.LIVE && episode == null) {
             _activeLiveChannel.value = mediaItem
         } else {
@@ -1429,6 +1495,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     fun updateSettings(newSettings: UserSettings) {
         val orderChanged = _userSettings.value.liveChannelOrder != newSettings.liveChannelOrder
         val bufferChanged = _userSettings.value.bufferSize != newSettings.bufferSize
+        KrasMediaPlaybackService.backgroundPlaybackEnabled = newSettings.backgroundPlayback
         _userSettings.value = newSettings
         viewModelScope.launch(Dispatchers.IO) {
             repository.saveUserSettings(newSettings)

@@ -378,7 +378,9 @@ class KrasRepository(context: Context) {
             playIntroSound = prefs.getBoolean("playIntroSound", true),
             silenceNotificationsWhileWatching = prefs.getBoolean("silenceNotificationsWhileWatching", false),
             liveChannelOrder = liveOrder,
-            autoCheckUpdates = prefs.getBoolean("autoCheckUpdates", true)
+            autoCheckUpdates = prefs.getBoolean("autoCheckUpdates", true),
+            backgroundPlayback = prefs.getBoolean("backgroundPlayback", true),
+            liveSwipeGesturesEnabled = prefs.getBoolean("liveSwipeGesturesEnabled", true)
         )
     }
 
@@ -397,7 +399,85 @@ class KrasRepository(context: Context) {
             putBoolean("silenceNotificationsWhileWatching", settings.silenceNotificationsWhileWatching)
             putString("liveChannelOrder", settings.liveChannelOrder.name)
             putBoolean("autoCheckUpdates", settings.autoCheckUpdates)
+            putBoolean("backgroundPlayback", settings.backgroundPlayback)
+            putBoolean("liveSwipeGesturesEnabled", settings.liveSwipeGesturesEnabled)
         }.apply()
+    }
+
+    // --- Recently Watched & Last Watched Live TV Channels ---
+    fun recordRecentLiveChannel(channel: MediaItem) {
+        try {
+            val current = getRecentLiveChannels().filter { it.id != channel.id }.toMutableList()
+            current.add(0, channel)
+            val trimmed = current.take(20)
+            val array = JSONArray()
+            for (ch in trimmed) {
+                val obj = JSONObject().apply {
+                    put("id", ch.id)
+                    put("streamId", ch.streamId)
+                    put("name", ch.name)
+                    put("title", ch.title.ifBlank { ch.name })
+                    put("streamIcon", ch.streamIcon)
+                    put("backdrop", ch.backdrop)
+                    put("categoryId", ch.categoryId)
+                    put("categoryName", ch.categoryName)
+                    put("quality", ch.quality)
+                    put("resolution", ch.resolution)
+                    put("plot", ch.plot)
+                    put("streamUrl", ch.streamUrl)
+                }
+                array.put(obj)
+            }
+            prefs.edit()
+                .putString("recent_live_channels", array.toString())
+                .putString("last_watched_live_channel_id", channel.id)
+                .apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun getRecentLiveChannels(): List<MediaItem> {
+        val json = prefs.getString("recent_live_channels", null) ?: return emptyList()
+        val list = mutableListOf<MediaItem>()
+        try {
+            val array = JSONArray(json)
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                val q = obj.optString("quality", "")
+                val r = obj.optString("resolution", q)
+                list.add(
+                    MediaItem(
+                        id = obj.getString("id"),
+                        streamId = obj.optInt("streamId", 0),
+                        name = obj.optString("name", "Channel"),
+                        title = obj.optString("title", obj.optString("name", "Channel")),
+                        type = MediaType.LIVE,
+                        streamIcon = obj.optString("streamIcon", ""),
+                        backdrop = obj.optString("backdrop", ""),
+                        categoryId = obj.optString("categoryId", ""),
+                        categoryName = obj.optString("categoryName", ""),
+                        quality = q,
+                        resolution = r,
+                        plot = obj.optString("plot", ""),
+                        streamUrl = obj.optString("streamUrl", "")
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return list
+    }
+
+    fun getLastWatchedLiveChannel(): MediaItem? {
+        val recent = getRecentLiveChannels()
+        val lastId = prefs.getString("last_watched_live_channel_id", null)
+        return if (!lastId.isNullOrBlank()) {
+            recent.find { it.id == lastId } ?: recent.firstOrNull()
+        } else {
+            recent.firstOrNull()
+        }
     }
 
     fun getLastUpdateCheckMs(): Long {
@@ -594,6 +674,14 @@ class KrasRepository(context: Context) {
                 }
                 return@withContext favEntities.drop(offset).take(limit).map { it.toMediaItem() }
             }
+            if (categoryId == "recent") {
+                val recentList = getRecentLiveChannels().filter { ch ->
+                    (query.isBlank() || ch.name.contains(query, ignoreCase = true)) &&
+                            QualityDetector.matchesQualityFilter(ch.quality.ifBlank { ch.resolution }, qualityFilter)
+                }
+                val sorted = if (sortByQuality) QualityDetector.sortMediaByQualityDescending(recentList) else recentList
+                return@withContext sorted.drop(offset).take(limit)
+            }
 
             val entities = when (liveChannelOrder) {
                 LiveChannelOrder.SMART -> mediaDao.queryLiveSmartPaged(accountId, categoryId, query, limit, offset, qualityFilter, sortByQuality)
@@ -632,6 +720,12 @@ class KrasRepository(context: Context) {
             val favIds = getFavoritesRaw().filter { it.type == MediaType.LIVE }.map { it.mediaId }
             if (favIds.isEmpty()) return@withContext 0
             return@withContext mediaDao.getFavoritesSmart(accountId, favIds, query, qualityFilter, false).size
+        }
+        if (type.equals("LIVE", ignoreCase = true) && categoryId == "recent") {
+            return@withContext getRecentLiveChannels().count { ch ->
+                (query.isBlank() || ch.name.contains(query, ignoreCase = true)) &&
+                        QualityDetector.matchesQualityFilter(ch.quality.ifBlank { ch.resolution }, qualityFilter)
+            }
         }
         mediaDao.countMedia(accountId, type, categoryId, query, minRating, year, qualityFilter)
     }
