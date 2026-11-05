@@ -555,224 +555,307 @@ fun PlayerScreen(
                     }
             ) {
                 // =========================================================================
-                // TOP CONTROL BAR: Back | KRAS TV Logo + Title & Specs | Cast | CC | Fullscreen
+                // TOP CONTROL BAR: Back | KRAS TV Logo + Title & Specs | Fit | Cast | CC | Rotation | Fullscreen
                 // =========================================================================
-                Row(
+                BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.TopCenter)
                         .displayCutoutPadding()
                         .statusBarsPadding()
-                        .padding(horizontal = horizontalEdgePadding, vertical = verticalEdgePadding),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Left Side: Back Button + KRAS TV Custom Logo + Stream Title & Badges
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        // Back Arrow Button
-                        PlayerGlassIconButton(
-                            icon = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            onClick = onClose,
-                            size = 42.dp,
-                            iconSize = 20.dp,
-                            modifier = Modifier.testTag("player_back_button")
-                        )
+                    val isWideToolbar = maxWidth >= 600.dp
+                    val isUltraCompact = maxWidth < 375.dp
 
-                        // KRAS TV Custom Wordmark Logo
-                        KrasLogo(
-                            height = if (isLandscape) 22.dp else 20.dp,
-                            modifier = Modifier.testTag("player_kras_logo")
-                        )
+                    val topBarHorizontalPadding = when {
+                        isWideToolbar -> 28.dp
+                        isUltraCompact -> 10.dp
+                        else -> 14.dp
+                    }
+                    val topBarVerticalPadding = if (isWideToolbar) 14.dp else 14.dp
 
-                        // Subtle Vertical Divider
-                        Box(
-                            modifier = Modifier
-                                .width(1.dp)
-                                .height(22.dp)
-                                .background(Color.White.copy(alpha = 0.22f))
-                        )
-
-                        // Media Title + Episode Info + Real Resolution Badge
-                        Column(
-                            modifier = Modifier.weight(1f, fill = false),
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Text(
-                                text = episode?.title ?: mediaItem.name,
-                                color = Color.White,
-                                fontSize = if (isLandscape) 15.sp else 13.sp,
-                                fontFamily = OutfitFontFamily,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-
-                            Spacer(modifier = Modifier.height(2.dp))
-
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                if (episode != null) {
-                                    Text(
-                                        text = "S${episode.seasonNumber}:E${episode.episodeNum}",
-                                        color = KrasRedBright,
-                                        fontSize = 10.sp,
-                                        fontFamily = OutfitFontFamily,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-
-                                ResolutionBadge(
-                                    resolution = effectiveQualityString,
-                                    isLive = mediaItem.type == MediaType.LIVE,
-                                    maxExtraTags = if (isLandscape) 2 else 1
-                                )
-
-                                if (realResolutionOverlay.isNotBlank()) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(Color.White.copy(alpha = 0.14f))
-                                            .border(0.5.dp, Color.White.copy(alpha = 0.28f), RoundedCornerShape(4.dp))
-                                            .padding(horizontal = 5.dp, vertical = 1.5.dp)
-                                            .testTag("player_real_resolution_overlay")
-                                    ) {
-                                        Text(
-                                            text = realResolutionOverlay,
-                                            color = Color.White,
-                                            fontSize = 9.sp,
-                                            fontFamily = OutfitFontFamily,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                    val backBtnSize = when {
+                        isWideToolbar -> 42.dp
+                        isUltraCompact -> 34.dp
+                        else -> 36.dp
+                    }
+                    val backIconSize = when {
+                        isWideToolbar -> 20.dp
+                        isUltraCompact -> 16.dp
+                        else -> 18.dp
+                    }
+                    val logoHeight = when {
+                        isWideToolbar -> 22.dp
+                        isUltraCompact -> 15.5.dp
+                        else -> 17.5.dp
+                    }
+                    val leftSpacing = when {
+                        isWideToolbar -> 12.dp
+                        isUltraCompact -> 6.dp
+                        else -> 8.dp
                     }
 
-                    Spacer(modifier = Modifier.width(10.dp))
+                    val fitChipHeight = when {
+                        isWideToolbar -> 36.dp
+                        isUltraCompact -> 31.dp
+                        else -> 33.dp
+                    }
+                    val fitChipHorizontalPadding = when {
+                        isWideToolbar -> 10.dp
+                        isUltraCompact -> 7.dp
+                        else -> 8.5.dp
+                    }
+                    val fitIconSize = if (isWideToolbar) 14.dp else 12.dp
+                    val fitFontSize = if (isWideToolbar) 10.sp else 9.sp
 
-                    // Right Side: Aspect Ratio (Fit/Fill/Zoom) | Cast | Subtitles / CC | Screen Rotation | Fullscreen
+                    val rightBtnSize = when {
+                        isWideToolbar -> 40.dp
+                        isUltraCompact -> 33.dp
+                        else -> 35.dp
+                    }
+                    val rightIconSize = when {
+                        isWideToolbar -> 19.dp
+                        isUltraCompact -> 15.5.dp
+                        else -> 17.dp
+                    }
+                    val fullscreenIconSize = when {
+                        isWideToolbar -> 21.dp
+                        isUltraCompact -> 17.dp
+                        else -> 18.5.dp
+                    }
+                    val rightSpacing = when {
+                        isWideToolbar -> 8.dp
+                        isUltraCompact -> 4.dp
+                        else -> 5.5.dp
+                    }
+
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(
+                                horizontal = topBarHorizontalPadding,
+                                vertical = topBarVerticalPadding
+                            ),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Aspect Ratio Cycle Chip (Fit -> Fill -> Zoom)
-                        Box(
-                            modifier = Modifier
-                                .height(36.dp)
-                                .clip(RoundedCornerShape(18.dp))
-                                .background(Color(0x9912141E))
-                                .border(1.dp, Color.White.copy(alpha = 0.24f), RoundedCornerShape(18.dp))
-                                .liquidPressClickable {
-                                    currentAspectRatio = when (currentAspectRatio) {
-                                        AspectRatioMode.FIT -> AspectRatioMode.FILL
-                                        AspectRatioMode.FILL -> AspectRatioMode.ZOOM
-                                        AspectRatioMode.ZOOM -> AspectRatioMode.FIT
-                                        else -> AspectRatioMode.FIT
-                                    }
-                                }
-                                .padding(horizontal = 10.dp)
-                                .testTag("player_aspect_ratio_button"),
-                            contentAlignment = Alignment.Center
+                        // Left Brand Group: Back Button + KRAS TV Custom Logo (unweighted so logo never wraps or clips)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(leftSpacing)
                         ) {
+                            // Back Arrow Button
+                            PlayerGlassIconButton(
+                                icon = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                onClick = onClose,
+                                size = backBtnSize,
+                                iconSize = backIconSize,
+                                modifier = Modifier.testTag("player_back_button")
+                            )
+
+                            // KRAS TV Custom Wordmark Logo
+                            KrasLogo(
+                                height = logoHeight,
+                                modifier = Modifier.testTag("player_kras_logo")
+                            )
+                        }
+
+                        if (isWideToolbar) {
+                            // Wide / Landscape: Subtle Vertical Divider + Media Title & Resolution Badges
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(horizontal = 12.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.AspectRatio,
-                                    contentDescription = "Aspect Ratio",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Text(
-                                    text = if (isFullscreen && fullscreenOrientation == FullscreenOrientation.PORTRAIT) {
-                                        "FIT"
-                                    } else {
-                                        currentAspectRatio.label.uppercase()
-                                    },
-                                    color = Color.White,
-                                    fontSize = 10.sp,
-                                    fontFamily = OutfitFontFamily,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-
-                        // Cast Button
-                        PlayerGlassIconButton(
-                            icon = Icons.Default.Cast,
-                            contentDescription = "Cast to Device",
-                            onClick = { showCastDialog = true },
-                            size = 40.dp,
-                            iconSize = 19.dp,
-                            modifier = Modifier.testTag("player_cast_button")
-                        )
-
-                        // Subtitle / CC & Audio Button
-                        Box {
-                            PlayerGlassIconButton(
-                                icon = Icons.Default.Subtitles,
-                                contentDescription = "Subtitles and Audio",
-                                onClick = { showAudioSubtitleDialog = true },
-                                size = 40.dp,
-                                iconSize = 19.dp,
-                                isHighlighted = !selectedSubtitleTrack.isOff,
-                                modifier = Modifier.testTag("player_subtitles_button")
-                            )
-                            if (!selectedSubtitleTrack.isOff) {
                                 Box(
                                     modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(3.dp)
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(KrasRedBright)
+                                        .width(1.dp)
+                                        .height(22.dp)
+                                        .background(Color.White.copy(alpha = 0.22f))
                                 )
+
+                                Column(
+                                    modifier = Modifier.weight(1f, fill = false),
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Text(
+                                        text = episode?.title ?: mediaItem.name,
+                                        color = Color.White,
+                                        fontSize = 15.sp,
+                                        fontFamily = OutfitFontFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Spacer(modifier = Modifier.height(2.dp))
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        if (episode != null) {
+                                            Text(
+                                                text = "S${episode.seasonNumber}:E${episode.episodeNum}",
+                                                color = KrasRedBright,
+                                                fontSize = 10.sp,
+                                                fontFamily = OutfitFontFamily,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+
+                                        ResolutionBadge(
+                                            resolution = effectiveQualityString,
+                                            isLive = mediaItem.type == MediaType.LIVE,
+                                            maxExtraTags = 2
+                                        )
+
+                                        if (realResolutionOverlay.isNotBlank()) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(4.dp))
+                                                    .background(Color.White.copy(alpha = 0.14f))
+                                                    .border(0.5.dp, Color.White.copy(alpha = 0.28f), RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 5.dp, vertical = 1.5.dp)
+                                                    .testTag("player_real_resolution_overlay")
+                                            ) {
+                                                Text(
+                                                    text = realResolutionOverlay,
+                                                    color = Color.White,
+                                                    fontSize = 9.sp,
+                                                    fontFamily = OutfitFontFamily,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f).widthIn(min = 6.dp))
                         }
 
-                        // Screen Rotation Button (Manual Portrait & Landscape Switching inside player)
-                        PlayerGlassIconButton(
-                            icon = Icons.Default.ScreenRotation,
-                            contentDescription = "Screen Rotation",
-                            onClick = { showRotationDialog = true },
-                            size = 40.dp,
-                            iconSize = 19.dp,
-                            isHighlighted = showRotationDialog || (isFullscreen && fullscreenOrientation == FullscreenOrientation.PORTRAIT),
-                            modifier = Modifier.testTag("player_rotation_button")
-                        )
-
-                        // Fullscreen / Exit Fullscreen Button
-                        // - Tapping Fullscreen immediately enters Landscape Fullscreen by default.
-                        // - Tapping Exit Fullscreen restores the original application orientation and layout.
-                        PlayerGlassIconButton(
-                            icon = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                            contentDescription = if (isFullscreen) "Exit Fullscreen" else "Fullscreen",
-                            onClick = {
-                                orientationTransitionTick++
-                                if (isFullscreen) {
-                                    isFullscreen = false
-                                    fullscreenOrientation = FullscreenOrientation.LANDSCAPE
-                                    PlayerImmersiveHelper.exitFullscreenAndRestoreOrientation(activity)
-                                } else {
-                                    isFullscreen = true
-                                    fullscreenOrientation = FullscreenOrientation.LANDSCAPE
-                                    orientationFeedbackText = FullscreenOrientation.LANDSCAPE.label
-                                    PlayerImmersiveHelper.enterFullscreenLandscape(activity)
+                        // Right Side: Aspect Ratio (Fit/Fill/Zoom) | Cast | Subtitles / CC | Screen Rotation | Fullscreen
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(rightSpacing)
+                        ) {
+                            // Aspect Ratio Cycle Chip (Fit -> Fill -> Zoom)
+                            Box(
+                                modifier = Modifier
+                                    .height(fitChipHeight)
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(Color(0x9912141E))
+                                    .border(1.dp, Color.White.copy(alpha = 0.24f), RoundedCornerShape(18.dp))
+                                    .liquidPressClickable {
+                                        currentAspectRatio = when (currentAspectRatio) {
+                                            AspectRatioMode.FIT -> AspectRatioMode.FILL
+                                            AspectRatioMode.FILL -> AspectRatioMode.ZOOM
+                                            AspectRatioMode.ZOOM -> AspectRatioMode.FIT
+                                            else -> AspectRatioMode.FIT
+                                        }
+                                    }
+                                    .padding(horizontal = fitChipHorizontalPadding)
+                                    .testTag("player_aspect_ratio_button"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AspectRatio,
+                                        contentDescription = "Aspect Ratio",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(fitIconSize)
+                                    )
+                                    Text(
+                                        text = if (isFullscreen && fullscreenOrientation == FullscreenOrientation.PORTRAIT) {
+                                            "FIT"
+                                        } else {
+                                            currentAspectRatio.label.uppercase()
+                                        },
+                                        color = Color.White,
+                                        fontSize = fitFontSize,
+                                        fontFamily = OutfitFontFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
                                 }
-                            },
-                            size = 40.dp,
-                            iconSize = 21.dp,
-                            modifier = Modifier.testTag("player_fullscreen_button")
-                        )
+                            }
+
+                            // Cast Button
+                            PlayerGlassIconButton(
+                                icon = Icons.Default.Cast,
+                                contentDescription = "Cast to Device",
+                                onClick = { showCastDialog = true },
+                                size = rightBtnSize,
+                                iconSize = rightIconSize,
+                                modifier = Modifier.testTag("player_cast_button")
+                            )
+
+                            // Subtitle / CC & Audio Button
+                            Box {
+                                PlayerGlassIconButton(
+                                    icon = Icons.Default.Subtitles,
+                                    contentDescription = "Subtitles and Audio",
+                                    onClick = { showAudioSubtitleDialog = true },
+                                    size = rightBtnSize,
+                                    iconSize = rightIconSize,
+                                    isHighlighted = !selectedSubtitleTrack.isOff,
+                                    modifier = Modifier.testTag("player_subtitles_button")
+                                )
+                                if (!selectedSubtitleTrack.isOff) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(3.dp)
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(KrasRedBright)
+                                    )
+                                }
+                            }
+
+                            // Screen Rotation Button (Manual Portrait & Landscape Switching inside player)
+                            PlayerGlassIconButton(
+                                icon = Icons.Default.ScreenRotation,
+                                contentDescription = "Screen Rotation",
+                                onClick = { showRotationDialog = true },
+                                size = rightBtnSize,
+                                iconSize = rightIconSize,
+                                isHighlighted = showRotationDialog || (isFullscreen && fullscreenOrientation == FullscreenOrientation.PORTRAIT),
+                                modifier = Modifier.testTag("player_rotation_button")
+                            )
+
+                            // Fullscreen / Exit Fullscreen Button
+                            // - Tapping Fullscreen immediately enters Landscape Fullscreen by default.
+                            // - Tapping Exit Fullscreen restores the original application orientation and layout.
+                            PlayerGlassIconButton(
+                                icon = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                contentDescription = if (isFullscreen) "Exit Fullscreen" else "Fullscreen",
+                                onClick = {
+                                    orientationTransitionTick++
+                                    if (isFullscreen) {
+                                        isFullscreen = false
+                                        fullscreenOrientation = FullscreenOrientation.LANDSCAPE
+                                        PlayerImmersiveHelper.exitFullscreenAndRestoreOrientation(activity)
+                                    } else {
+                                        isFullscreen = true
+                                        fullscreenOrientation = FullscreenOrientation.LANDSCAPE
+                                        orientationFeedbackText = FullscreenOrientation.LANDSCAPE.label
+                                        PlayerImmersiveHelper.enterFullscreenLandscape(activity)
+                                    }
+                                },
+                                size = rightBtnSize,
+                                iconSize = fullscreenIconSize,
+                                modifier = Modifier.testTag("player_fullscreen_button")
+                            )
+                        }
                     }
                 }
 

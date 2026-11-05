@@ -64,7 +64,9 @@ fun KrasLogo(
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
-        modifier = modifier.testTag("kras_tv_logo")
+        modifier = modifier
+            .width(IntrinsicSize.Max)
+            .testTag("kras_tv_logo")
     ) {
         // 1. THE 3D GLOSSY RED CRYSTAL & METALLIC SILVER 'K'
         Box(
@@ -88,6 +90,7 @@ fun KrasLogo(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
+                    .width(IntrinsicSize.Max)
                     .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
                     .drawWithContent {
                         drawContent()
@@ -133,7 +136,10 @@ fun KrasLogo(
             }
         } else {
             // Static crisp mode (used in Home header, Login, Video Player, etc.)
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.width(IntrinsicSize.Max)
+            ) {
                 KrasLogoText(text = "RAS", height = height)
                 Spacer(modifier = Modifier.width(spacerWord))
                 KrasLogoText(text = "TV", height = height)
@@ -226,6 +232,8 @@ private fun KrasLogoText(
         // 1. 3D Extruded Bevel Depth Layer
         Text(
             text = text,
+            maxLines = 1,
+            softWrap = false,
             style = TextStyle(
                 brush = extrusionBrush,
                 fontSize = fontSize,
@@ -240,6 +248,8 @@ private fun KrasLogoText(
         // 2. Main Glossy Red Crystal Body + Metallic Silver Specular Reflections (clipped to glyph)
         Text(
             text = text,
+            maxLines = 1,
+            softWrap = false,
             style = TextStyle(
                 brush = crystalRedBrush,
                 fontSize = fontSize,
@@ -336,6 +346,8 @@ private fun KrasLogoLetter(
         // 1. 3D Extruded Bevel Depth Layer
         Text(
             text = char.toString(),
+            maxLines = 1,
+            softWrap = false,
             style = TextStyle(
                 brush = extrusionBrush,
                 fontSize = fontSize,
@@ -350,6 +362,8 @@ private fun KrasLogoLetter(
         // 2. Main Glossy Red Crystal Body + Metallic Silver Specular Reflections (clipped to glyph)
         Text(
             text = char.toString(),
+            maxLines = 1,
+            softWrap = false,
             style = TextStyle(
                 brush = crystalRedBrush,
                 fontSize = fontSize,
