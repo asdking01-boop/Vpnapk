@@ -11,8 +11,18 @@ enum class CardStyle {
     POSTER, WIDE, COMPACT, BILLBOARD
 }
 
-enum class AspectRatioMode {
-    FIT, FILL, STRETCH, RATIO_16_9, RATIO_4_3
+enum class AspectRatioMode(val label: String) {
+    FIT("Fit"),
+    FILL("Fill"),
+    ZOOM("Zoom"),
+    STRETCH("Stretch"),
+    RATIO_16_9("16:9"),
+    RATIO_4_3("4:3")
+}
+
+enum class FullscreenOrientation(val label: String, val shortLabel: String) {
+    LANDSCAPE("Landscape – Horizontal Fullscreen", "Landscape"),
+    PORTRAIT("Portrait – Vertical Fullscreen", "Portrait")
 }
 
 enum class DownloadStatus {

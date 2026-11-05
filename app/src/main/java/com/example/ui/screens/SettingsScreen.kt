@@ -466,7 +466,11 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        listOf(AspectRatioMode.FIT to "Fit", AspectRatioMode.FILL to "Fill", AspectRatioMode.STRETCH to "Stretch").forEach { (mode, label) ->
+                        listOf(
+                            AspectRatioMode.FIT to "Fit",
+                            AspectRatioMode.FILL to "Fill",
+                            AspectRatioMode.ZOOM to "Zoom"
+                        ).forEach { (mode, label) ->
                             val isSel = userSettings.defaultAspectRatio == mode
                             Box(
                                 modifier = Modifier

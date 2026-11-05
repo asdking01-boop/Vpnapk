@@ -78,8 +78,12 @@ import com.example.player.ExoPlayerWrapper
 import com.example.player.PlayerUiState
 import com.example.player.VideoQualityVariant
 import com.example.player.PlayerImmersiveHelper
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.saveable.rememberSaveable
 import com.example.ui.components.KrasLogo
+import com.example.ui.components.OrientationTransitionBadge
 import com.example.ui.components.ResolutionBadge
+import com.example.ui.components.ScreenRotationSelectorOverlay
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.components.liquidPressClickable
 import com.example.ui.theme.*
@@ -110,31 +114,55 @@ fun PlayerScreen(
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val repository = remember { KrasRepository(context) }
 
+    var isFullscreen by rememberSaveable { mutableStateOf(true) }
+    var fullscreenOrientation by rememberSaveable { mutableStateOf(FullscreenOrientation.LANDSCAPE) }
+    var showRotationDialog by remember { mutableStateOf(false) }
+    var orientationFeedbackText by remember { mutableStateOf<String?>(null) }
+    var orientationTransitionTick by remember { mutableIntStateOf(0) }
+
+    // Default Fullscreen Behavior: Landscape is always the default orientation when entering fullscreen
+    DisposableEffect(isFullscreen, fullscreenOrientation) {
+        if (isFullscreen) {
+            PlayerImmersiveHelper.setFullscreenOrientation(activity, fullscreenOrientation)
+        } else {
+            PlayerImmersiveHelper.exitFullscreenAndRestoreOrientation(activity)
+        }
+        onDispose { }
+    }
+
     // Immersive Fullscreen & Do Not Disturb management while playing
     DisposableEffect(Unit) {
-        PlayerImmersiveHelper.enterImmersiveMode(activity)
+        PlayerImmersiveHelper.enterFullscreenLandscape(activity)
         if (userSettings.silenceNotificationsWhileWatching) {
             PlayerImmersiveHelper.enableDndIfAllowed(context, repository)
         }
         onDispose {
-            PlayerImmersiveHelper.exitImmersiveMode(activity)
+            PlayerImmersiveHelper.exitFullscreenAndRestoreOrientation(activity)
             if (userSettings.silenceNotificationsWhileWatching) {
                 PlayerImmersiveHelper.restoreDnd(context, repository)
             }
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
-    // Re-apply immersive fullscreen on Window Focus change
-    DisposableEffect(view) {
+    // Re-apply immersive fullscreen on Window Focus change when in fullscreen mode
+    DisposableEffect(view, isFullscreen) {
         val listener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
-            if (hasFocus) {
+            if (hasFocus && isFullscreen) {
                 PlayerImmersiveHelper.enterImmersiveMode(activity)
             }
         }
         view.viewTreeObserver.addOnWindowFocusChangeListener(listener)
         onDispose {
             view.viewTreeObserver.removeOnWindowFocusChangeListener(listener)
+        }
+    }
+
+    BackHandler(enabled = true) {
+        if (showRotationDialog) {
+            showRotationDialog = false
+        } else {
+            PlayerImmersiveHelper.exitFullscreenAndRestoreOrientation(activity)
+            onClose()
         }
     }
 
@@ -196,7 +224,27 @@ fun PlayerScreen(
     var controlsVisible by remember { mutableStateOf(true) }
     var currentAspectRatio by remember { mutableStateOf(userSettings.defaultAspectRatio) }
     var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
-    var isFullscreenLandscape by remember { mutableStateOf(isLandscape) }
+
+    LaunchedEffect(orientationFeedbackText) {
+        if (orientationFeedbackText != null) {
+            delay(1100)
+            orientationFeedbackText = null
+        }
+    }
+
+    var animatedOrientationScale by remember { mutableFloatStateOf(1.0f) }
+    val smoothOrientationScale by animateFloatAsState(
+        targetValue = animatedOrientationScale,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "player_orientation_scale"
+    )
+    LaunchedEffect(orientationTransitionTick) {
+        if (orientationTransitionTick > 0) {
+            animatedOrientationScale = 0.965f
+            delay(90)
+            animatedOrientationScale = 1.0f
+        }
+    }
 
     // Delayed small red spinner: only shown if preparation takes > 600ms (or mid-stream buffering > 350ms),
     // and removed immediately when the first video frame is rendered.
@@ -274,7 +322,7 @@ fun PlayerScreen(
     var showPlaylistDialog by remember { mutableStateOf(false) }
     var showCastDialog by remember { mutableStateOf(false) }
 
-    val anyModalOpen = showSpeedDialog || showQualityDialog || showAudioSubtitleDialog || showPlaylistDialog || showCastDialog
+    val anyModalOpen = showSpeedDialog || showQualityDialog || showAudioSubtitleDialog || showPlaylistDialog || showCastDialog || showRotationDialog
 
     // Auto-hide controls after 3.5 seconds of inactivity while video is actively playing
     LaunchedEffect(controlsVisible, playerUiState, isPlaying, isScrubbing, anyModalOpen) {
@@ -325,41 +373,62 @@ fun PlayerScreen(
             .testTag("player_screen")
     ) {
         // 1. Video Surface (Media3 PlayerView connected via MediaController / single ExoPlayer)
+        // Portrait Fullscreen: preserve original video aspect ratio (RESIZE_MODE_FIT) with black letterboxing
+        // Landscape Fullscreen: support Fit, Fill, and Zoom
+        val isPortraitFullscreen = isFullscreen && fullscreenOrientation == FullscreenOrientation.PORTRAIT
+        val effectiveResizeMode = if (!isFullscreen || isPortraitFullscreen) {
+            AspectRatioFrameLayout.RESIZE_MODE_FIT
+        } else {
+            when (currentAspectRatio) {
+                AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                AspectRatioMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                AspectRatioMode.ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                AspectRatioMode.STRETCH -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                AspectRatioMode.RATIO_16_9 -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                AspectRatioMode.RATIO_4_3 -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+            }
+        }
+
         val boundPlayer = mediaController ?: playerWrapper.getPlayer()
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = boundPlayer
-                    useController = false
-                    setShutterBackgroundColor(android.graphics.Color.BLACK)
-                    setKeepContentOnPlayerReset(true)
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    resizeMode = when (currentAspectRatio) {
-                        AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        AspectRatioMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                        AspectRatioMode.STRETCH -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                        AspectRatioMode.RATIO_16_9 -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        AspectRatioMode.RATIO_4_3 -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .graphicsLayer {
+                    scaleX = smoothOrientationScale
+                    scaleY = smoothOrientationScale
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = boundPlayer
+                        useController = false
+                        setShutterBackgroundColor(android.graphics.Color.BLACK)
+                        setKeepContentOnPlayerReset(true)
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        resizeMode = effectiveResizeMode
                     }
+                },
+                update = { playerView ->
+                    if (playerView.player !== boundPlayer) {
+                        playerView.player = boundPlayer
+                    }
+                    playerView.resizeMode = effectiveResizeMode
+                },
+                modifier = if (isFullscreen) {
+                    Modifier.fillMaxSize()
+                } else {
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
                 }
-            },
-            update = { playerView ->
-                if (playerView.player !== boundPlayer) {
-                    playerView.player = boundPlayer
-                }
-                playerView.resizeMode = when (currentAspectRatio) {
-                    AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    AspectRatioMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                    AspectRatioMode.STRETCH -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                    AspectRatioMode.RATIO_16_9 -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    AspectRatioMode.RATIO_4_3 -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        )
+            )
+        }
 
         // Pure black video surface before the first frame is rendered, with subtle fade-out on first frame
         if (firstFrameShutterAlpha > 0.001f) {
@@ -589,12 +658,12 @@ fun PlayerScreen(
 
                     Spacer(modifier = Modifier.width(10.dp))
 
-                    // Right Side: Cast | Subtitles / CC | Aspect Ratio | Fullscreen
+                    // Right Side: Aspect Ratio (Fit/Fill/Zoom) | Cast | Subtitles / CC | Screen Rotation | Fullscreen
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // Aspect Ratio Cycle Chip (compact glass pill)
+                        // Aspect Ratio Cycle Chip (Fit -> Fill -> Zoom)
                         Box(
                             modifier = Modifier
                                 .height(36.dp)
@@ -604,8 +673,8 @@ fun PlayerScreen(
                                 .liquidPressClickable {
                                     currentAspectRatio = when (currentAspectRatio) {
                                         AspectRatioMode.FIT -> AspectRatioMode.FILL
-                                        AspectRatioMode.FILL -> AspectRatioMode.STRETCH
-                                        AspectRatioMode.STRETCH -> AspectRatioMode.FIT
+                                        AspectRatioMode.FILL -> AspectRatioMode.ZOOM
+                                        AspectRatioMode.ZOOM -> AspectRatioMode.FIT
                                         else -> AspectRatioMode.FIT
                                     }
                                 }
@@ -624,7 +693,11 @@ fun PlayerScreen(
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Text(
-                                    text = currentAspectRatio.name,
+                                    text = if (isFullscreen && fullscreenOrientation == FullscreenOrientation.PORTRAIT) {
+                                        "FIT"
+                                    } else {
+                                        currentAspectRatio.label.uppercase()
+                                    },
                                     color = Color.White,
                                     fontSize = 10.sp,
                                     fontFamily = OutfitFontFamily,
@@ -666,18 +739,35 @@ fun PlayerScreen(
                             }
                         }
 
-                        // Fullscreen / Orientation Toggle Button
+                        // Screen Rotation Button (Manual Portrait & Landscape Switching inside player)
                         PlayerGlassIconButton(
-                            icon = if (isFullscreenLandscape) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                            contentDescription = "Toggle Fullscreen",
+                            icon = Icons.Default.ScreenRotation,
+                            contentDescription = "Screen Rotation",
+                            onClick = { showRotationDialog = true },
+                            size = 40.dp,
+                            iconSize = 19.dp,
+                            isHighlighted = showRotationDialog || (isFullscreen && fullscreenOrientation == FullscreenOrientation.PORTRAIT),
+                            modifier = Modifier.testTag("player_rotation_button")
+                        )
+
+                        // Fullscreen / Exit Fullscreen Button
+                        // - Tapping Fullscreen immediately enters Landscape Fullscreen by default.
+                        // - Tapping Exit Fullscreen restores the original application orientation and layout.
+                        PlayerGlassIconButton(
+                            icon = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                            contentDescription = if (isFullscreen) "Exit Fullscreen" else "Fullscreen",
                             onClick = {
-                                isFullscreenLandscape = !isFullscreenLandscape
-                                activity?.requestedOrientation = if (isFullscreenLandscape) {
-                                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                orientationTransitionTick++
+                                if (isFullscreen) {
+                                    isFullscreen = false
+                                    fullscreenOrientation = FullscreenOrientation.LANDSCAPE
+                                    PlayerImmersiveHelper.exitFullscreenAndRestoreOrientation(activity)
                                 } else {
-                                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                                    isFullscreen = true
+                                    fullscreenOrientation = FullscreenOrientation.LANDSCAPE
+                                    orientationFeedbackText = FullscreenOrientation.LANDSCAPE.label
+                                    PlayerImmersiveHelper.enterFullscreenLandscape(activity)
                                 }
-                                PlayerImmersiveHelper.enterImmersiveMode(activity)
                             },
                             size = 40.dp,
                             iconSize = 21.dp,
@@ -1067,6 +1157,29 @@ fun PlayerScreen(
                 }
             }
         }
+
+        // Subtle Orientation Switch Feedback Badge
+        OrientationTransitionBadge(
+            text = orientationFeedbackText,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 68.dp)
+        )
+
+        // Screen Rotation Selector Overlay (Landscape – Horizontal Fullscreen / Portrait – Vertical Fullscreen)
+        ScreenRotationSelectorOverlay(
+            visible = showRotationDialog,
+            selectedOrientation = fullscreenOrientation,
+            onSelectOrientation = { chosenOrientation ->
+                isFullscreen = true
+                fullscreenOrientation = chosenOrientation
+                orientationTransitionTick++
+                orientationFeedbackText = chosenOrientation.label
+                PlayerImmersiveHelper.setFullscreenOrientation(activity, chosenOrientation)
+            },
+            onDismiss = { showRotationDialog = false }
+        )
     }
 
     // =========================================================================

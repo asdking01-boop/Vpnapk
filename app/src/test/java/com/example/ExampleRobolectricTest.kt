@@ -904,7 +904,64 @@ class ExampleRobolectricTest {
     assertFalse(viewModel.isLiveMiniPlayerActive.value)
     viewModel.playerWrapper.release()
   }
+
+  @Test
+  fun `smart fullscreen defaults to landscape switches between portrait and landscape in fullscreen and restores orientation on exit`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val viewModel = com.example.viewmodel.KrasViewModel(app)
+    val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).create().get()
+
+    val channel = com.example.data.model.MediaItem(
+      id = "live_fs_1", streamId = 701, name = "Cinema Action HD", type = MediaType.LIVE,
+      categoryId = "live_movies", streamUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    )
+    viewModel.selectLiveChannel(channel)
+    val initialPlayer = viewModel.playerWrapper.getPlayer()
+    assertNotNull(initialPlayer)
+
+    // 1. Default Fullscreen Behavior -> Landscape Fullscreen automatically
+    viewModel.setLiveFullscreen(true)
+    val enteredOrientation = com.example.player.PlayerImmersiveHelper.enterFullscreenLandscape(activity)
+    assertTrue(viewModel.isLiveFullscreen.value)
+    assertEquals(com.example.data.model.FullscreenOrientation.LANDSCAPE, viewModel.liveFullscreenOrientation.value)
+    assertEquals(com.example.data.model.FullscreenOrientation.LANDSCAPE, enteredOrientation)
+    assertEquals(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE, activity.requestedOrientation)
+    assertSame(initialPlayer, viewModel.playerWrapper.getPlayer())
+
+    // 2. Manual Portrait & Landscape Switching -> stays in fullscreen without recreating player
+    viewModel.setLiveFullscreenOrientation(com.example.data.model.FullscreenOrientation.PORTRAIT)
+    com.example.player.PlayerImmersiveHelper.setFullscreenOrientation(
+      activity,
+      com.example.data.model.FullscreenOrientation.PORTRAIT
+    )
+    assertTrue(viewModel.isLiveFullscreen.value)
+    assertEquals(com.example.data.model.FullscreenOrientation.PORTRAIT, viewModel.liveFullscreenOrientation.value)
+    assertEquals(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, activity.requestedOrientation)
+    assertSame(initialPlayer, viewModel.playerWrapper.getPlayer())
+
+    // Switch back to Landscape – Horizontal Fullscreen inside player
+    viewModel.setLiveFullscreenOrientation(com.example.data.model.FullscreenOrientation.LANDSCAPE)
+    com.example.player.PlayerImmersiveHelper.setFullscreenOrientation(
+      activity,
+      com.example.data.model.FullscreenOrientation.LANDSCAPE
+    )
+    assertTrue(viewModel.isLiveFullscreen.value)
+    assertEquals(com.example.data.model.FullscreenOrientation.LANDSCAPE, viewModel.liveFullscreenOrientation.value)
+    assertEquals(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE, activity.requestedOrientation)
+    assertSame(initialPlayer, viewModel.playerWrapper.getPlayer())
+
+    // 3. Exit Fullscreen -> restores previous layout & keeps active channel playing
+    viewModel.setLiveFullscreen(false)
+    com.example.player.PlayerImmersiveHelper.exitFullscreenAndRestoreOrientation(activity)
+    assertFalse(viewModel.isLiveFullscreen.value)
+    assertEquals("live_fs_1", viewModel.activeLiveChannel.value?.id)
+    assertSame(initialPlayer, viewModel.playerWrapper.getPlayer())
+
+    viewModel.stopLiveChannelPlayback()
+    viewModel.playerWrapper.release()
+  }
 }
+
 
 
 

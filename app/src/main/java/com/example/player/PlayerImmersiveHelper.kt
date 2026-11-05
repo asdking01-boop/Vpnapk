@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.os.Build
 import android.provider.Settings
 import android.view.WindowManager
@@ -11,8 +12,107 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.example.data.local.KrasRepository
+import com.example.data.model.FullscreenOrientation
 
 object PlayerImmersiveHelper {
+
+    private var savedPreFullscreenOrientation: Int = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    private var hasSavedPreFullscreenOrientation: Boolean = false
+    private var currentFullscreenOrientation: FullscreenOrientation = FullscreenOrientation.LANDSCAPE
+
+    /**
+     * Returns the last applied fullscreen orientation (defaults to LANDSCAPE).
+     */
+    fun getCurrentFullscreenOrientation(): FullscreenOrientation = currentFullscreenOrientation
+
+    /**
+     * Enters Fullscreen mode with Landscape as the mandatory default orientation.
+     * - Saves the original application orientation so it can be restored when exiting fullscreen.
+     * - Immediately switches to Landscape orientation (`SCREEN_ORIENTATION_SENSOR_LANDSCAPE`).
+     * - Expands the video into edge-to-edge immersive fullscreen and hides system bars.
+     */
+    fun enterFullscreenLandscape(activity: Activity?): FullscreenOrientation {
+        if (activity != null && !hasSavedPreFullscreenOrientation) {
+            savedPreFullscreenOrientation = activity.requestedOrientation
+            hasSavedPreFullscreenOrientation = true
+        }
+        currentFullscreenOrientation = FullscreenOrientation.LANDSCAPE
+        enterImmersiveMode(activity)
+        applyRequestedOrientationSafely(activity, ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE)
+        return FullscreenOrientation.LANDSCAPE
+    }
+
+    /**
+     * Switches between Landscape (Horizontal Fullscreen) and Portrait (Vertical Fullscreen)
+     * directly inside the player without leaving fullscreen or interrupting playback.
+     */
+    fun setFullscreenOrientation(
+        activity: Activity?,
+        orientation: FullscreenOrientation
+    ): FullscreenOrientation {
+        if (activity != null && !hasSavedPreFullscreenOrientation) {
+            savedPreFullscreenOrientation = activity.requestedOrientation
+            hasSavedPreFullscreenOrientation = true
+        }
+        currentFullscreenOrientation = orientation
+        enterImmersiveMode(activity)
+        val targetActivityOrientation = when (orientation) {
+            FullscreenOrientation.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            FullscreenOrientation.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+        applyRequestedOrientationSafely(activity, targetActivityOrientation)
+        return orientation
+    }
+
+    /**
+     * Exits fullscreen, restores the original application orientation, and restores system bars
+     * while keeping video playback running without interruption.
+     */
+    fun exitFullscreenAndRestoreOrientation(activity: Activity?) {
+        currentFullscreenOrientation = FullscreenOrientation.LANDSCAPE
+        exitImmersiveMode(activity)
+        if (activity != null) {
+            val targetRestore = if (hasSavedPreFullscreenOrientation) {
+                savedPreFullscreenOrientation
+            } else {
+                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            }
+            hasSavedPreFullscreenOrientation = false
+            savedPreFullscreenOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+
+            try {
+                // First return to Portrait if we were locked in Landscape so the app layout
+                // immediately restores to vertical Portrait, then unlock to targetRestore if UNSPECIFIED.
+                if (targetRestore == ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) {
+                    applyRequestedOrientationSafely(activity, ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+                    activity.window?.decorView?.postDelayed({
+                        if (!hasSavedPreFullscreenOrientation) {
+                            applyRequestedOrientationSafely(activity, ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED)
+                        }
+                    }, 350L)
+                } else {
+                    applyRequestedOrientationSafely(activity, targetRestore)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    /**
+     * Applies `requestedOrientation` only when it differs from the current setting to prevent
+     * orientation loops and unnecessary configuration churn on Samsung One UI devices.
+     */
+    private fun applyRequestedOrientationSafely(activity: Activity?, targetOrientation: Int) {
+        if (activity == null) return
+        try {
+            if (activity.requestedOrientation != targetOrientation) {
+                activity.requestedOrientation = targetOrientation
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
 
     /**
      * Hides system status bar and navigation bar completely.

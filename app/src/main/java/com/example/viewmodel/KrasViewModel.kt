@@ -146,6 +146,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLiveFullscreen = MutableStateFlow(false)
     val isLiveFullscreen = _isLiveFullscreen.asStateFlow()
 
+    private val _liveFullscreenOrientation = MutableStateFlow(FullscreenOrientation.LANDSCAPE)
+    val liveFullscreenOrientation = _liveFullscreenOrientation.asStateFlow()
+
     private val _isLiveMiniPlayerActive = MutableStateFlow(false)
     val isLiveMiniPlayerActive = _isLiveMiniPlayerActive.asStateFlow()
 
@@ -1138,17 +1141,34 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         selectLiveChannel(list[targetIdx], _isLiveFullscreen.value)
     }
 
-    fun setLiveFullscreen(fullscreen: Boolean) {
+    fun setLiveFullscreen(
+        fullscreen: Boolean,
+        orientation: FullscreenOrientation = FullscreenOrientation.LANDSCAPE
+    ) {
         _isLiveFullscreen.value = fullscreen
         if (fullscreen) {
+            _liveFullscreenOrientation.value = orientation
             _isLiveMiniPlayerActive.value = false
+        } else {
+            _liveFullscreenOrientation.value = FullscreenOrientation.LANDSCAPE
         }
+    }
+
+    /**
+     * Switches Live TV between Landscape (Horizontal Fullscreen) and Portrait (Vertical Fullscreen)
+     * directly inside the player without leaving fullscreen or interrupting playback.
+     */
+    fun setLiveFullscreenOrientation(orientation: FullscreenOrientation) {
+        _isLiveFullscreen.value = true
+        _liveFullscreenOrientation.value = orientation
+        _isLiveMiniPlayerActive.value = false
     }
 
     fun setLiveMiniPlayer(active: Boolean) {
         _isLiveMiniPlayerActive.value = active && _activeLiveChannel.value != null
         if (active) {
             _isLiveFullscreen.value = false
+            _liveFullscreenOrientation.value = FullscreenOrientation.LANDSCAPE
         }
     }
 
@@ -1171,6 +1191,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         playerWrapper.stop()
         _activeLiveChannel.value = null
         _isLiveFullscreen.value = false
+        _liveFullscreenOrientation.value = FullscreenOrientation.LANDSCAPE
         _isLiveMiniPlayerActive.value = false
     }
 

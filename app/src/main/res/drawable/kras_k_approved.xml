@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Approved 3D Folded-Ribbon Letter 'K' for Launcher Foreground -->
+    <!-- 1. Left Vertical Pillar (Dark Obsidian Body + Glowing Red Rim) -->
+    <path android:pathData="M34,18 L45,18 L45,64 L25,90 L25,27 C25,21.5 29.0,18 34,18 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="25"
+                android:startY="18"
+                android:endX="45"
+                android:endY="82"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#2E2E36" />
+                <item android:offset="0.32" android:color="#191920" />
+                <item android:offset="0.68" android:color="#0B0B0F" />
+                <item android:offset="1.0" android:color="#050507" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <path
+        android:pathData="M25.8,88 L25.8,27 C25.8,22.0 29.5,18.6 34,18.6 L44.8,18.6"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="25"
+                android:startY="18"
+                android:endX="25"
+                android:endY="88"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFFF6B74" />
+                <item android:offset="0.25" android:color="#FFFF1E27" />
+                <item android:offset="0.65" android:color="#FFE50914" />
+                <item android:offset="1.0" android:color="#FFFF3842" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 2. Lower-Right Leg (Emerges from behind the ribbon down to bottom-right) -->
+    <path android:pathData="M49,52.5 L59,41 L84,90 L67,90 C62.5,90 59.5,87.5 57.2,83.2 L44.5,60 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="47"
+                android:startY="43"
+                android:endX="81"
+                android:endY="90"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#140103" />
+                <item android:offset="0.22" android:color="#380206" />
+                <item android:offset="0.48" android:color="#D40812" />
+                <item android:offset="0.72" android:color="#FF1E27" />
+                <item android:offset="1.0" android:color="#7A0309" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Deep Cast Shadow on Lower-Right Leg under the Ribbon Overlap -->
+    <path android:pathData="M44.5,60 L59,41 L64.2,51 L50.2,69 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="50"
+                android:startY="46"
+                android:endX="60"
+                android:endY="62"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#EE080102" />
+                <item android:offset="0.55" android:color="#AA1C0204" />
+                <item android:offset="1.0" android:color="#00590206" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 3. Sweeping Foreground 3D Crimson Ribbon (Bottom-Left to Top-Right) -->
+    <path android:pathData="M25,90 C25,75.5 32.2,59 46.8,43 L64,24 C68.4,19.6 73,18 78.6,18 L84,18 L57.5,48 C46.5,60.4 39.8,73 35.8,84.4 C34.4,88.4 31.8,90 27.8,90 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="25"
+                android:startY="90"
+                android:endX="84"
+                android:endY="18"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF2A34" />
+                <item android:offset="0.18" android:color="#8F030A" />
+                <item android:offset="0.45" android:color="#D80711" />
+                <item android:offset="0.78" android:color="#FF1822" />
+                <item android:offset="1.0" android:color="#FF4D58" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <path
+        android:pathData="M25.5,89.6 C25.5,75.5 32.6,59 47,43 L64.2,24 C68.4,19.6 73,18.4 78.6,18.4 L83.5,18.4"
+        android:strokeWidth="1.35"
+        android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="25.5"
+                android:startY="89.6"
+                android:endX="83.5"
+                android:endY="18.4"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFFF858D" />
+                <item android:offset="0.25" android:color="#CCFF2A34" />
+                <item android:offset="0.65" android:color="#EEFF4D58" />
+                <item android:offset="1.0" android:color="#FFFFB8BE" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

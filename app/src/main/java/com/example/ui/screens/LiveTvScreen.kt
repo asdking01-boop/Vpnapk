@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
@@ -72,6 +73,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -95,6 +97,7 @@ import com.example.data.local.ChannelNameNormalizer
 import com.example.data.local.QualityDetector
 import com.example.data.model.AspectRatioMode
 import com.example.data.model.Category
+import com.example.data.model.FullscreenOrientation
 import com.example.data.model.LiveChannelOrder
 import com.example.data.model.MediaItem
 import com.example.player.ExoPlayerWrapper
@@ -104,7 +107,9 @@ import com.example.player.PlayerUiState
 import com.example.player.VideoQualityVariant
 import com.example.ui.components.DynamicAmbientPosterBackdrop
 import com.example.ui.components.LiquidGlassChip
+import com.example.ui.components.OrientationTransitionBadge
 import com.example.ui.components.ResolutionBadge
+import com.example.ui.components.ScreenRotationSelectorOverlay
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.components.liquidPressClickable
 import com.example.ui.theme.*
@@ -186,6 +191,8 @@ fun LiveTvScreen(
     playerWrapper: ExoPlayerWrapper? = null,
     isFullscreen: Boolean = false,
     onToggleFullscreen: (Boolean) -> Unit = {},
+    fullscreenOrientation: FullscreenOrientation = FullscreenOrientation.LANDSCAPE,
+    onSelectFullscreenOrientation: (FullscreenOrientation) -> Unit = {},
     onRetryPlayback: () -> Unit = {},
     onStopPlayback: () -> Unit = {},
     defaultAspectRatio: AspectRatioMode = AspectRatioMode.FIT,
@@ -209,6 +216,9 @@ fun LiveTvScreen(
     var isFullscreenDrawerOpen by rememberSaveable { mutableStateOf(false) }
     var drawerSearchQuery by rememberSaveable { mutableStateOf("") }
     var localSwipeGestures by rememberSaveable(swipeGesturesEnabled) { mutableStateOf(swipeGesturesEnabled) }
+    var localFullscreenOrientation by rememberSaveable(fullscreenOrientation) {
+        mutableStateOf(fullscreenOrientation)
+    }
 
     // Persistent LazyListState preserved across channel switches and fullscreen transitions
     val listState = rememberLazyListState()
@@ -225,30 +235,57 @@ fun LiveTvScreen(
         false
     }
 
-    // Landscape or explicit Fullscreen triggers edge-to-edge immersive mode
+    // Fullscreen layout stays active in both Landscape Fullscreen and Portrait Fullscreen
     val useImmersiveFullscreenLayout = isFullscreen || isLandscape
 
-    // Manage immersive system bars when Live TV player is in fullscreen or landscape
-    DisposableEffect(useImmersiveFullscreenLayout) {
+    val enterLandscapeFullscreen: () -> Unit = {
+        localFullscreenOrientation = FullscreenOrientation.LANDSCAPE
+        onSelectFullscreenOrientation(FullscreenOrientation.LANDSCAPE)
+        onToggleFullscreen(true)
+        PlayerImmersiveHelper.enterFullscreenLandscape(activity)
+    }
+
+    val exitFullscreenAndRestore: () -> Unit = {
+        isFullscreenDrawerOpen = false
+        localFullscreenOrientation = FullscreenOrientation.LANDSCAPE
+        onToggleFullscreen(false)
+        PlayerImmersiveHelper.exitFullscreenAndRestoreOrientation(activity)
+    }
+
+    val switchOrientationInFullscreen: (FullscreenOrientation) -> Unit = { targetOrientation ->
+        localFullscreenOrientation = targetOrientation
+        onSelectFullscreenOrientation(targetOrientation)
+        if (!isFullscreen) {
+            onToggleFullscreen(true)
+        }
+        PlayerImmersiveHelper.setFullscreenOrientation(activity, targetOrientation)
+    }
+
+    // Manage immersive system bars & requested orientation when Live TV player is in fullscreen
+    DisposableEffect(useImmersiveFullscreenLayout, localFullscreenOrientation) {
         if (activity != null) {
             if (useImmersiveFullscreenLayout) {
-                PlayerImmersiveHelper.enterImmersiveMode(activity)
+                PlayerImmersiveHelper.setFullscreenOrientation(activity, localFullscreenOrientation)
             } else {
                 PlayerImmersiveHelper.exitImmersiveMode(activity)
             }
         }
+        onDispose { }
+    }
+
+    DisposableEffect(Unit) {
         onDispose {
             if (useImmersiveFullscreenLayout && activity != null) {
-                PlayerImmersiveHelper.exitImmersiveMode(activity)
+                PlayerImmersiveHelper.exitFullscreenAndRestoreOrientation(activity)
             }
         }
     }
 
     // BackHandler in fullscreen or drawer mode
-    BackHandler(enabled = isFullscreen || isFullscreenDrawerOpen) {
+    BackHandler(enabled = useImmersiveFullscreenLayout || isFullscreenDrawerOpen) {
         when {
             isFullscreenDrawerOpen -> isFullscreenDrawerOpen = false
-            isFullscreen -> onToggleFullscreen(false)
+            useImmersiveFullscreenLayout -> exitFullscreenAndRestore()
         }
     }
 
@@ -396,6 +433,8 @@ fun LiveTvScreen(
                     activeChannel = currentPlayingChannel,
                     playerWrapper = playerWrapper,
                     isFullscreen = true,
+                    fullscreenOrientation = localFullscreenOrientation,
+                    onSelectFullscreenOrientation = switchOrientationInFullscreen,
                     isInPipMode = isInPipMode,
                     isFavorite = currentPlayingChannel?.let { isFavorite(it.id) } ?: false,
                     onToggleFavorite = {
@@ -404,8 +443,7 @@ fun LiveTvScreen(
                     },
                     onToggleFullscreen = {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        isFullscreenDrawerOpen = false
-                        onToggleFullscreen(!isFullscreen)
+                        exitFullscreenAndRestore()
                     },
                     onOpenChannelDrawer = {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -489,6 +527,8 @@ fun LiveTvScreen(
                             activeChannel = currentPlayingChannel,
                             playerWrapper = playerWrapper,
                             isFullscreen = false,
+                            fullscreenOrientation = localFullscreenOrientation,
+                            onSelectFullscreenOrientation = switchOrientationInFullscreen,
                             isInPipMode = false,
                             isFavorite = currentPlayingChannel?.let { isFavorite(it.id) } ?: false,
                             onToggleFavorite = {
@@ -497,7 +537,7 @@ fun LiveTvScreen(
                             },
                             onToggleFullscreen = {
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onToggleFullscreen(true)
+                                enterLandscapeFullscreen()
                             },
                             onOpenChannelDrawer = {
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -544,7 +584,7 @@ fun LiveTvScreen(
                             activeChannel = currentPlayingChannel,
                             pulseAlpha = pulseAlpha,
                             onOpenDrawer = { isFullscreenDrawerOpen = true },
-                            onExpandFullscreen = { onToggleFullscreen(true) }
+                            onExpandFullscreen = { enterLandscapeFullscreen() }
                         )
                     } else if (lastWatchedChannel != null) {
                         LastWatchedChannelBanner(
@@ -1479,6 +1519,8 @@ private fun EmbeddedLiveVideoPlayer(
     activeChannel: MediaItem?,
     playerWrapper: ExoPlayerWrapper?,
     isFullscreen: Boolean,
+    fullscreenOrientation: FullscreenOrientation,
+    onSelectFullscreenOrientation: (FullscreenOrientation) -> Unit,
     isInPipMode: Boolean,
     isFavorite: Boolean,
     onToggleFavorite: () -> Unit,
@@ -1502,6 +1544,9 @@ private fun EmbeddedLiveVideoPlayer(
     var showOverlayControls by remember { mutableStateOf(false) }
     var controlInteractionTick by remember { mutableIntStateOf(0) }
     var showSettingsSheet by remember { mutableStateOf(false) }
+    var showRotationSheet by remember { mutableStateOf(false) }
+    var orientationFeedbackText by remember { mutableStateOf<String?>(null) }
+    var orientationTransitionTick by remember { mutableIntStateOf(0) }
     var aspectMode by remember(defaultAspectRatio) { mutableStateOf(defaultAspectRatio) }
     var isMuted by remember { mutableStateOf(false) }
     var swipeIndicatorText by remember { mutableStateOf<String?>(null) }
@@ -1598,9 +1643,37 @@ private fun EmbeddedLiveVideoPlayer(
         }
     }
 
+    // Clear orientation feedback pill after 1100ms
+    LaunchedEffect(orientationFeedbackText) {
+        if (orientationFeedbackText != null) {
+            delay(1100)
+            orientationFeedbackText = null
+        }
+    }
+
+    // Subtle animated transition when switching between Landscape and Portrait Fullscreen
+    val surfaceTransitionScale by animateFloatAsState(
+        targetValue = 1.0f,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "live_surface_rotation_scale"
+    )
+    var animatedOrientationScale by remember { mutableFloatStateOf(1.0f) }
+    val smoothOrientationScale by animateFloatAsState(
+        targetValue = animatedOrientationScale,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "smooth_orientation_scale"
+    )
+    LaunchedEffect(orientationTransitionTick) {
+        if (orientationTransitionTick > 0) {
+            animatedOrientationScale = 0.965f
+            delay(90)
+            animatedOrientationScale = 1.0f
+        }
+    }
+
     // Automatically hide floating controls after ~3 seconds (3000ms) of inactivity
-    LaunchedEffect(showOverlayControls, controlInteractionTick, isPlaying, activeChannel?.id, showSettingsSheet) {
-        if (showOverlayControls && !showSettingsSheet && activeChannel != null && uiState != PlayerUiState.ERROR) {
+    LaunchedEffect(showOverlayControls, controlInteractionTick, isPlaying, activeChannel?.id, showSettingsSheet, showRotationSheet) {
+        if (showOverlayControls && !showSettingsSheet && !showRotationSheet && activeChannel != null && uiState != PlayerUiState.ERROR) {
             delay(3000)
             showOverlayControls = false
         }
@@ -1754,45 +1827,60 @@ private fun EmbeddedLiveVideoPlayer(
             }
         } else {
             // Media3 Player Surface connected to KrasMediaPlaybackService via MediaController (or single ExoPlayer)
+            // In Portrait Fullscreen: preserve original video aspect ratio (RESIZE_MODE_FIT) with black letterboxing
+            // In Landscape Fullscreen: support Fit, Fill, Zoom, 16:9, and 4:3
+            val isPortraitFullscreen = isFullscreen && fullscreenOrientation == FullscreenOrientation.PORTRAIT
+            val effectiveResizeMode = if (isPortraitFullscreen) {
+                AspectRatioFrameLayout.RESIZE_MODE_FIT
+            } else {
+                when (aspectMode) {
+                    AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    AspectRatioMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                    AspectRatioMode.ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    AspectRatioMode.STRETCH -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                    AspectRatioMode.RATIO_16_9 -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH
+                    AspectRatioMode.RATIO_4_3 -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_HEIGHT
+                }
+            }
+
             val boundPlayer = mediaController ?: playerWrapper?.getPlayer()
             if (boundPlayer != null) {
-                AndroidView(
-                    factory = { ctx ->
-                        PlayerView(ctx).apply {
-                            player = boundPlayer
-                            useController = false
-                            keepScreenOn = true
-                            // Keep current video frame visible during channel switches until next stream renders
-                            setKeepContentOnPlayerReset(true)
-                            setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-                            resizeMode = when (aspectMode) {
-                                AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                                AspectRatioMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                                AspectRatioMode.STRETCH -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                                AspectRatioMode.RATIO_16_9 -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH
-                                AspectRatioMode.RATIO_4_3 -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_HEIGHT
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                        .graphicsLayer {
+                            scaleX = smoothOrientationScale * surfaceTransitionScale
+                            scaleY = smoothOrientationScale * surfaceTransitionScale
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            PlayerView(ctx).apply {
+                                player = boundPlayer
+                                useController = false
+                                keepScreenOn = true
+                                // Keep current video frame visible during channel switches until next stream renders
+                                setKeepContentOnPlayerReset(true)
+                                setShutterBackgroundColor(android.graphics.Color.BLACK)
+                                resizeMode = effectiveResizeMode
+                                layoutParams = FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT
+                                )
                             }
-                            layoutParams = FrameLayout.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
-                        }
-                    },
-                    update = { view ->
-                        if (view.player !== boundPlayer) {
-                            view.player = boundPlayer
-                        }
-                        view.setKeepContentOnPlayerReset(true)
-                        view.resizeMode = when (aspectMode) {
-                            AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT
-                            AspectRatioMode.FILL -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                            AspectRatioMode.STRETCH -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-                            AspectRatioMode.RATIO_16_9 -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_WIDTH
-                            AspectRatioMode.RATIO_4_3 -> AspectRatioFrameLayout.RESIZE_MODE_FIXED_HEIGHT
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
+                        },
+                        update = { view ->
+                            if (view.player !== boundPlayer) {
+                                view.player = boundPlayer
+                            }
+                            view.setKeepContentOnPlayerReset(true)
+                            view.resizeMode = effectiveResizeMode
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
 
             // Pure black cover ONLY before the very first frame of the session has rendered
@@ -2291,7 +2379,35 @@ private fun EmbeddedLiveVideoPlayer(
                             )
                         }
 
-                        // 6. Fullscreen Toggle Button
+                        // 6. Screen Rotation Button (Choose Landscape or Portrait Fullscreen inside player)
+                        IconButton(
+                            onClick = {
+                                bumpInteraction()
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                showRotationSheet = true
+                            },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (showRotationSheet) KrasRed.copy(alpha = 0.35f)
+                                    else Color.White.copy(alpha = 0.07f)
+                                )
+                                .testTag("live_rotation_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ScreenRotation,
+                                contentDescription = "Screen Rotation",
+                                tint = if (isFullscreen && fullscreenOrientation == FullscreenOrientation.PORTRAIT) {
+                                    KrasRedBright
+                                } else {
+                                    Color.White
+                                },
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+
+                        // 7. Fullscreen Toggle Button (Default -> Landscape Fullscreen; Exit -> Restore layout)
                         IconButton(
                             onClick = {
                                 bumpInteraction()
@@ -2313,6 +2429,27 @@ private fun EmbeddedLiveVideoPlayer(
                     }
                 }
             }
+
+            // Orientation Switch Feedback Pill
+            OrientationTransitionBadge(
+                text = orientationFeedbackText,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 64.dp)
+            )
+
+            // Floating Screen Rotation Selector Overlay (Landscape – Horizontal Fullscreen / Portrait – Vertical Fullscreen)
+            ScreenRotationSelectorOverlay(
+                visible = showRotationSheet,
+                selectedOrientation = fullscreenOrientation,
+                onSelectOrientation = { chosenOrientation ->
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    orientationTransitionTick++
+                    orientationFeedbackText = chosenOrientation.label
+                    onSelectFullscreenOrientation(chosenOrientation)
+                },
+                onDismiss = { showRotationSheet = false }
+            )
 
             // Floating Frosted-Glass Live Player Settings Sheet (Aspect Ratio, Quality, Audio, Subtitles, Gestures)
             AnimatedVisibility(
@@ -2463,7 +2600,8 @@ private fun LivePlayerSettingsOverlay(
                     val selected = aspectMode == mode
                     val modeLabel = when (mode) {
                         AspectRatioMode.FIT -> "Fit"
-                        AspectRatioMode.FILL -> "Fill (Crop)"
+                        AspectRatioMode.FILL -> "Fill"
+                        AspectRatioMode.ZOOM -> "Zoom"
                         AspectRatioMode.STRETCH -> "Stretch"
                         AspectRatioMode.RATIO_16_9 -> "16:9"
                         AspectRatioMode.RATIO_4_3 -> "4:3"

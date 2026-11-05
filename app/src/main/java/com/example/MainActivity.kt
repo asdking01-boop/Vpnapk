@@ -126,6 +126,7 @@ class MainActivity : ComponentActivity() {
                 val liveCategories by viewModel.liveCategories.collectAsState()
                 val activeLiveChannel by viewModel.activeLiveChannel.collectAsState()
                 val isLiveFullscreen by viewModel.isLiveFullscreen.collectAsState()
+                val liveFullscreenOrientation by viewModel.liveFullscreenOrientation.collectAsState()
                 val isLiveMiniPlayerActive by viewModel.isLiveMiniPlayerActive.collectAsState()
                 val recentLiveChannels by viewModel.recentLiveChannels.collectAsState()
                 val lastWatchedLiveChannel by viewModel.lastWatchedLiveChannel.collectAsState()
@@ -507,6 +508,10 @@ class MainActivity : ComponentActivity() {
                                         playerWrapper = viewModel.playerWrapper,
                                         isFullscreen = isLiveFullscreen,
                                         onToggleFullscreen = { fullscreen -> viewModel.setLiveFullscreen(fullscreen) },
+                                        fullscreenOrientation = liveFullscreenOrientation,
+                                        onSelectFullscreenOrientation = { orientation ->
+                                            viewModel.setLiveFullscreenOrientation(orientation)
+                                        },
                                         onRetryPlayback = { viewModel.retryLiveChannel() },
                                         onStopPlayback = { viewModel.stopLiveChannelPlayback() },
                                         defaultAspectRatio = userSettings.defaultAspectRatio,

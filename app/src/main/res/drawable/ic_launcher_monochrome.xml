@@ -4,17 +4,23 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Monochrome layer for Android 13+ themed icons -->
-    <!-- Vertical stem -->
+    <!--
+        Monochrome icon variant for Android 13+ / Samsung One UI themed icons.
+        Uses the exact 3-piece folded-ribbon K silhouette with crisp separation gaps
+        so the folded ribbon geometry remains clearly recognizable in single-color mode.
+    -->
+    <!-- 1. Left Vertical Pillar (with rounded top-left corner, separated from the diagonal ribbon) -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M38,27 L40,27 C43.3,27 46,29.7 46,33 L46,75 C46,78.3 43.3,81 40,81 L38,81 C34.7,81 32,78.3 32,75 L32,33 C32,29.7 34.7,27 38,27 Z" />
-    <!-- Upper diagonal arm -->
+        android:pathData="M39,28 L46.5,28 L46.5,44.5 C40.2,51.8 35.2,60.2 32.5,69.5 L32.5,34.5 C32.5,30.6 35.3,28 39,28 Z" />
+
+    <!-- 2. Sweeping Foreground Folded Ribbon (Bottom-Left to Top-Right) -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M42,50 L65,28 C67.5,25.5 71.5,25.5 74,28 C76.5,30.5 76.5,34.5 74,37 L53,58 Z" />
-    <!-- Lower diagonal arm -->
+        android:pathData="M32.5,80 C32.5,69.2 38.0,57.2 48.8,45.5 L61.5,32.2 C64.8,29.0 68.2,28 72.5,28 L76.5,28 L56.5,50.0 C48.4,59.0 43.4,68.0 40.4,76.2 C39.3,79.0 37.5,80 34.5,80 Z" />
+
+    <!-- 3. Lower-Right Leg (Separated below the diagonal ribbon by a crisp 2.2dp gap) -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M46,46 L69,72 C71.5,74.8 71.2,79 68.3,81.4 C65.6,83.7 61.5,83.4 59,80.5 L38,56 Z" />
+        android:pathData="M59.2,50.8 L76.5,80 L63.8,80 C60.6,80 58.4,78.4 56.6,75.4 L49.8,63.2 L59.2,50.8 Z" />
 </vector>
