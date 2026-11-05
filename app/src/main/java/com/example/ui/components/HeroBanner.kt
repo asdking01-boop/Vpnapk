@@ -1,22 +1,32 @@
 package com.example.ui.components
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -35,6 +45,246 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.data.model.MediaItem
 import com.example.ui.theme.*
+import kotlin.math.abs
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
+
+internal const val HERO_INFINITE_MULTIPLIER = 2000
+
+/**
+ * Maps any virtual pager page index to the valid [0, itemCount - 1] candidate index,
+ * supporting seamless infinite left/right looping.
+ */
+internal fun resolveHeroCarouselIndex(virtualPage: Int, itemCount: Int): Int {
+    if (itemCount <= 0) return 0
+    return ((virtualPage % itemCount) + itemCount) % itemCount
+}
+
+/**
+ * Computes theInitial virtual page positioned near the center of the virtual range
+ * and aligned to [initialIndex] modulo [itemCount] so users can swipe left or right infinitely.
+ */
+internal fun computeInitialVirtualPage(itemCount: Int, initialIndex: Int = 0): Int {
+    if (itemCount <= 1) return 0
+    val totalVirtualPages = itemCount * HERO_INFINITE_MULTIPLIER
+    val midpoint = totalVirtualPages / 2
+    val alignedBase = midpoint - (midpoint % itemCount)
+    val safeInitial = ((initialIndex % itemCount) + itemCount) % itemCount
+    return alignedBase + safeInitial
+}
+
+/**
+ * Computes the nearest virtual page matching [targetIndex] relative to [currentVirtualPage]
+ * so tapping a pagination dot animates smoothly across the shortest path.
+ */
+internal fun computeTargetVirtualPage(
+    currentVirtualPage: Int,
+    targetIndex: Int,
+    itemCount: Int
+): Int {
+    if (itemCount <= 1) return 0
+    val currentActual = resolveHeroCarouselIndex(currentVirtualPage, itemCount)
+    val normalizedTarget = ((targetIndex % itemCount) + itemCount) % itemCount
+    val diff = normalizedTarget - currentActual
+    return currentVirtualPage + diff
+}
+
+/**
+ * Interactive Netflix-inspired Hero Banner Carousel with:
+ * - Smooth horizontal touch swipe gestures (LTR and RTL aware) directly across the poster & card
+ * - Infinite bidirectional looping across all featured movies and series
+ * - Synchronized, tappable pagination dots at top-center
+ * - Zero gesture conflict with vertical Home screen scrolling (LazyColumn)
+ * - Drag-state guard preventing accidental opening of movies/series while swiping
+ */
+@Composable
+fun HeroBannerCarousel(
+    items: List<MediaItem>,
+    currentIndex: Int,
+    onCurrentIndexChange: (Int) -> Unit,
+    onPlayClick: (MediaItem) -> Unit,
+    onInfoClick: (MediaItem) -> Unit,
+    isFavorite: (String) -> Boolean,
+    onToggleFavorite: (MediaItem) -> Unit,
+    onSearchClick: () -> Unit,
+    onAccountClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    scrollOffset: Float = 0f,
+    autoAdvanceIntervalMs: Long = 11_000L
+) {
+    if (items.isEmpty()) return
+
+    val itemCount = items.size
+    val isLooping = itemCount > 1
+    val totalVirtualPages = if (isLooping) itemCount * HERO_INFINITE_MULTIPLIER else 1
+    val initialVirtualPage = computeInitialVirtualPage(itemCount, currentIndex)
+
+    val pagerState = rememberPagerState(
+        initialPage = initialVirtualPage,
+        pageCount = { totalVirtualPages }
+    )
+    val coroutineScope = rememberCoroutineScope()
+
+    // Keep external currentIndex synchronized whenever the settled or current page changes
+    LaunchedEffect(pagerState, itemCount) {
+        snapshotFlow { resolveHeroCarouselIndex(pagerState.currentPage, itemCount) }
+            .distinctUntilChanged()
+            .collect { actualIdx ->
+                onCurrentIndexChange(actualIdx)
+            }
+    }
+
+    // If external currentIndex is updated programmatically (e.g., outside the pager), sync pager
+    LaunchedEffect(currentIndex, itemCount) {
+        if (itemCount > 1 && !pagerState.isScrollInProgress) {
+            val activeActual = resolveHeroCarouselIndex(pagerState.currentPage, itemCount)
+            val normalizedTarget = resolveHeroCarouselIndex(currentIndex, itemCount)
+            if (activeActual != normalizedTarget) {
+                val targetVirtual = computeTargetVirtualPage(
+                    currentVirtualPage = pagerState.currentPage,
+                    targetIndex = normalizedTarget,
+                    itemCount = itemCount
+                )
+                pagerState.animateScrollToPage(
+                    page = targetVirtual,
+                    animationSpec = tween(durationMillis = 420, easing = FastOutSlowInEasing)
+                )
+            }
+        }
+    }
+
+    // Auto-advance timer that pauses while the user is touching/dragging the banner
+    LaunchedEffect(itemCount, pagerState.settledPage, pagerState.isScrollInProgress) {
+        if (itemCount > 1 && !pagerState.isScrollInProgress && autoAdvanceIntervalMs > 0L) {
+            delay(autoAdvanceIntervalMs)
+            if (!pagerState.isScrollInProgress) {
+                pagerState.animateScrollToPage(
+                    page = pagerState.currentPage + 1,
+                    animationSpec = tween(durationMillis = 520, easing = FastOutSlowInEasing)
+                )
+            }
+        }
+    }
+
+    val activeSlideIndex = resolveHeroCarouselIndex(pagerState.currentPage, itemCount)
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(500.dp)
+            .clip(RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp))
+            .testTag("hero_banner")
+    ) {
+        // 1. Horizontal Swipeable Pager for Featured Movies & Series
+        HorizontalPager(
+            state = pagerState,
+            userScrollEnabled = isLooping,
+            flingBehavior = PagerDefaults.flingBehavior(
+                state = pagerState,
+                snapAnimationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow
+                )
+            ),
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("hero_banner_pager")
+        ) { virtualPage ->
+            val candidateIndex = resolveHeroCarouselIndex(virtualPage, itemCount)
+            val slideItem = items[candidateIndex]
+            val pageOffset = (
+                (pagerState.currentPage - virtualPage) + pagerState.currentPageOffsetFraction
+            ).coerceIn(-1f, 1f)
+            val isCurrentPage = virtualPage == pagerState.currentPage
+
+            HeroBannerSlideContent(
+                item = slideItem,
+                onPlayClick = {
+                    if (!pagerState.isScrollInProgress) {
+                        onPlayClick(slideItem)
+                    }
+                },
+                onInfoClick = {
+                    if (!pagerState.isScrollInProgress) {
+                        onInfoClick(slideItem)
+                    }
+                },
+                isFavorite = isFavorite(slideItem.id),
+                onToggleFavorite = {
+                    if (!pagerState.isScrollInProgress) {
+                        onToggleFavorite(slideItem)
+                    }
+                },
+                scrollOffset = scrollOffset,
+                pageOffset = pageOffset,
+                includeActionTestTags = isCurrentPage
+            )
+        }
+
+        // 2. Stationary Top Navigation Header with Kras TV Brand Wordmark & Liquid Glass Action Capsules
+        HeroBannerTopHeader(
+            onSearchClick = onSearchClick,
+            onAccountClick = onAccountClick
+        )
+
+        // 3. Synchronized & Tappable Carousel Indicator Dots (top-center below header)
+        if (itemCount > 1) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 56.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.Black.copy(alpha = 0.38f))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .testTag("hero_pagination_dots"),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                items.forEachIndexed { idx, _ ->
+                    val isCurrent = idx == activeSlideIndex
+                    val dotWidth by animateDpAsState(
+                        targetValue = if (isCurrent) 18.dp else 5.dp,
+                        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                        label = "hero_dot_width"
+                    )
+                    val dotColor by animateColorAsState(
+                        targetValue = if (isCurrent) KrasRedBright else Color.White.copy(alpha = 0.35f),
+                        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                        label = "hero_dot_color"
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .height(5.dp)
+                            .width(dotWidth)
+                            .clip(CircleShape)
+                            .background(dotColor)
+                            .clickable {
+                                val targetPage = computeTargetVirtualPage(
+                                    currentVirtualPage = pagerState.currentPage,
+                                    targetIndex = idx,
+                                    itemCount = itemCount
+                                )
+                                onCurrentIndexChange(idx)
+                                coroutineScope.launch {
+                                    pagerState.animateScrollToPage(
+                                        page = targetPage,
+                                        animationSpec = tween(
+                                            durationMillis = 420,
+                                            easing = FastOutSlowInEasing
+                                        )
+                                    )
+                                }
+                            }
+                            .testTag("hero_pagination_dot_$idx")
+                    )
+                }
+            }
+        }
+    }
+}
 
 @Composable
 fun HeroBanner(
@@ -47,6 +297,109 @@ fun HeroBanner(
     onAccountClick: () -> Unit,
     modifier: Modifier = Modifier,
     scrollOffset: Float = 0f
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(500.dp)
+            .clip(RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp))
+            .testTag("hero_banner")
+    ) {
+        HeroBannerSlideContent(
+            item = item,
+            onPlayClick = onPlayClick,
+            onInfoClick = onInfoClick,
+            isFavorite = isFavorite,
+            onToggleFavorite = onToggleFavorite,
+            scrollOffset = scrollOffset,
+            pageOffset = 0f,
+            includeActionTestTags = true
+        )
+
+        HeroBannerTopHeader(
+            onSearchClick = onSearchClick,
+            onAccountClick = onAccountClick
+        )
+    }
+}
+
+@Composable
+private fun HeroBannerTopHeader(
+    onSearchClick: () -> Unit,
+    onAccountClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 18.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        KrasLogo(
+            height = 30.dp,
+            modifier = Modifier.testTag("hero_brand_logo")
+        )
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .liquidGlassPanel(
+                        cornerRadius = 21.dp,
+                        surfaceAlpha = 0.65f,
+                        borderAlpha = 0.6f
+                    )
+                    .clickable(onClick = onSearchClick)
+                    .testTag("hero_search_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Search,
+                    contentDescription = "Search",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.linearGradient(
+                            colors = listOf(KrasRedBright, KrasRedDark)
+                        )
+                    )
+                    .border(1.dp, Color.White.copy(alpha = 0.4f), CircleShape)
+                    .clickable(onClick = onAccountClick)
+                    .testTag("hero_account_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AccountCircle,
+                    contentDescription = "Account Switcher",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeroBannerSlideContent(
+    item: MediaItem,
+    onPlayClick: () -> Unit,
+    onInfoClick: () -> Unit,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
+    scrollOffset: Float,
+    pageOffset: Float,
+    includeActionTestTags: Boolean
 ) {
     // Slow, battery-friendly 18-second Ken Burns zoom & gentle pan (GPU graphicsLayer only)
     val kenBurnsTransition = rememberInfiniteTransition(label = "hero_ken_burns")
@@ -70,13 +423,14 @@ fun HeroBanner(
     )
 
     val bgUrl = item.backdrop.ifBlank { item.streamIcon }.takeIf { it.isNotBlank() }
+    val absPageOffset = abs(pageOffset).coerceIn(0f, 1f)
 
     Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(500.dp)
-            .clip(RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp))
-            .testTag("hero_banner")
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                alpha = 1f - (absPageOffset * 0.18f)
+            }
     ) {
         // 1. Ambient blurred poster glow underneath
         if (bgUrl != null) {
@@ -94,7 +448,7 @@ fun HeroBanner(
                     .blur(42.dp)
             )
 
-            // 2. Main Hero Artwork with slow Ken Burns zoom + scroll parallax
+            // 2. Main Hero Artwork with slow Ken Burns zoom + vertical scroll parallax + horizontal swipe depth parallax
             AsyncImage(
                 model = bgUrl,
                 contentDescription = item.name,
@@ -102,9 +456,10 @@ fun HeroBanner(
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
-                        scaleX = kenBurnsScale
-                        scaleY = kenBurnsScale
-                        translationX = kenBurnsPanX
+                        val swipeZoom = 1f + (absPageOffset * 0.04f)
+                        scaleX = kenBurnsScale * swipeZoom
+                        scaleY = kenBurnsScale * swipeZoom
+                        translationX = kenBurnsPanX + (pageOffset * size.width * 0.22f)
                         translationY = scrollOffset * 0.32f
                     }
             )
@@ -151,73 +506,18 @@ fun HeroBanner(
                 }
         )
 
-        // 4. Top Navigation Header with Kras TV Brand Wordmark & Liquid Glass Action Capsules
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 18.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            KrasLogo(
-                height = 30.dp,
-                modifier = Modifier.testTag("hero_brand_logo")
-            )
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .liquidGlassPanel(
-                            cornerRadius = 21.dp,
-                            surfaceAlpha = 0.65f,
-                            borderAlpha = 0.6f
-                        )
-                        .clickable(onClick = onSearchClick)
-                        .testTag("hero_search_button"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = "Search",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(CircleShape)
-                        .background(
-                            Brush.linearGradient(
-                                colors = listOf(KrasRedBright, KrasRedDark)
-                            )
-                        )
-                        .border(1.dp, Color.White.copy(alpha = 0.4f), CircleShape)
-                        .clickable(onClick = onAccountClick)
-                        .testTag("hero_account_button"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AccountCircle,
-                        contentDescription = "Account Switcher",
-                        tint = Color.White,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-            }
-        }
-
-        // 5. Hero Content Info inside a subtle Liquid Glass Showcase Card at Bottom
+        // 4. Hero Content Info inside a subtle Liquid Glass Showcase Card at Bottom
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomStart)
+                .graphicsLayer {
+                    alpha = 1f - (absPageOffset * 0.45f)
+                    translationY = absPageOffset * 18f
+                    val cardScale = 1f - (absPageOffset * 0.03f)
+                    scaleX = cardScale
+                    scaleY = cardScale
+                }
                 .padding(horizontal = 16.dp, vertical = 14.dp)
                 .liquidGlassPanel(
                     cornerRadius = 24.dp,
@@ -342,7 +642,10 @@ fun HeroBanner(
                     modifier = Modifier
                         .weight(1f)
                         .height(46.dp)
-                        .testTag("hero_play_button")
+                        .then(
+                            if (includeActionTestTags) Modifier.testTag("hero_play_button")
+                            else Modifier
+                        )
                 ) {
                     Icon(
                         imageVector = Icons.Default.PlayArrow,
@@ -366,7 +669,7 @@ fun HeroBanner(
                         containerColor = Color.White.copy(alpha = 0.1f),
                         contentColor = Color.White
                     ),
-                    border = ButtonDefaults.outlinedButtonBorder.copy(
+                    border = ButtonDefaults.outlinedButtonBorder(enabled = true).copy(
                         brush = Brush.linearGradient(
                             listOf(
                                 Color.White.copy(alpha = 0.5f),
@@ -377,7 +680,10 @@ fun HeroBanner(
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .height(46.dp)
-                        .testTag("hero_favorite_button")
+                        .then(
+                            if (includeActionTestTags) Modifier.testTag("hero_favorite_button")
+                            else Modifier
+                        )
                 ) {
                     Icon(
                         imageVector = if (isFavorite) Icons.Default.Check else Icons.Default.Add,
@@ -404,7 +710,10 @@ fun HeroBanner(
                             borderAlpha = 0.55f
                         )
                         .clickable(onClick = onInfoClick)
-                        .testTag("hero_info_button"),
+                        .then(
+                            if (includeActionTestTags) Modifier.testTag("hero_info_button")
+                            else Modifier
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(

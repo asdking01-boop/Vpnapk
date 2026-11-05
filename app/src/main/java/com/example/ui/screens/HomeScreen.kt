@@ -31,7 +31,7 @@ import com.example.data.model.FavoriteItem
 import com.example.data.model.MediaItem
 import com.example.data.model.WatchProgress
 import com.example.ui.components.DynamicAmbientPosterBackdrop
-import com.example.ui.components.HeroBanner
+import com.example.ui.components.HeroBannerCarousel
 import com.example.ui.components.HeroBannerSkeleton
 import com.example.ui.components.LiquidGlassChip
 import com.example.ui.components.MediaRow
@@ -39,7 +39,6 @@ import com.example.ui.components.MediaRowSkeleton
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.theme.*
-import kotlinx.coroutines.delay
 
 @Composable
 fun HomeScreen(
@@ -82,17 +81,11 @@ fun HomeScreen(
     }
     var currentHeroIndex by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(heroCandidates.size) {
-        if (heroCandidates.size > 1) {
-            while (true) {
-                delay(11000L)
-                currentHeroIndex = (currentHeroIndex + 1) % heroCandidates.size
-            }
-        }
-    }
-
     val featuredItem = remember(heroCandidates, currentHeroIndex) {
-        heroCandidates.getOrNull(currentHeroIndex) ?: heroCandidates.firstOrNull()
+        if (heroCandidates.isEmpty()) null
+        else heroCandidates[
+            ((currentHeroIndex % heroCandidates.size) + heroCandidates.size) % heroCandidates.size
+        ]
     }
 
     val continueWatchingItems = remember(watchHistory, movies, series) {
@@ -157,51 +150,21 @@ fun HomeScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 110.dp)
             ) {
-                // 1. Full-Screen Cinematic Hero Banner with Ken Burns & Parallax
+                // 1. Full-Screen Cinematic Hero Banner Carousel with Touch Swipe, Infinite Loop, Ken Burns & Parallax
                 item(key = "hero_section") {
-                    if (featuredItem != null) {
-                        Box {
-                            HeroBanner(
-                                item = featuredItem,
-                                onPlayClick = { onMediaClick(featuredItem) },
-                                onInfoClick = { showHeroInfoDialog = featuredItem },
-                                isFavorite = isFavorite(featuredItem.id),
-                                onToggleFavorite = { onToggleFavorite(featuredItem) },
-                                onSearchClick = onSearchClick,
-                                onAccountClick = onAccountClick,
-                                scrollOffset = heroParallaxOffset
-                            )
-
-                            // Carousel Indicator Dots (top-center below header)
-                            if (heroCandidates.size > 1) {
-                                Row(
-                                    modifier = Modifier
-                                        .align(Alignment.TopCenter)
-                                        .statusBarsPadding()
-                                        .padding(top = 56.dp)
-                                        .clip(RoundedCornerShape(50))
-                                        .background(Color.Black.copy(alpha = 0.38f))
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    heroCandidates.forEachIndexed { idx, _ ->
-                                        val isCurrent = idx == (currentHeroIndex % heroCandidates.size)
-                                        Box(
-                                            modifier = Modifier
-                                                .height(5.dp)
-                                                .width(if (isCurrent) 18.dp else 5.dp)
-                                                .clip(CircleShape)
-                                                .background(
-                                                    if (isCurrent) KrasRedBright
-                                                    else Color.White.copy(alpha = 0.35f)
-                                                )
-                                                .clickable { currentHeroIndex = idx }
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                    if (heroCandidates.isNotEmpty()) {
+                        HeroBannerCarousel(
+                            items = heroCandidates,
+                            currentIndex = currentHeroIndex,
+                            onCurrentIndexChange = { currentHeroIndex = it },
+                            onPlayClick = { item -> onMediaClick(item) },
+                            onInfoClick = { item -> showHeroInfoDialog = item },
+                            isFavorite = { id -> isFavorite(id) },
+                            onToggleFavorite = { item -> onToggleFavorite(item) },
+                            onSearchClick = onSearchClick,
+                            onAccountClick = onAccountClick,
+                            scrollOffset = heroParallaxOffset
+                        )
                     }
                 }
 

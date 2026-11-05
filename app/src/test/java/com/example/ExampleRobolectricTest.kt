@@ -960,9 +960,35 @@ class ExampleRobolectricTest {
     viewModel.stopLiveChannelPlayback()
     viewModel.playerWrapper.release()
   }
+
+  @Test
+  fun `hero banner infinite carousel resolves bidirectional swipe indices and dot targets accurately`() {
+    val itemCount = 8
+    val initialVirtual = com.example.ui.components.computeInitialVirtualPage(itemCount, initialIndex = 0)
+
+    // Initial virtual page resolves to index 0 and sits in the middle of the virtual range for bidirectional swiping
+    assertEquals(0, com.example.ui.components.resolveHeroCarouselIndex(initialVirtual, itemCount))
+    assertTrue(initialVirtual > itemCount * 100)
+
+    // Swiping left from index 0 wraps seamlessly to the last item (index 7)
+    assertEquals(7, com.example.ui.components.resolveHeroCarouselIndex(initialVirtual - 1, itemCount))
+
+    // Swiping right through all items wraps seamlessly from index 7 back to index 0
+    for (step in 0 until itemCount * 3) {
+      assertEquals(
+        step % itemCount,
+        com.example.ui.components.resolveHeroCarouselIndex(initialVirtual + step, itemCount)
+      )
+    }
+
+    // Tapping a pagination dot computes the exact virtual page offset matching the dot's target index
+    val targetVirtualForDot5 = com.example.ui.components.computeTargetVirtualPage(
+      currentVirtualPage = initialVirtual + 2,
+      targetIndex = 5,
+      itemCount = itemCount
+    )
+    assertEquals(5, com.example.ui.components.resolveHeroCarouselIndex(targetVirtualForDot5, itemCount))
+    assertEquals(initialVirtual + 5, targetVirtualForDot5)
+  }
 }
-
-
-
-
 
