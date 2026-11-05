@@ -6,212 +6,179 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- 1. 3D Sculpted Extrusion Depth & Metallic Crimson Base (within 32..76.5, 27..81 viewport) -->
-    <group
-        android:translateX="1.1"
-        android:translateY="1.4">
-        <!-- Stem 3D extrusion -->
-        <path android:pathData="M38,27 L40,27 C43.3,27 46,29.7 46,33 L46,75 C46,78.3 43.3,81 40,81 L38,81 C34.7,81 32,78.3 32,75 L32,33 C32,29.7 34.7,27 38,27 Z">
-            <aapt:attr name="android:fillColor">
-                <gradient
-                    android:startX="32"
-                    android:startY="27"
-                    android:endX="46"
-                    android:endY="81"
-                    android:type="linear">
-                    <item android:offset="0.0" android:color="#64748B" />
-                    <item android:offset="0.35" android:color="#4A0206" />
-                    <item android:offset="1.0" android:color="#220103" />
-                </gradient>
-            </aapt:attr>
-        </path>
-        <!-- Upper diagonal 3D extrusion -->
-        <path android:pathData="M42,50 L65,28 C67.5,25.5 71.5,25.5 74,28 C76.5,30.5 76.5,34.5 74,37 L53,58 Z">
-            <aapt:attr name="android:fillColor">
-                <gradient
-                    android:startX="42"
-                    android:startY="28"
-                    android:endX="75"
-                    android:endY="58"
-                    android:type="linear">
-                    <item android:offset="0.0" android:color="#94A3B8" />
-                    <item android:offset="0.4" android:color="#520207" />
-                    <item android:offset="1.0" android:color="#240103" />
-                </gradient>
-            </aapt:attr>
-        </path>
-        <!-- Lower diagonal 3D extrusion -->
-        <path android:pathData="M46,46 L69,72 C71.5,74.8 71.2,79 68.3,81.4 C65.6,83.7 61.5,83.4 59,80.5 L38,56 Z">
-            <aapt:attr name="android:fillColor">
-                <gradient
-                    android:startX="38"
-                    android:startY="46"
-                    android:endX="71"
-                    android:endY="82"
-                    android:type="linear">
-                    <item android:offset="0.0" android:color="#4A0206" />
-                    <item android:offset="0.7" android:color="#2B0104" />
-                    <item android:offset="1.0" android:color="#64748B" />
-                </gradient>
-            </aapt:attr>
-        </path>
-    </group>
+    <!--
+        Approved KRAS TV 3D Folded-Ribbon Letter 'K' (Viewport X: 32..76.5, Y: 27..81)
+        Matches the reference image geometry and lighting:
+        1. Left Vertical Pillar: Rounded top-left corner, dark charcoal/obsidian body (#2A2A30 -> #08080C)
+           with a bright glowing crimson rim along the left and top edges.
+        2. Lower-Right Leg: Emerges from behind the diagonal ribbon with a deep cast shadow (#120103)
+           into a vibrant 3D crimson bevel (#E50914 -> #FF1E27 -> #6E0207).
+        3. Sweeping Foreground 3D Ribbon: Wraps from the bottom-left corner (32,81) in a smooth S-curve
+           up to the sharp top-right point (76.5,27) with sculpted crimson gradients and specular rim light.
+    -->
 
-    <!-- 2. Glossy Red Crystal Main 3D Body (#FF525D -> #E50914 -> #B20710 -> #590206) -->
-    <!-- Vertical rounded crystal stem -->
-    <path android:pathData="M38,27 L40,27 C43.3,27 46,29.7 46,33 L46,75 C46,78.3 43.3,81 40,81 L38,81 C34.7,81 32,78.3 32,75 L32,33 C32,29.7 34.7,27 38,27 Z">
+    <!-- 1. LEFT VERTICAL PILLAR (Dark Obsidian Body + Glowing Red Rim) -->
+    <path android:pathData="M39,27 L47,27 L47,62 L32,81 L32,34 C32,29.8 35.1,27 39,27 Z">
         <aapt:attr name="android:fillColor">
             <gradient
                 android:startX="32"
                 android:startY="27"
-                android:endX="46"
-                android:endY="81"
+                android:endX="47"
+                android:endY="75"
                 android:type="linear">
-                <item android:offset="0.0" android:color="#FF525D" />
-                <item android:offset="0.28" android:color="#E50914" />
-                <item android:offset="0.68" android:color="#B20710" />
-                <item android:offset="1.0" android:color="#5E0206" />
+                <item android:offset="0.0" android:color="#2E2E36" />
+                <item android:offset="0.32" android:color="#191920" />
+                <item android:offset="0.68" android:color="#0B0B0F" />
+                <item android:offset="1.0" android:color="#050507" />
             </gradient>
         </aapt:attr>
     </path>
 
-    <!-- Upper diagonal crystal arm -->
-    <path android:pathData="M42,50 L65,28 C67.5,25.5 71.5,25.5 74,28 C76.5,30.5 76.5,34.5 74,37 L53,58 Z">
+    <!-- Subtle inner shadow on the vertical pillar right above the ribbon intersection -->
+    <path android:pathData="M32,52 L47,36 L47,62 L32,81 Z">
         <aapt:attr name="android:fillColor">
             <gradient
-                android:startX="42"
-                android:startY="27"
-                android:endX="76"
-                android:endY="58"
+                android:startX="39"
+                android:startY="38"
+                android:endX="42"
+                android:endY="66"
                 android:type="linear">
-                <item android:offset="0.0" android:color="#FF5C66" />
-                <item android:offset="0.38" android:color="#E50914" />
-                <item android:offset="0.75" android:color="#A8050D" />
-                <item android:offset="1.0" android:color="#5E0206" />
+                <item android:offset="0.0" android:color="#00000000" />
+                <item android:offset="0.6" android:color="#AA040406" />
+                <item android:offset="1.0" android:color="#EE020203" />
             </gradient>
         </aapt:attr>
     </path>
 
-    <!-- Lower diagonal crystal arm -->
-    <path android:pathData="M46,46 L69,72 C71.5,74.8 71.2,79 68.3,81.4 C65.6,83.7 61.5,83.4 59,80.5 L38,56 Z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:startX="38"
-                android:startY="46"
-                android:endX="71"
-                android:endY="83"
-                android:type="linear">
-                <item android:offset="0.0" android:color="#FF3B46" />
-                <item android:offset="0.35" android:color="#E50914" />
-                <item android:offset="0.72" android:color="#9E040B" />
-                <item android:offset="1.0" android:color="#540205" />
-            </gradient>
-        </aapt:attr>
-    </path>
-
-    <!-- 3. Internal 3D Crystal Facet & Metallic Silver Specular Reflections -->
-    <!-- Stem upper crystal refraction facet -->
-    <path android:pathData="M38,27.5 L40,27.5 C42.8,27.5 45,29.7 45,32.5 L45,49 C40.5,45.5 36.2,47.5 33,50.5 L33,32.5 C33,29.7 35.2,27.5 38,27.5 Z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:startX="33"
-                android:startY="27.5"
-                android:endX="45"
-                android:endY="50"
-                android:type="linear">
-                <item android:offset="0.0" android:color="#88F8FAFC" />
-                <item android:offset="0.45" android:color="#35CBD5E1" />
-                <item android:offset="1.0" android:color="#00FFFFFF" />
-            </gradient>
-        </aapt:attr>
-    </path>
-
-    <!-- Stem left metallic silver edge reflection -->
+    <!-- Left Pillar Glowing Crimson Rim Highlight (Left & Top Edges) -->
     <path
-        android:pathData="M33.6,33.5 C33.6,30.3 36.1,28.3 38.8,28.3 L40,28.3 C36.8,28.3 34.8,30.8 34.8,33.8 L34.8,74.2 C34.8,76.2 35.4,77.5 36.2,78.5 C34.4,77.5 33.6,75.8 33.6,74 Z"
-        android:fillColor="#95E2E8F0" />
-
-    <!-- Upper arm metallic silver & glass bevel reflection -->
-    <path android:pathData="M43.5,48.5 L65.2,28.2 C67.4,26.1 70.9,26.1 73.2,28.2 C71.2,27.2 68.1,27.3 66.1,29.3 L46.2,49.8 Z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:startX="43.5"
-                android:startY="27"
-                android:endX="73.2"
-                android:endY="49.8"
-                android:type="linear">
-                <item android:offset="0.0" android:color="#B0F8FAFC" />
-                <item android:offset="0.6" android:color="#65CBD5E1" />
-                <item android:offset="1.0" android:color="#1594A3B8" />
-            </gradient>
-        </aapt:attr>
-    </path>
-
-    <!-- Lower arm inner crystal ridge highlight -->
-    <path android:pathData="M46.5,47.5 L67.8,71.8 C69.4,73.8 69.6,76.4 68.2,78.5 C68.8,76.2 68.2,73.8 66.4,71.8 L45.2,48.8 Z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:startX="45"
-                android:startY="47.5"
-                android:endX="69"
-                android:endY="78.5"
-                android:type="linear">
-                <item android:offset="0.0" android:color="#75F1F5F9" />
-                <item android:offset="0.7" android:color="#3094A3B8" />
-                <item android:offset="1.0" android:color="#00FFFFFF" />
-            </gradient>
-        </aapt:attr>
-    </path>
-
-    <!-- 4. Precision Metallic Silver & Platinum Rim Strokes -->
-    <path
-        android:pathData="M38,27 L40,27 C43.3,27 46,29.7 46,33 L46,75 C46,78.3 43.3,81 40,81 L38,81 C34.7,81 32,78.3 32,75 L32,33 C32,29.7 34.7,27 38,27 Z"
-        android:strokeWidth="0.9">
+        android:pathData="M32.6,79.5 L32.6,34 C32.6,30.2 35.4,27.5 39,27.5 L47,27.5"
+        android:strokeWidth="1.35"
+        android:strokeLineCap="round">
         <aapt:attr name="android:strokeColor">
             <gradient
                 android:startX="32"
                 android:startY="27"
-                android:endX="46"
+                android:endX="32"
+                android:endY="80"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFFF6B74" />
+                <item android:offset="0.25" android:color="#FFFF1E27" />
+                <item android:offset="0.65" android:color="#FFE50914" />
+                <item android:offset="1.0" android:color="#FFFF3842" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Left Pillar Subtle Right Inner Edge -->
+    <path
+        android:pathData="M46.6,27.2 L46.6,50"
+        android:strokeWidth="0.7"
+        android:strokeColor="#66B20710" />
+
+    <!-- 2. LOWER-RIGHT LEG (Emerges from behind the ribbon down to bottom-right) -->
+    <path android:pathData="M50,53 L57.5,44.5 L76.5,81 L63.5,81 C60.2,81 58.0,79.2 56.2,76.0 L46.5,58.5 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="49"
+                android:startY="46"
+                android:endX="74"
                 android:endY="81"
                 android:type="linear">
-                <item android:offset="0.0" android:color="#D8F8FAFC" />
-                <item android:offset="0.45" android:color="#65CBD5E1" />
-                <item android:offset="0.8" android:color="#35E50914" />
-                <item android:offset="1.0" android:color="#8094A3B8" />
+                <item android:offset="0.0" android:color="#140103" />
+                <item android:offset="0.22" android:color="#380206" />
+                <item android:offset="0.48" android:color="#D40812" />
+                <item android:offset="0.72" android:color="#FF1E27" />
+                <item android:offset="1.0" android:color="#7A0309" />
             </gradient>
         </aapt:attr>
     </path>
 
-    <path
-        android:pathData="M42,50 L65,28 C67.5,25.5 71.5,25.5 74,28 C76.5,30.5 76.5,34.5 74,37 L53,58 Z"
-        android:strokeWidth="0.9">
-        <aapt:attr name="android:strokeColor">
+    <!-- Deep Cast Shadow on Lower-Right Leg under the Ribbon Overlap -->
+    <path android:pathData="M46.5,58.5 L57.5,44.5 L61.5,52.2 L50.8,65.2 Z">
+        <aapt:attr name="android:fillColor">
             <gradient
-                android:startX="42"
-                android:startY="27"
-                android:endX="75"
-                android:endY="58"
+                android:startX="51"
+                android:startY="48"
+                android:endX="58"
+                android:endY="60"
                 android:type="linear">
-                <item android:offset="0.0" android:color="#D0F8FAFC" />
-                <item android:offset="0.5" android:color="#55CBD5E1" />
-                <item android:offset="1.0" android:color="#7594A3B8" />
+                <item android:offset="0.0" android:color="#EE080102" />
+                <item android:offset="0.55" android:color="#AA1C0204" />
+                <item android:offset="1.0" android:color="#00590206" />
             </gradient>
         </aapt:attr>
     </path>
 
+    <!-- Lower-Right Leg Upper Edge Rim Highlight -->
     <path
-        android:pathData="M46,46 L69,72 C71.5,74.8 71.2,79 68.3,81.4 C65.6,83.7 61.5,83.4 59,80.5 L38,56 Z"
-        android:strokeWidth="0.9">
+        android:pathData="M57.5,44.8 L76.2,80.7"
+        android:strokeWidth="0.95">
         <aapt:attr name="android:strokeColor">
             <gradient
-                android:startX="38"
-                android:startY="46"
-                android:endX="71"
-                android:endY="83"
+                android:startX="57.5"
+                android:startY="44.8"
+                android:endX="76.2"
+                android:endY="80.7"
                 android:type="linear">
-                <item android:offset="0.0" android:color="#90E2E8F0" />
-                <item android:offset="0.55" android:color="#3594A3B8" />
-                <item android:offset="1.0" android:color="#85CBD5E1" />
+                <item android:offset="0.0" android:color="#22FF1E27" />
+                <item android:offset="0.45" android:color="#EEFF4D58" />
+                <item android:offset="1.0" android:color="#AAFF1E27" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 3. SWEEPING FOREGROUND 3D CRIMSON RIBBON (Bottom-Left to Top-Right) -->
+    <path android:pathData="M32,81 C32,70 37.5,57.5 48.5,45.5 L61.5,31.5 C64.8,28.2 68.2,27 72.5,27 L76.5,27 L56.5,49.5 C48.2,58.8 43.2,68.2 40.2,76.8 C39.1,79.8 37.2,81 34.2,81 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="32"
+                android:startY="81"
+                android:endX="76.5"
+                android:endY="27"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF2A34" />
+                <item android:offset="0.18" android:color="#8F030A" />
+                <item android:offset="0.45" android:color="#D80711" />
+                <item android:offset="0.78" android:color="#FF1822" />
+                <item android:offset="1.0" android:color="#FF4D58" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Ribbon 3D Upper-Left Specular Bevel Highlight -->
+    <path android:pathData="M32.4,80.5 C32.6,69.8 38.0,57.4 49.0,45.4 L61.8,31.6 C65.0,28.3 68.3,27.3 72.5,27.3 L75.8,27.3 L73.2,30.2 C69.2,30.2 66.2,31.4 63.0,34.6 L50.2,48.2 C39.8,59.4 34.6,70.6 33.6,80.5 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="32.4"
+                android:startY="80.5"
+                android:endX="75.8"
+                android:endY="27.3"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#EEFF7A82" />
+                <item android:offset="0.3" android:color="#88FF3842" />
+                <item android:offset="0.7" android:color="#AAFF525D" />
+                <item android:offset="1.0" android:color="#FFFF949B" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Ribbon Outer Curve Razor-Sharp Specular Rim Stroke -->
+    <path
+        android:pathData="M32.4,80.8 C32.4,70 37.8,57.5 48.6,45.5 L61.6,31.5 C64.8,28.2 68.2,27.3 72.5,27.3 L76.2,27.3"
+        android:strokeWidth="1.05"
+        android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="32.4"
+                android:startY="80.8"
+                android:endX="76.2"
+                android:endY="27.3"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FFFF858D" />
+                <item android:offset="0.25" android:color="#CCFF2A34" />
+                <item android:offset="0.65" android:color="#EEFF4D58" />
+                <item android:offset="1.0" android:color="#FFFFB8BE" />
             </gradient>
         </aapt:attr>
     </path>
