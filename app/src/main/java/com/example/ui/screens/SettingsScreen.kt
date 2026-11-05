@@ -260,6 +260,76 @@ fun SettingsScreen(
                             }
                         }
                     }
+
+                    HorizontalDivider(
+                        color = Color.White.copy(alpha = 0.08f),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+
+                    // Background Playback Setting (Enabled / Disabled)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(
+                                text = "Background Playback",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Continue Live TV audio and show Samsung/Android media notification controls when pressing Home or locking the screen",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = userSettings.backgroundPlayback,
+                            onCheckedChange = { enabled ->
+                                onUpdateSettings(userSettings.copy(backgroundPlayback = enabled))
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = KrasRed,
+                                checkedTrackColor = KrasRedDark
+                            ),
+                            modifier = Modifier.testTag("background_playback_switch")
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(true to "Enabled", false to "Disabled").forEach { (enabledValue, label) ->
+                            val isSelected = userSettings.backgroundPlayback == enabledValue
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isSelected) KrasRed else Color.White.copy(alpha = 0.08f))
+                                    .border(
+                                        width = 1.dp,
+                                        color = if (isSelected) KrasRedBright else GlassBorder,
+                                        shape = RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable {
+                                        onUpdateSettings(userSettings.copy(backgroundPlayback = enabledValue))
+                                    }
+                                    .padding(vertical = 10.dp)
+                                    .testTag("background_playback_${label.lowercase()}"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

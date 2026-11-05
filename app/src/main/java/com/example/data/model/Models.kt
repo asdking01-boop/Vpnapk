@@ -25,6 +25,15 @@ enum class LiveChannelOrder(val label: String) {
     A_TO_Z("A to Z")
 }
 
+enum class MediaSortOrder(val label: String, val shortLabel: String) {
+    RECENTLY_ADDED("Recently Added – Newest First", "Recently Added"),
+    YEAR_NEWEST("Release Year – Newest to Oldest", "Year: Newest"),
+    YEAR_OLDEST("Release Year – Oldest to Newest", "Year: Oldest"),
+    TITLE_AZ("Title – A to Z", "Title: A–Z"),
+    TITLE_ZA("Title – Z to A", "Title: Z–A")
+}
+
+
 data class Account(
     val id: String,
     val name: String,
@@ -170,7 +179,8 @@ data class UserSettings(
     val playIntroSound: Boolean = true,
     val silenceNotificationsWhileWatching: Boolean = false,
     val liveChannelOrder: LiveChannelOrder = LiveChannelOrder.SMART,
-    val autoCheckUpdates: Boolean = true
+    val autoCheckUpdates: Boolean = true,
+    val backgroundPlayback: Boolean = true
 )
 
 // Xtream Codes API DTOs

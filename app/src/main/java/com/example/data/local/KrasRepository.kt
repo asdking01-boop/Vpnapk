@@ -516,6 +516,59 @@ class KrasRepository(context: Context) {
         }
     }
 
+    suspend fun getLatestByCategory(
+        accountId: String,
+        type: String,
+        categoryId: String,
+        limit: Int = 20
+    ): List<MediaItem> = withContext(Dispatchers.IO) {
+        try {
+            val rawEntities = mediaDao.getLatestByCategory(accountId, type, categoryId, limit * 2)
+            val seenIds = HashSet<String>()
+            val seenStreamIds = HashSet<Int>()
+            val seenTitles = HashSet<String>()
+            val deduplicated = ArrayList<MediaItem>(limit)
+            for (entity in rawEntities) {
+                val item = entity.toMediaItem()
+                if (!seenIds.add(item.id)) continue
+                if (item.streamId > 0 && !seenStreamIds.add(item.streamId)) continue
+                val titleKey = "${item.categoryId}_${item.name.trim().lowercase()}"
+                if (!seenTitles.add(titleKey)) continue
+                deduplicated.add(item)
+                if (deduplicated.size >= limit) break
+            }
+            deduplicated
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    suspend fun getLatestForAllCategories(
+        accountId: String,
+        type: String,
+        categories: List<Category>,
+        limitPerCategory: Int = 20
+    ): Map<String, List<MediaItem>> = withContext(Dispatchers.IO) {
+        val result = LinkedHashMap<String, List<MediaItem>>()
+        result["all"] = getLatestByCategory(accountId, type, "all", limitPerCategory)
+        for (cat in categories) {
+            result[cat.categoryId] = getLatestByCategory(accountId, type, cat.categoryId, limitPerCategory)
+        }
+        result
+    }
+
+    suspend fun getAvailableYears(
+        accountId: String,
+        type: String,
+        categoryId: String = "all"
+    ): List<String> = withContext(Dispatchers.IO) {
+        try {
+            mediaDao.getAvailableYears(accountId, type, categoryId)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
     suspend fun queryMediaPaged(
         accountId: String,
         type: String,
@@ -527,7 +580,8 @@ class KrasRepository(context: Context) {
         offset: Int,
         liveChannelOrder: LiveChannelOrder = getUserSettings().liveChannelOrder,
         qualityFilter: String = "All",
-        sortByQuality: Boolean = false
+        sortByQuality: Boolean = false,
+        sortOrder: MediaSortOrder = MediaSortOrder.RECENTLY_ADDED
     ): List<MediaItem> = withContext(Dispatchers.IO) {
         if (type.equals("LIVE", ignoreCase = true)) {
             if (categoryId == "favorites") {
@@ -558,10 +612,12 @@ class KrasRepository(context: Context) {
                 limit = limit,
                 offset = offset,
                 qualityFilter = qualityFilter,
-                sortByQuality = sortByQuality
+                sortByQuality = sortByQuality,
+                sortOrder = sortOrder.name
             ).map { it.toMediaItem() }
         }
     }
+
 
     suspend fun countMedia(
         accountId: String,

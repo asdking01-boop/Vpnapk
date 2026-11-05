@@ -29,9 +29,11 @@ object SampleData {
     val movieCategories = listOf(
         Category("vod_all", "All Movies", type = MediaType.MOVIE),
         Category("vod_action", "Action & Sci-Fi", type = MediaType.MOVIE),
-        Category("vod_drama", "Drama & Thriller", type = MediaType.MOVIE),
-        Category("vod_animation", "Animation & Family", type = MediaType.MOVIE),
         Category("vod_comedy", "Comedy", type = MediaType.MOVIE),
+        Category("vod_drama", "Drama & Thriller", type = MediaType.MOVIE),
+        Category("vod_horror", "Horror", type = MediaType.MOVIE),
+        Category("vod_romance", "Romance", type = MediaType.MOVIE),
+        Category("vod_animation", "Animation & Family", type = MediaType.MOVIE),
         Category("vod_4k", "4K Ultra HD", type = MediaType.MOVIE)
     )
 
@@ -177,7 +179,8 @@ object SampleData {
             plot = "In a neon-drenched metropolis governed by synthetic intelligence, a rogue operative uncovers a conspiracy that threatens to overwrite human consciousness.",
             genre = "Cyberpunk / Sci-Fi / Action",
             duration = "2h 14m",
-            streamUrl = STREAM_TEARS_OF_STEEL
+            streamUrl = STREAM_TEARS_OF_STEEL,
+            addedTimestamp = 1741564800000L
         ),
         MediaItem(
             id = "vod_2",
@@ -196,7 +199,8 @@ object SampleData {
             plot = "A solo astronaut on deep reconnaissance past Neptune discovers an enigmatic Dyson ring pulsating with unknown quantum signals.",
             genre = "Sci-Fi / Adventure",
             duration = "2h 31m",
-            streamUrl = STREAM_SINTEL
+            streamUrl = STREAM_SINTEL,
+            addedTimestamp = 1741392000000L
         ),
         MediaItem(
             id = "vod_3",
@@ -215,7 +219,8 @@ object SampleData {
             plot = "A forensic psychologist retreats to an isolated coastal hamlet, only to find herself drawn into a cold case that echoes her own family tragedy.",
             genre = "Mystery / Psychological Thriller",
             duration = "1h 56m",
-            streamUrl = STREAM_ELEPHANTS_DREAM
+            streamUrl = STREAM_ELEPHANTS_DREAM,
+            addedTimestamp = 1741478400000L
         ),
         MediaItem(
             id = "vod_4",
@@ -234,7 +239,8 @@ object SampleData {
             plot = "A spirited young alchemist journeys into an ancient enchanted woodland to restore the fading spirit tree and save her homeland.",
             genre = "Animation / Fantasy",
             duration = "1h 38m",
-            streamUrl = STREAM_BIG_BUCK_BUNNY
+            streamUrl = STREAM_BIG_BUCK_BUNNY,
+            addedTimestamp = 1741219200000L
         ),
         MediaItem(
             id = "vod_5",
@@ -253,7 +259,8 @@ object SampleData {
             plot = "An international crew of master thieves attempts the impossible: breaching the subterranean gold depository beneath Zurich during an eclipse.",
             genre = "Heist / Thriller",
             duration = "2h 05m",
-            streamUrl = STREAM_FOR_BIGGER_BLAZES
+            streamUrl = STREAM_FOR_BIGGER_BLAZES,
+            addedTimestamp = 1741651200000L // Older 2023 release year, but NEWEST server addition date in Action!
         ),
         MediaItem(
             id = "vod_6",
@@ -272,7 +279,88 @@ object SampleData {
             plot = "Two cellists separated by three centuries communicate through resonant frequencies discovered hidden in an antique Stradivarius.",
             genre = "Romance / Drama / Sci-Fi",
             duration = "2h 19m",
-            streamUrl = STREAM_SUBARU
+            streamUrl = STREAM_SUBARU,
+            addedTimestamp = 1741305600000L
+        ),
+        MediaItem(
+            id = "vod_7",
+            streamId = 207,
+            name = "Grand Budapest Riviera",
+            title = "Grand Budapest Riviera",
+            type = MediaType.MOVIE,
+            streamIcon = "https://images.unsplash.com/photo-1514306191717-452ec28c7814?w=500&q=80",
+            backdrop = "https://images.unsplash.com/photo-1517604931442-7e0c8ed2963c?w=1000&q=80",
+            categoryId = "vod_comedy",
+            categoryName = "Comedy",
+            rating = 8.6,
+            year = "2024",
+            resolution = "4K UHD | HEVC",
+            quality = "4K UHD | HEVC",
+            plot = "An eccentric hotel concierge and his bumbling protégé accidentally swap a priceless Renaissance painting with a Forgery during a high-society gala.",
+            genre = "Comedy / Caper",
+            duration = "1h 49m",
+            streamUrl = STREAM_BIG_BUCK_BUNNY,
+            addedTimestamp = 1741608000000L
+        ),
+        MediaItem(
+            id = "vod_8",
+            streamId = 208,
+            name = "The Midnight Conservatory",
+            title = "The Midnight Conservatory",
+            type = MediaType.MOVIE,
+            streamIcon = "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=500&q=80",
+            backdrop = "https://images.unsplash.com/photo-1478760329108-5c3ed9d495a0?w=1000&q=80",
+            categoryId = "vod_horror",
+            categoryName = "Horror",
+            rating = 8.3,
+            year = "2023",
+            resolution = "4K UHD | 5.1",
+            quality = "4K UHD | 5.1",
+            plot = "Restorers working overnight inside a Victorian botanical glasshouse realize the nocturnal flora responds to human heartbeats.",
+            genre = "Horror / Supernatural",
+            duration = "1h 54m",
+            streamUrl = STREAM_TEARS_OF_STEEL,
+            addedTimestamp = 1741694400000L
+        ),
+        MediaItem(
+            id = "vod_9",
+            streamId = 209,
+            name = "Autumn in Kyoto",
+            title = "Autumn in Kyoto",
+            type = MediaType.MOVIE,
+            streamIcon = "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?w=500&q=80",
+            backdrop = "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=1000&q=80",
+            categoryId = "vod_romance",
+            categoryName = "Romance",
+            rating = 8.8,
+            year = "2022",
+            resolution = "FHD | HEVC",
+            quality = "FHD | HEVC",
+            plot = "An architectural photographer and a traditional tea master cross paths across four consecutive autumns in Kyoto's historic Higashiyama district.",
+            genre = "Romance / Drama",
+            duration = "2h 02m",
+            streamUrl = STREAM_SINTEL,
+            addedTimestamp = 1741629600000L
+        ),
+        MediaItem(
+            id = "vod_10",
+            streamId = 210,
+            name = "Solaris Odyssey 8K",
+            title = "Solaris Odyssey 8K",
+            type = MediaType.MOVIE,
+            streamIcon = "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=500&q=80",
+            backdrop = "https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?w=1000&q=80",
+            categoryId = "vod_4k",
+            categoryName = "4K Ultra HD",
+            rating = 9.4,
+            year = "2025",
+            resolution = "4K UHD | HEVC | 60 FPS",
+            quality = "4K UHD | HEVC | 60 FPS",
+            plot = "A visual symphony across Saturn's rings and Jupiter's volcanic moons captured in reference-grade Ultra HD.",
+            genre = "Sci-Fi / Documentary",
+            duration = "1h 45m",
+            streamUrl = STREAM_TEARS_OF_STEEL,
+            addedTimestamp = 1741716000000L
         )
     )
 
@@ -293,7 +381,8 @@ object SampleData {
             quality = "4K UHD | HEVC | 5.1",
             plot = "When temporal fractures begin appearing across major global cities, an elite task force must venture into rewritten timelines to prevent the unraveling of existence.",
             genre = "Sci-Fi / Thriller",
-            duration = "3 Seasons"
+            duration = "3 Seasons",
+            addedTimestamp = 1741564800000L
         ),
         MediaItem(
             id = "series_2",
@@ -311,7 +400,8 @@ object SampleData {
             quality = "FHD | 5.1",
             plot = "A disgraced undercover detective navigates the brutal underworld of international arms trafficking while seeking redemption for his past mistakes.",
             genre = "Crime / Drama / Action",
-            duration = "2 Seasons"
+            duration = "2 Seasons",
+            addedTimestamp = 1741651200000L
         ),
         MediaItem(
             id = "series_3",
@@ -329,7 +419,8 @@ object SampleData {
             quality = "4K UHD",
             plot = "An epic saga chronicling the unification of the northern clans and their voyage across perilous uncharted seas toward an ancient mythical land.",
             genre = "Historical / Drama",
-            duration = "4 Seasons"
+            duration = "4 Seasons",
+            addedTimestamp = 1741478400000L
         ),
         MediaItem(
             id = "series_4",
@@ -347,7 +438,8 @@ object SampleData {
             quality = "HD",
             plot = "Scientists aboard a lunar research station intercept a dormant artificial probe that begins self-assembling using base moon regolith.",
             genre = "Sci-Fi / Mystery",
-            duration = "1 Season"
+            duration = "1 Season",
+            addedTimestamp = 1741392000000L
         )
     )
 

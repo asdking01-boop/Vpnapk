@@ -32,6 +32,27 @@ interface MediaDao {
     @Query("SELECT * FROM media_items WHERE accountId = :accountId AND type = :type AND (categoryId = :categoryId OR :categoryId = 'all') ORDER BY rating DESC, addedTimestamp DESC LIMIT :limit")
     suspend fun getByCategory(accountId: String, type: String, categoryId: String, limit: Int = 15): List<MediaItemEntity>
 
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND type = :type 
+          AND (
+              :categoryId = 'all' 
+              OR :categoryId = 'vod_all' 
+              OR :categoryId = 'series_all' 
+              OR categoryId = :categoryId 
+              OR categoryName LIKE '%' || :categoryId || '%'
+          )
+        ORDER BY addedTimestamp DESC, streamId DESC, LOWER(TRIM(name)) ASC 
+        LIMIT :limit
+    """)
+    suspend fun getLatestByCategory(
+        accountId: String,
+        type: String,
+        categoryId: String,
+        limit: Int = 40
+    ): List<MediaItemEntity>
+
     // --- Quality Update (when real video resolution is detected from VOD/Series info or ExoPlayer) ---
     @Query("UPDATE media_items SET quality = :quality, resolution = :quality WHERE id = :id")
     suspend fun updateMediaQuality(id: String, quality: String)
@@ -255,7 +276,13 @@ interface MediaDao {
         SELECT * FROM media_items 
         WHERE accountId = :accountId 
           AND type = :type 
-          AND (:categoryId = 'all' OR categoryId = :categoryId)
+          AND (
+              :categoryId = 'all' 
+              OR :categoryId = 'vod_all' 
+              OR :categoryId = 'series_all' 
+              OR categoryId = :categoryId 
+              OR categoryName LIKE '%' || :categoryId || '%'
+          )
           AND (:query = '' OR name LIKE '%' || :query || '%')
           AND rating >= :minRating
           AND (:year = 'All' OR year = :year)
@@ -277,7 +304,20 @@ interface MediaDao {
               WHEN quality = 'SD' OR quality LIKE 'SD |%' THEN 1
               ELSE 0
           END DESC,
-          rating DESC, addedTimestamp DESC, name ASC 
+          CASE
+              WHEN (:sortOrder = 'YEAR_NEWEST' OR :sortOrder = 'YEAR_OLDEST') THEN
+                  CASE WHEN year != '' AND CAST(year AS INTEGER) > 0 THEN 0 ELSE 1 END
+              ELSE 0
+          END ASC,
+          CASE WHEN :sortOrder = 'RECENTLY_ADDED' THEN addedTimestamp ELSE 0 END DESC,
+          CASE WHEN :sortOrder = 'RECENTLY_ADDED' THEN streamId ELSE 0 END DESC,
+          CASE WHEN :sortOrder = 'YEAR_NEWEST' THEN CAST(year AS INTEGER) ELSE 0 END DESC,
+          CASE WHEN :sortOrder = 'YEAR_OLDEST' THEN CAST(year AS INTEGER) ELSE 0 END ASC,
+          CASE WHEN :sortOrder = 'TITLE_AZ' THEN LOWER(TRIM(name)) ELSE '' END ASC,
+          CASE WHEN :sortOrder = 'TITLE_ZA' THEN LOWER(TRIM(name)) ELSE '' END DESC,
+          addedTimestamp DESC,
+          streamId DESC,
+          LOWER(TRIM(name)) ASC
         LIMIT :limit OFFSET :offset
     """)
     suspend fun queryMediaPaged(
@@ -290,14 +330,43 @@ interface MediaDao {
         limit: Int,
         offset: Int,
         qualityFilter: String = "All",
-        sortByQuality: Boolean = false
+        sortByQuality: Boolean = false,
+        sortOrder: String = "RECENTLY_ADDED"
     ): List<MediaItemEntity>
+
+    @Query("""
+        SELECT DISTINCT year FROM media_items 
+        WHERE accountId = :accountId 
+          AND type = :type 
+          AND (
+              :categoryId = 'all' 
+              OR :categoryId = 'vod_all' 
+              OR :categoryId = 'series_all' 
+              OR categoryId = :categoryId 
+              OR categoryName LIKE '%' || :categoryId || '%'
+          )
+          AND year != '' 
+          AND CAST(year AS INTEGER) >= 1900 
+          AND CAST(year AS INTEGER) <= 2100
+        ORDER BY CAST(year AS INTEGER) DESC
+    """)
+    suspend fun getAvailableYears(
+        accountId: String,
+        type: String,
+        categoryId: String = "all"
+    ): List<String>
 
     @Query("""
         SELECT COUNT(*) FROM media_items 
         WHERE accountId = :accountId 
           AND type = :type 
-          AND (:categoryId = 'all' OR categoryId = :categoryId)
+          AND (
+              :categoryId = 'all' 
+              OR :categoryId = 'vod_all' 
+              OR :categoryId = 'series_all' 
+              OR categoryId = :categoryId 
+              OR categoryName LIKE '%' || :categoryId || '%'
+          )
           AND (:query = '' OR name LIKE '%' || :query || '%')
           AND rating >= :minRating
           AND (:year = 'All' OR year = :year)
@@ -319,6 +388,7 @@ interface MediaDao {
         year: String,
         qualityFilter: String = "All"
     ): Int
+
 
     @Query("SELECT * FROM media_items WHERE id = :id LIMIT 1")
     suspend fun getItemById(id: String): MediaItemEntity?

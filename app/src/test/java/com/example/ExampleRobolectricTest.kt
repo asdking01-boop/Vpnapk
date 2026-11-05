@@ -554,6 +554,316 @@ class ExampleRobolectricTest {
     // Cleanup
     wrapper.release()
   }
+
+  @Test
+  fun `latest 20 movies per category sorts by server date added not release year and deduplicates`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+
+    kotlinx.coroutines.runBlocking {
+      val accId = "acc_latest20_movies"
+      repo.clearOldRows(accId, "MOVIE")
+
+      // Create 25 movies in cat_action where a 1999 classic was added MOST RECENTLY to the server,
+      // and a 2025 movie was added earlier. Also include a duplicate title/streamId.
+      val baseTime = 1_740_000_000_000L
+      val actionMovies = (1..25).map { i ->
+        com.example.data.model.MediaItem(
+          id = "act_$i",
+          streamId = 1000 + i,
+          name = "Action Movie $i",
+          title = "Action Movie $i",
+          type = MediaType.MOVIE,
+          categoryId = "cat_action",
+          categoryName = "Action",
+          year = if (i == 25) "1999" else "2025", // #25 is older release year (1999) but newest server addedTimestamp!
+          addedTimestamp = baseTime + (i * 60_000L)
+        )
+      }
+      val duplicateActionMovie = com.example.data.model.MediaItem(
+        id = "act_dup",
+        streamId = 1025, // duplicate streamId and title of #25
+        name = "Action Movie 25",
+        title = "Action Movie 25",
+        type = MediaType.MOVIE,
+        categoryId = "cat_action",
+        categoryName = "Action",
+        year = "1999",
+        addedTimestamp = baseTime + (25 * 60_000L)
+      )
+      // Category with fewer than 20 movies (only 3 movies)
+      val sciFiMovies = (1..3).map { i ->
+        com.example.data.model.MediaItem(
+          id = "scifi_$i",
+          streamId = 2000 + i,
+          name = "SciFi Film $i",
+          title = "SciFi Film $i",
+          type = MediaType.MOVIE,
+          categoryId = "cat_scifi",
+          categoryName = "Sci-Fi",
+          year = "2024",
+          addedTimestamp = baseTime + (i * 100_000L)
+        )
+      }
+
+      val entities = com.example.data.local.entity.MediaItemEntity.fromMediaItemList(
+        actionMovies + duplicateActionMovie + sciFiMovies,
+        accId
+      )
+      repo.insertMediaBatch(entities)
+
+      // 1. Category with > 20 movies returns exactly 20 unique movies, newest server addition first
+      val latestAction = repo.getLatestByCategory(accId, "MOVIE", "cat_action", limit = 20)
+      assertEquals(20, latestAction.size)
+      // First item must be Action Movie 25 (year 1999, newest addedTimestamp), proving date_added != release year
+      assertEquals("act_25", latestAction.first().id)
+      assertEquals("1999", latestAction.first().year)
+      // Last of the top 20 must be Action Movie 6
+      assertEquals("act_6", latestAction.last().id)
+      // Strictly descending addedTimestamp
+      for (idx in 0 until latestAction.size - 1) {
+        assertTrue(latestAction[idx].addedTimestamp >= latestAction[idx + 1].addedTimestamp)
+      }
+
+      // 2. Category with < 20 movies returns all 3 without error
+      val latestSciFi = repo.getLatestByCategory(accId, "MOVIE", "cat_scifi", limit = 20)
+      assertEquals(3, latestSciFi.size)
+      assertEquals(listOf("scifi_3", "scifi_2", "scifi_1"), latestSciFi.map { it.id })
+    }
+  }
+
+  @Test
+  fun `missing server date_added falls back cleanly while server date_added is prioritized`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+
+    kotlinx.coroutines.runBlocking {
+      val accId = "acc_first_seen_test"
+      repo.clearOldRows(accId, "SERIES")
+
+      // Series without server date_added (addedTimestamp = 0L)
+      val seriesNoDate = com.example.data.model.MediaItem(
+        id = "ser_nodate_1",
+        streamId = 901,
+        name = "Mystery Series",
+        title = "Mystery Series",
+        type = MediaType.SERIES,
+        categoryId = "cat_drama",
+        categoryName = "Drama",
+        year = "2024",
+        addedTimestamp = 0L
+      )
+      // Series WITH server date_added
+      val serverDateMs = com.example.data.api.XtreamClient.parseServerTimestampMs("2025-02-15 14:30:00")
+      assertTrue(serverDateMs > 0L)
+      val seriesWithServerDate = com.example.data.model.MediaItem(
+        id = "ser_srv_1",
+        streamId = 902,
+        name = "Server Dated Series",
+        title = "Server Dated Series",
+        type = MediaType.SERIES,
+        categoryId = "cat_drama",
+        categoryName = "Drama",
+        year = "2022",
+        addedTimestamp = serverDateMs
+      )
+
+      repo.insertMediaBatch(
+        com.example.data.local.entity.MediaItemEntity.fromMediaItemList(
+          listOf(seriesNoDate, seriesWithServerDate),
+          accId
+        )
+      )
+
+      val firstLoad = repo.getLatestByCategory(accId, "SERIES", "cat_drama", limit = 20)
+      assertEquals(2, firstLoad.size)
+      // Server-dated item is prioritized first
+      assertEquals("ser_srv_1", firstLoad.first().id)
+      assertEquals("ser_nodate_1", firstLoad.last().id)
+    }
+  }
+
+  @Test
+  fun `persistent live tv channel switching updates activeLiveChannel without opening separate fullscreen screen`() {
+    val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val viewModel = com.example.viewmodel.KrasViewModel(app)
+
+    val ch1 = com.example.data.model.MediaItem(
+      id = "live_test_1", streamId = 101, name = "Channel 1", type = MediaType.LIVE,
+      categoryId = "live_sports", streamUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    )
+    val ch2 = com.example.data.model.MediaItem(
+      id = "live_test_2", streamId = 102, name = "Channel 2", type = MediaType.LIVE,
+      categoryId = "live_sports", streamUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    )
+    val ch3 = com.example.data.model.MediaItem(
+      id = "live_test_3", streamId = 103, name = "Channel 3", type = MediaType.LIVE,
+      categoryId = "live_sports", streamUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
+    )
+
+    // Select Channel 1 in persistent Live TV view
+    viewModel.selectLiveChannel(ch1)
+    assertEquals("live_test_1", viewModel.activeLiveChannel.value?.id)
+    // Must NOT set nowPlayingItem (which would open the separate fullscreen VOD overlay and hide the channel list)
+    assertNull(viewModel.nowPlayingItem.value)
+    assertFalse(viewModel.isLiveFullscreen.value)
+    val playerInstance1 = viewModel.playerWrapper.getPlayer()
+    assertNotNull(playerInstance1)
+
+    // Switch to Channel 2 and Channel 3 sequentially -> same player instance, activeLiveChannel updated
+    viewModel.selectLiveChannel(ch2)
+    assertEquals("live_test_2", viewModel.activeLiveChannel.value?.id)
+    assertNull(viewModel.nowPlayingItem.value)
+    assertSame(playerInstance1, viewModel.playerWrapper.getPlayer())
+
+    viewModel.selectLiveChannel(ch3)
+    assertEquals("live_test_3", viewModel.activeLiveChannel.value?.id)
+    assertSame(playerInstance1, viewModel.playerWrapper.getPlayer())
+
+    // Enter fullscreen and switch channel inside fullscreen overlay drawer -> stays fullscreen and switches channel
+    viewModel.setLiveFullscreen(true)
+    assertTrue(viewModel.isLiveFullscreen.value)
+    viewModel.selectLiveChannel(ch1, enterFullscreen = true)
+    assertEquals("live_test_1", viewModel.activeLiveChannel.value?.id)
+    assertTrue(viewModel.isLiveFullscreen.value)
+
+    // Exit fullscreen -> returns to persistent channel list while keeping Channel 1 active
+    viewModel.setLiveFullscreen(false)
+    assertFalse(viewModel.isLiveFullscreen.value)
+    assertEquals("live_test_1", viewModel.activeLiveChannel.value?.id)
+
+    viewModel.stopLiveChannelPlayback()
+    viewModel.playerWrapper.release()
+  }
+
+  @Test
+  fun `category sorting modes release year filters and non-invented metadata`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+
+    // Verify XtreamClient.extractReleaseYear uses actual metadata and never invents dates
+    assertEquals("2024", com.example.data.api.XtreamClient.extractReleaseYear("2024-07-19", "Some Movie"))
+    assertEquals("2022", com.example.data.api.XtreamClient.extractReleaseYear("", "The Batman (2022) 4K 2160p"))
+    assertEquals("", com.example.data.api.XtreamClient.extractReleaseYear("", "Untitled Stream 4K 2160p 1080p"))
+    assertEquals("", com.example.data.api.XtreamClient.extractReleaseYear(null, null))
+
+    kotlinx.coroutines.runBlocking {
+      val accId = "acc_sort_and_years_test"
+      repo.clearOldRows(accId, "MOVIE")
+
+      val items = listOf(
+        com.example.data.model.MediaItem(
+          id = "m_zeta_2024", streamId = 10, name = "Zeta Protocol", type = MediaType.MOVIE,
+          categoryId = "cat_drama", categoryName = "Drama", year = "2024",
+          addedTimestamp = 1_700_000_100_000L
+        ),
+        com.example.data.model.MediaItem(
+          id = "m_alpha_2024", streamId = 11, name = "Alpha Horizon", type = MediaType.MOVIE,
+          categoryId = "cat_drama", categoryName = "Drama", year = "2024",
+          addedTimestamp = 1_700_000_500_000L
+        ),
+        com.example.data.model.MediaItem(
+          id = "m_classic_1999", streamId = 12, name = "Matrix Classic", type = MediaType.MOVIE,
+          categoryId = "cat_drama", categoryName = "Drama", year = "1999",
+          addedTimestamp = 1_700_000_900_000L // Newest addedTimestamp, oldest release year
+        ),
+        com.example.data.model.MediaItem(
+          id = "m_future_2025", streamId = 13, name = "Beyond 2025", type = MediaType.MOVIE,
+          categoryId = "cat_drama", categoryName = "Drama", year = "2025",
+          addedTimestamp = 1_700_000_300_000L // Newest release year
+        ),
+        com.example.data.model.MediaItem(
+          id = "m_mid_2021", streamId = 14, name = "Chronicle", type = MediaType.MOVIE,
+          categoryId = "cat_drama", categoryName = "Drama", year = "2021",
+          addedTimestamp = 1_700_000_200_000L
+        ),
+        com.example.data.model.MediaItem(
+          id = "m_no_year", streamId = 15, name = "Mystery Unreleased", type = MediaType.MOVIE,
+          categoryId = "cat_drama", categoryName = "Drama", year = "",
+          addedTimestamp = 1_700_000_400_000L
+        )
+      )
+
+      repo.insertMediaBatch(
+        com.example.data.local.entity.MediaItemEntity.fromMediaItemList(items, accId)
+      )
+
+      // 1. Available years for cat_drama: latest available years first, excluding empty year
+      val availableYears = repo.getAvailableYears(accId, "MOVIE", "cat_drama")
+      assertEquals(listOf("2025", "2024", "2021", "1999"), availableYears)
+
+      // 2. Default sorting: Recently Added – Newest First
+      val defaultSorted = repo.queryMediaPaged(
+        accountId = accId, type = "MOVIE", categoryId = "cat_drama", query = "",
+        minRating = 0.0, year = "All", limit = 20, offset = 0
+      )
+      assertEquals(
+        listOf("m_classic_1999", "m_alpha_2024", "m_no_year", "m_future_2025", "m_mid_2021", "m_zeta_2024"),
+        defaultSorted.map { it.id }
+      )
+
+      // 3. Release Year – Newest to Oldest (valid years newest->oldest first, missing year last)
+      val yearNewest = repo.queryMediaPaged(
+        accountId = accId, type = "MOVIE", categoryId = "cat_drama", query = "",
+        minRating = 0.0, year = "All", limit = 20, offset = 0,
+        sortOrder = com.example.data.model.MediaSortOrder.YEAR_NEWEST
+      )
+      assertEquals(
+        listOf("m_future_2025", "m_alpha_2024", "m_zeta_2024", "m_mid_2021", "m_classic_1999", "m_no_year"),
+        yearNewest.map { it.id }
+      )
+
+      // 4. Release Year – Oldest to Newest (valid years oldest->newest first, missing year last)
+      val yearOldest = repo.queryMediaPaged(
+        accountId = accId, type = "MOVIE", categoryId = "cat_drama", query = "",
+        minRating = 0.0, year = "All", limit = 20, offset = 0,
+        sortOrder = com.example.data.model.MediaSortOrder.YEAR_OLDEST
+      )
+      assertEquals(
+        listOf("m_classic_1999", "m_mid_2021", "m_alpha_2024", "m_zeta_2024", "m_future_2025", "m_no_year"),
+        yearOldest.map { it.id }
+      )
+
+      // 5. Title – A to Z
+      val titleAZ = repo.queryMediaPaged(
+        accountId = accId, type = "MOVIE", categoryId = "cat_drama", query = "",
+        minRating = 0.0, year = "All", limit = 20, offset = 0,
+        sortOrder = com.example.data.model.MediaSortOrder.TITLE_AZ
+      )
+      assertEquals(
+        listOf("m_alpha_2024", "m_future_2025", "m_mid_2021", "m_classic_1999", "m_no_year", "m_zeta_2024"),
+        titleAZ.map { it.id }
+      )
+
+      // 6. Title – Z to A
+      val titleZA = repo.queryMediaPaged(
+        accountId = accId, type = "MOVIE", categoryId = "cat_drama", query = "",
+        minRating = 0.0, year = "All", limit = 20, offset = 0,
+        sortOrder = com.example.data.model.MediaSortOrder.TITLE_ZA
+      )
+      assertEquals(
+        listOf("m_zeta_2024", "m_no_year", "m_classic_1999", "m_mid_2021", "m_future_2025", "m_alpha_2024"),
+        titleZA.map { it.id }
+      )
+
+      // 7. Combining Release Year filter ("2024") with Title Z to A and Title A to Z
+      val year2024ZA = repo.queryMediaPaged(
+        accountId = accId, type = "MOVIE", categoryId = "cat_drama", query = "",
+        minRating = 0.0, year = "2024", limit = 20, offset = 0,
+        sortOrder = com.example.data.model.MediaSortOrder.TITLE_ZA
+      )
+      assertEquals(listOf("m_zeta_2024", "m_alpha_2024"), year2024ZA.map { it.id })
+
+      val year2024AZ = repo.queryMediaPaged(
+        accountId = accId, type = "MOVIE", categoryId = "cat_drama", query = "",
+        minRating = 0.0, year = "2024", limit = 20, offset = 0,
+        sortOrder = com.example.data.model.MediaSortOrder.TITLE_AZ
+      )
+      assertEquals(listOf("m_alpha_2024", "m_zeta_2024"), year2024AZ.map { it.id })
+    }
+  }
 }
+
+
 
 

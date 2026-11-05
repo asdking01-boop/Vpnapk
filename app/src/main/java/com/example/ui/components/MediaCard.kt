@@ -379,6 +379,13 @@ private fun WideCard(
                         maxLines = 1
                     )
                 }
+                if (item.year.isNotEmpty() && item.year != "LIVE") {
+                    Text(
+                        text = item.year,
+                        color = TextSecondary,
+                        fontSize = 10.sp
+                    )
+                }
                 if (item.rating > 0.0) {
                     Text(
                         text = "★ ${String.format("%.1f", item.rating)}",
@@ -616,13 +623,26 @@ private fun BillboardCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Text(
-                text = item.plot.ifEmpty { item.genre },
-                color = TextSecondary,
-                fontSize = 11.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (item.year.isNotEmpty() && item.year != "LIVE") {
+                    Text(
+                        text = item.year,
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Text(
+                    text = item.plot.ifEmpty { item.genre },
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

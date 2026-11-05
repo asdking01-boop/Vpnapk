@@ -321,6 +321,72 @@ class XtreamClient {
         totalCount
     }
 
+    companion object {
+        /**
+         * Parses an Xtream Codes / playlist server addition timestamp (`added`, `date_added`, `last_modified`)
+         * into epoch milliseconds. Returns 0L when missing or invalid so the repository can assign/preserve
+         * a locally tracked first-seen timestamp (clearly distinguished from a server upload timestamp).
+         */
+        fun parseServerTimestampMs(raw: String?): Long {
+            val cleaned = raw?.trim().orEmpty()
+            if (cleaned.isEmpty() || cleaned == "0" || cleaned.equals("null", ignoreCase = true)) {
+                return 0L
+            }
+            val numeric = cleaned.toLongOrNull()
+            if (numeric != null) {
+                return when {
+                    numeric <= 0L -> 0L
+                    numeric < 100_000_000_000L -> numeric * 1000L // Unix seconds -> milliseconds
+                    else -> numeric // Already epoch milliseconds
+                }
+            }
+            val dateFormats = arrayOf(
+                "yyyy-MM-dd HH:mm:ss",
+                "yyyy-MM-dd'T'HH:mm:ss",
+                "yyyy-MM-dd"
+            )
+            for (pattern in dateFormats) {
+                try {
+                    val sdf = java.text.SimpleDateFormat(pattern, java.util.Locale.US).apply {
+                        timeZone = java.util.TimeZone.getTimeZone("UTC")
+                    }
+                    val parsed = sdf.parse(cleaned)?.time ?: 0L
+                    if (parsed > 0L) return parsed
+                } catch (_: Exception) {
+                }
+            }
+            return 0L
+        }
+
+        private val EXPLICIT_YEAR_REGEX = Regex("""\b(19\d{2}|20\d{2})\b""")
+        private val TITLE_YEAR_REGEX = Regex("""[\(\[](19\d{2}|20[0-3]\d)[\)\]]""")
+
+        /**
+         * Extracts an actual 4-digit release year from Xtream metadata (`year`, `releaseDate`, `release_date`)
+         * or from a parenthesized/bracketed year in the title (e.g. "Movie (2024)").
+         * Never invents a release year when metadata is missing, and never confuses resolution (e.g. 2160p/1080p)
+         * or date_added with release year.
+         */
+        fun extractReleaseYear(rawYearField: String?, rawTitle: String? = null): String {
+            val cleanedField = rawYearField?.trim().orEmpty()
+            if (cleanedField.isNotEmpty() && !cleanedField.equals("null", ignoreCase = true) && cleanedField != "0") {
+                val match = EXPLICIT_YEAR_REGEX.find(cleanedField)
+                if (match != null) {
+                    val yr = match.groupValues[1].toIntOrNull() ?: 0
+                    if (yr in 1900..2100) return yr.toString()
+                }
+            }
+            val cleanedTitle = rawTitle?.trim().orEmpty()
+            if (cleanedTitle.isNotEmpty()) {
+                val titleMatch = TITLE_YEAR_REGEX.find(cleanedTitle)
+                if (titleMatch != null) {
+                    return titleMatch.groupValues[1]
+                }
+            }
+            return ""
+        }
+    }
+
     // --- Streamed Movies Parsing (No giant strings in RAM) ---
     suspend fun streamVodStreams(
         account: Account,
@@ -352,8 +418,8 @@ class XtreamClient {
                             var categoryId = ""
                             var containerExt = "mp4"
                             var rating = 7.0
-                            var year = "2024"
-                            var addedTime = System.currentTimeMillis()
+                            var rawYear = ""
+                            var serverAddedMs = 0L
 
                             while (reader.hasNext()) {
                                 val field = reader.nextName()
@@ -389,18 +455,25 @@ class XtreamClient {
                                             reader.nextString().toDoubleOrNull() ?: 7.0
                                         }
                                     }
-                                    "year" -> {
-                                        year = if (reader.peek() == JsonToken.NUMBER) {
+                                    "year", "releaseDate", "release_date" -> {
+                                        val candidate = if (reader.peek() == JsonToken.NUMBER) {
                                             reader.nextInt().toString()
                                         } else {
                                             reader.nextString()
                                         }
+                                        if (candidate.isNotBlank() && rawYear.isBlank()) {
+                                            rawYear = candidate
+                                        }
                                     }
-                                    "added" -> {
-                                        addedTime = if (reader.peek() == JsonToken.NUMBER) {
-                                            reader.nextLong() * 1000L
+                                    "added", "date_added", "last_modified" -> {
+                                        val rawAdded = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextLong().toString()
                                         } else {
-                                            reader.nextString().toLongOrNull()?.let { it * 1000L } ?: System.currentTimeMillis()
+                                            reader.nextString()
+                                        }
+                                        val parsed = parseServerTimestampMs(rawAdded)
+                                        if (parsed > 0L) {
+                                            serverAddedMs = parsed
                                         }
                                     }
                                     else -> reader.skipValue()
@@ -410,6 +483,7 @@ class XtreamClient {
 
                             if (streamId > 0) {
                                 val movieName = name.ifBlank { "Movie $streamId" }
+                                val resolvedYear = extractReleaseYear(rawYear, movieName)
                                 val categoryName = categoryMap[categoryId].orEmpty()
                                 val detectedQuality = QualityDetector.detectFromNameAndCategory(movieName, categoryName)
                                 val streamUrl = "$base/movie/${account.username}/${account.password}/$streamId.$containerExt"
@@ -427,12 +501,12 @@ class XtreamClient {
                                         categoryId = categoryId,
                                         categoryName = categoryName,
                                         rating = rating,
-                                        year = year.ifBlank { "2024" },
+                                        year = resolvedYear,
                                         resolution = detectedQuality,
                                         quality = detectedQuality,
                                         streamUrl = streamUrl,
                                         containerExtension = containerExt,
-                                        addedTimestamp = addedTime,
+                                        addedTimestamp = serverAddedMs,
                                         groupKey = orderInfo.groupKey,
                                         seq = orderInfo.seq,
                                         groupOrder = orderInfo.groupOrder,
@@ -493,7 +567,8 @@ class XtreamClient {
                             var cover = ""
                             var categoryId = ""
                             var rating = 8.0
-                            var year = "2024"
+                            var rawYear = ""
+                            var serverAddedMs = 0L
 
                             while (reader.hasNext()) {
                                 val field = reader.nextName()
@@ -525,9 +600,26 @@ class XtreamClient {
                                             reader.nextString().toDoubleOrNull() ?: 8.0
                                         }
                                     }
-                                    "releaseDate" -> {
-                                        val rDate = reader.nextString()
-                                        year = if (rDate.length >= 4) rDate.substring(0, 4) else "2024"
+                                    "releaseDate", "release_date", "year" -> {
+                                        val rDate = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt().toString()
+                                        } else {
+                                            reader.nextString()
+                                        }
+                                        if (rDate.isNotBlank() && rawYear.isBlank()) {
+                                            rawYear = rDate
+                                        }
+                                    }
+                                    "last_modified", "added", "date_added" -> {
+                                        val rawAdded = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextLong().toString()
+                                        } else {
+                                            reader.nextString()
+                                        }
+                                        val parsed = parseServerTimestampMs(rawAdded)
+                                        if (parsed > 0L) {
+                                            serverAddedMs = parsed
+                                        }
                                     }
                                     else -> reader.skipValue()
                                 }
@@ -536,6 +628,7 @@ class XtreamClient {
 
                             if (seriesId > 0) {
                                 val seriesName = name.ifBlank { "Series $seriesId" }
+                                val resolvedYear = extractReleaseYear(rawYear, seriesName)
                                 val categoryName = categoryMap[categoryId].orEmpty()
                                 val detectedQuality = QualityDetector.detectFromNameAndCategory(seriesName, categoryName)
                                 val orderInfo = groupingTracker.nextChannel(seriesName)
@@ -552,12 +645,12 @@ class XtreamClient {
                                         categoryId = categoryId,
                                         categoryName = categoryName,
                                         rating = rating,
-                                        year = year,
+                                        year = resolvedYear,
                                         resolution = detectedQuality,
                                         quality = detectedQuality,
                                         streamUrl = "",
                                         containerExtension = "mp4",
-                                        addedTimestamp = System.currentTimeMillis(),
+                                        addedTimestamp = serverAddedMs,
                                         groupKey = orderInfo.groupKey,
                                         seq = orderInfo.seq,
                                         groupOrder = orderInfo.groupOrder,

@@ -138,17 +138,26 @@ fun PlayerScreen(
         }
     }
 
-    // Lifecycle-aware player & immersive management
+    // Lifecycle-aware player & immersive management (respects Background Playback setting for Live TV)
+    val currentBackgroundPlayback by rememberUpdatedState(userSettings.backgroundPlayback)
+    val isLiveMedia by rememberUpdatedState(mediaItem.type == MediaType.LIVE)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
                     PlayerImmersiveHelper.enterImmersiveMode(activity)
-                    playerWrapper.resumeForLifecycle()
+                    playerWrapper.setBackgroundAudioOnlyMode(false)
+                    if (!isLiveMedia || !currentBackgroundPlayback) {
+                        playerWrapper.resumeForLifecycle()
+                    }
                 }
                 Lifecycle.Event.ON_STOP -> {
                     if (activity?.isInPictureInPictureMode != true) {
-                        playerWrapper.pauseForLifecycle()
+                        if (isLiveMedia && currentBackgroundPlayback) {
+                            playerWrapper.setBackgroundAudioOnlyMode(true)
+                        } else {
+                            playerWrapper.pauseForLifecycle()
+                        }
                     }
                 }
                 else -> Unit
@@ -160,6 +169,7 @@ fun PlayerScreen(
         }
     }
 
+    val mediaController by playerWrapper.mediaController.collectAsState()
     val playerUiState by playerWrapper.playerUiState.collectAsState()
     val hasRenderedFirstFrame by playerWrapper.hasRenderedFirstFrame.collectAsState()
     val isPlaying by playerWrapper.isPlaying.collectAsState()
@@ -314,11 +324,12 @@ fun PlayerScreen(
             }
             .testTag("player_screen")
     ) {
-        // 1. Video Surface (Media3 ExoPlayer PlayerView) - same instance preserved throughout preparation, buffering & playback
+        // 1. Video Surface (Media3 PlayerView connected via MediaController / single ExoPlayer)
+        val boundPlayer = mediaController ?: playerWrapper.getPlayer()
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
-                    player = playerWrapper.getPlayer()
+                    player = boundPlayer
                     useController = false
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
                     setKeepContentOnPlayerReset(true)
@@ -336,9 +347,8 @@ fun PlayerScreen(
                 }
             },
             update = { playerView ->
-                val activePlayer = playerWrapper.getPlayer()
-                if (playerView.player !== activePlayer) {
-                    playerView.player = activePlayer
+                if (playerView.player !== boundPlayer) {
+                    playerView.player = boundPlayer
                 }
                 playerView.resizeMode = when (currentAspectRatio) {
                     AspectRatioMode.FIT -> AspectRatioFrameLayout.RESIZE_MODE_FIT

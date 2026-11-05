@@ -11,13 +11,14 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
 import com.example.data.local.QualityDetector
+import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -55,32 +56,26 @@ data class PlayerTrackOption(
 @OptIn(UnstableApi::class)
 class ExoPlayerWrapper(private val context: Context) {
 
-    val trackSelector = DefaultTrackSelector(context)
+    private val appContext = context.applicationContext
+
+    val trackSelector: DefaultTrackSelector
+        get() = KrasMediaPlaybackService.getOrCreateTrackSelector(appContext)
 
     // Callback invoked whenever real video height/tracks are detected during playback
     var onRealQualityDetected: ((String) -> Unit)? = null
 
-    // Configurable buffer load control tuned for fast initial start & smooth streaming
     fun createLoadControl(bufferSizeSetting: String): DefaultLoadControl {
-        val (minBufferMs, maxBufferMs) = when (bufferSizeSetting) {
-            "Aggressive" -> Pair(25_000, 50_000)
-            "Standard" -> Pair(10_000, 20_000)
-            else -> Pair(15_000, 35_000) // Large default
-        }
-
-        return DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                minBufferMs,
-                maxBufferMs,
-                1000, // Fast start once 1s is buffered
-                2000  // Rebuffer recovery threshold
-            )
-            .setPrioritizeTimeOverSizeThresholds(true)
-            .build()
+        return KrasMediaPlaybackService.createLoadControl(bufferSizeSetting)
     }
 
     private var exoPlayer: ExoPlayer? = null
     private var currentBufferSetting: String = "Large"
+    private var attachedListenerPlayer: ExoPlayer? = null
+
+    // MediaController connected to KrasMediaPlaybackService
+    private var controllerFuture: ListenableFuture<MediaController>? = null
+    private val _mediaController = MutableStateFlow<MediaController?>(null)
+    val mediaController = _mediaController.asStateFlow()
 
     private val _playerUiState = MutableStateFlow(PlayerUiState.PREPARING)
     val playerUiState = _playerUiState.asStateFlow()
@@ -141,131 +136,172 @@ class ExoPlayerWrapper(private val context: Context) {
     private var currentVideoCodec = ""
     private var currentAudioChannels = 0
     private var wasPlayingBeforeLifecycleStop = false
+    private var isBackgroundAudioOnly = false
 
-    fun getPlayer(): ExoPlayer {
-        if (exoPlayer == null) {
-            initPlayer(currentBufferSetting)
+    private val playerListener = object : Player.Listener {
+        override fun onRenderedFirstFrame() {
+            _hasRenderedFirstFrame.value = true
+            _isBuffering.value = false
+            _errorMessage.value = null
+            exoPlayer?.let { syncPlayerUiState(it) }
         }
-        return exoPlayer!!
+
+        override fun onPlaybackStateChanged(state: Int) {
+            val player = exoPlayer ?: return
+            when (state) {
+                Player.STATE_BUFFERING -> {
+                    _isBuffering.value = true
+                }
+                Player.STATE_READY -> {
+                    _isBuffering.value = false
+                    _duration.value = player.duration.coerceAtLeast(0L)
+                    _errorMessage.value = null
+                    retryCount = 0
+                    val hasSelectedVideo = player.currentTracks.groups.any {
+                        it.type == C.TRACK_TYPE_VIDEO && it.isSelected
+                    }
+                    if (!hasSelectedVideo) {
+                        _hasRenderedFirstFrame.value = true
+                    }
+                    inspectPlayerFormatsAndNotify(player)
+                }
+                Player.STATE_ENDED -> {
+                    _isBuffering.value = false
+                    _isPlaying.value = false
+                }
+                Player.STATE_IDLE -> {
+                    _isBuffering.value = false
+                }
+            }
+            syncPlayerUiState(player)
+        }
+
+        override fun onIsPlayingChanged(playing: Boolean) {
+            _isPlaying.value = playing
+            if (playing) {
+                _errorMessage.value = null
+            }
+            exoPlayer?.let { syncPlayerUiState(it) }
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            exoPlayer?.let { syncPlayerUiState(it) }
+        }
+
+        override fun onVideoSizeChanged(videoSize: VideoSize) {
+            val player = exoPlayer ?: return
+            try {
+                if (videoSize.height > 0) {
+                    currentVideoHeight = videoSize.height
+                    inspectPlayerFormatsAndNotify(player)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        override fun onTracksChanged(tracks: Tracks) {
+            val player = exoPlayer ?: return
+            try {
+                extractTracksAndVariants(player, tracks)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            val player = exoPlayer ?: return
+            if (retryCount < 2 && !lastMediaUrl.isNullOrBlank()) {
+                retryCount++
+                _isBuffering.value = true
+                _playerUiState.value = if (_hasRenderedFirstFrame.value) {
+                    PlayerUiState.BUFFERING
+                } else {
+                    PlayerUiState.PREPARING
+                }
+                val resumePos = _currentPosition.value.coerceAtLeast(0L)
+                if (resumePos > 0L) {
+                    player.seekTo(resumePos)
+                }
+                player.prepare()
+                player.playWhenReady = true
+            } else {
+                _isBuffering.value = false
+                _isPlaying.value = false
+                _errorMessage.value = formatPlaybackError(error)
+                _playerUiState.value = PlayerUiState.ERROR
+            }
+        }
+    }
+
+    /**
+     * Returns the single shared [ExoPlayer] instance owned by [KrasMediaPlaybackService].
+     */
+    fun getPlayer(): ExoPlayer {
+        val current = exoPlayer
+        if (current != null) {
+            return current
+        }
+        return initPlayer(currentBufferSetting)
+    }
+
+    /**
+     * Returns the connected [MediaController] when available, or the underlying [ExoPlayer]
+     * so UI components (`PlayerView`) are always bound to the active MediaSession / single ExoPlayer.
+     */
+    fun getActivePlayer(): Player {
+        return _mediaController.value ?: getPlayer()
+    }
+
+    /**
+     * Connects to [KrasMediaPlaybackService] via [MediaController] if not already connected.
+     */
+    fun ensureMediaControllerConnected() {
+        if (_mediaController.value != null || controllerFuture != null) return
+        try {
+            val sessionToken = SessionToken(
+                appContext,
+                KrasMediaPlaybackService.createSessionComponentName(appContext)
+            )
+            val future = MediaController.Builder(appContext, sessionToken).buildAsync()
+            controllerFuture = future
+            future.addListener(
+                {
+                    try {
+                        _mediaController.value = future.get()
+                    } catch (_: Exception) {
+                        controllerFuture = null
+                    }
+                },
+                MoreExecutors.directExecutor()
+            )
+        } catch (_: Exception) {
+            controllerFuture = null
+        }
     }
 
     fun initPlayer(bufferSetting: String = "Large"): ExoPlayer {
         val existing = exoPlayer
-        if (existing != null && currentBufferSetting == bufferSetting) {
+        if (existing != null && currentBufferSetting == bufferSetting &&
+            KrasMediaPlaybackService.peekSharedPlayer() === existing
+        ) {
             return existing
         }
         currentBufferSetting = bufferSetting
-        existing?.release()
 
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("KrasTV/2.0 (Android; Media3 ExoPlayer)")
-            .setConnectTimeoutMs(12_000)
-            .setReadTimeoutMs(15_000)
-            .setAllowCrossProtocolRedirects(true)
+        val player = KrasMediaPlaybackService.getOrCreateSharedPlayer(
+            context = appContext,
+            bufferSetting = bufferSetting
+        )
 
-        val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
-        val loadControl = createLoadControl(bufferSetting)
-
-        val player = ExoPlayer.Builder(context)
-            .setTrackSelector(trackSelector)
-            .setLoadControl(loadControl)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
-            .build()
-
-        player.addListener(object : Player.Listener {
-            override fun onRenderedFirstFrame() {
-                _hasRenderedFirstFrame.value = true
-                _isBuffering.value = false
-                _errorMessage.value = null
-                syncPlayerUiState(player)
-            }
-
-            override fun onPlaybackStateChanged(state: Int) {
-                when (state) {
-                    Player.STATE_BUFFERING -> {
-                        _isBuffering.value = true
-                    }
-                    Player.STATE_READY -> {
-                        _isBuffering.value = false
-                        _duration.value = player.duration.coerceAtLeast(0L)
-                        _errorMessage.value = null
-                        retryCount = 0
-                        // If stream is audio-only (no selected video track), mark first frame ready immediately
-                        val hasSelectedVideo = player.currentTracks.groups.any {
-                            it.type == C.TRACK_TYPE_VIDEO && it.isSelected
-                        }
-                        if (!hasSelectedVideo) {
-                            _hasRenderedFirstFrame.value = true
-                        }
-                        inspectPlayerFormatsAndNotify(player)
-                    }
-                    Player.STATE_ENDED -> {
-                        _isBuffering.value = false
-                        _isPlaying.value = false
-                    }
-                    Player.STATE_IDLE -> {
-                        _isBuffering.value = false
-                    }
-                }
-                syncPlayerUiState(player)
-            }
-
-            override fun onIsPlayingChanged(playing: Boolean) {
-                _isPlaying.value = playing
-                if (playing) {
-                    _errorMessage.value = null
-                }
-                syncPlayerUiState(player)
-            }
-
-            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                syncPlayerUiState(player)
-            }
-
-            override fun onVideoSizeChanged(videoSize: VideoSize) {
-                try {
-                    if (videoSize.height > 0) {
-                        currentVideoHeight = videoSize.height
-                        inspectPlayerFormatsAndNotify(player)
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-
-            override fun onTracksChanged(tracks: Tracks) {
-                try {
-                    extractTracksAndVariants(player, tracks)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                if (retryCount < 2 && !lastMediaUrl.isNullOrBlank()) {
-                    retryCount++
-                    _isBuffering.value = true
-                    _playerUiState.value = if (_hasRenderedFirstFrame.value) {
-                        PlayerUiState.BUFFERING
-                    } else {
-                        PlayerUiState.PREPARING
-                    }
-                    val resumePos = _currentPosition.value.coerceAtLeast(0L)
-                    if (resumePos > 0L) {
-                        player.seekTo(resumePos)
-                    }
-                    player.prepare()
-                    player.playWhenReady = true
-                } else {
-                    _isBuffering.value = false
-                    _isPlaying.value = false
-                    _errorMessage.value = formatPlaybackError(error)
-                    _playerUiState.value = PlayerUiState.ERROR
-                }
-            }
-        })
+        if (attachedListenerPlayer !== player) {
+            attachedListenerPlayer?.removeListener(playerListener)
+            player.addListener(playerListener)
+            attachedListenerPlayer = player
+        }
 
         exoPlayer = player
+        ensureMediaControllerConnected()
         return player
     }
 
@@ -488,7 +524,6 @@ class ExoPlayerWrapper(private val context: Context) {
             val overlayText = QualityDetector.formatPlayerResolutionOverlay(height, fps)
             _realResolutionOverlay.value = overlayText
 
-            // Also ensure current height is present in availableVideoVariants if stream is progressive
             if (_availableVideoVariants.value.size <= 1 && height > 0) {
                 val singleVariant = VideoQualityVariant(
                     label = "${height}p",
@@ -588,6 +623,26 @@ class ExoPlayerWrapper(private val context: Context) {
     }
 
     /**
+     * Enables or disables background audio-only decoding when Live TV continues playing
+     * while the Activity is in the background (Home pressed or screen locked).
+     * Disabling the video renderer while backgrounded prevents SurfaceView codec stalls
+     * and saves battery while keeping Live TV audio uninterrupted.
+     */
+    fun setBackgroundAudioOnlyMode(audioOnly: Boolean) {
+        if (isBackgroundAudioOnly == audioOnly) return
+        isBackgroundAudioOnly = audioOnly
+        try {
+            val builder = trackSelector.parameters.buildUpon()
+            builder.setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly)
+            trackSelector.setParameters(builder)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun isInBackgroundAudioOnlyMode(): Boolean = isBackgroundAudioOnly
+
+    /**
      * Enters initial PREPARING state before or while resolving stream URL.
      */
     fun setPreparingState() {
@@ -621,10 +676,24 @@ class ExoPlayerWrapper(private val context: Context) {
         }
     }
 
-    fun play(url: String, startPositionMs: Long = 0L) {
+    fun play(
+        url: String,
+        startPositionMs: Long = 0L,
+        metadata: PlaybackNotificationMetadata? = null
+    ) {
         if (url.isBlank()) {
             failWithError("Stream URL is unavailable for this title.")
             return
+        }
+
+        if (metadata != null) {
+            KrasMediaPlaybackService.updateNotificationMetadata(metadata)
+        }
+        KrasMediaPlaybackService.ensureServiceStarted(appContext)
+        ensureMediaControllerConnected()
+
+        if (isBackgroundAudioOnly) {
+            setBackgroundAudioOnlyMode(false)
         }
 
         val isSameUrl = (lastMediaUrl == url && exoPlayer != null && _errorMessage.value == null)
@@ -650,11 +719,13 @@ class ExoPlayerWrapper(private val context: Context) {
         _playerUiState.value = PlayerUiState.PREPARING
 
         val player = getPlayer()
+        val effectiveMetadata = metadata ?: KrasMediaPlaybackService.currentMetadata
         if (!isSameUrl || player.mediaItemCount == 0) {
-            val mediaItem = Media3Item.Builder()
-                .setUri(url)
-                .build()
+            val mediaItem = KrasMediaPlaybackService.buildMedia3Item(url, effectiveMetadata)
             player.setMediaItem(mediaItem)
+        } else if (metadata != null && player.mediaItemCount > 0) {
+            val mediaItem = KrasMediaPlaybackService.buildMedia3Item(url, metadata)
+            player.replaceMediaItem(player.currentMediaItemIndex, mediaItem)
         }
         if (startPositionMs > 0L) {
             player.seekTo(startPositionMs)
@@ -683,7 +754,7 @@ class ExoPlayerWrapper(private val context: Context) {
 
         val player = getPlayer()
         if (player.mediaItemCount == 0) {
-            player.setMediaItem(Media3Item.fromUri(url))
+            player.setMediaItem(KrasMediaPlaybackService.buildMedia3Item(url))
         }
         val resumePos = _currentPosition.value.coerceAtLeast(0L)
         if (resumePos > 0L) {
@@ -696,18 +767,20 @@ class ExoPlayerWrapper(private val context: Context) {
     fun seekTo(positionMs: Long) {
         val target = positionMs.coerceAtLeast(0L)
         _currentPosition.value = target
-        exoPlayer?.seekTo(target)
+        getActivePlayer().seekTo(target)
     }
 
     fun seekForward(ms: Long = 10_000L) {
-        val current = exoPlayer?.currentPosition ?: _currentPosition.value
-        val dur = exoPlayer?.duration ?: _duration.value
+        val active = getActivePlayer()
+        val current = active.currentPosition.takeIf { it >= 0L } ?: _currentPosition.value
+        val dur = active.duration.takeIf { it > 0L } ?: _duration.value
         val target = if (dur > 0) (current + ms).coerceAtMost(dur) else current + ms
         seekTo(target)
     }
 
     fun seekBackward(ms: Long = 10_000L) {
-        val current = exoPlayer?.currentPosition ?: _currentPosition.value
+        val active = getActivePlayer()
+        val current = active.currentPosition.takeIf { it >= 0L } ?: _currentPosition.value
         val target = (current - ms).coerceAtLeast(0L)
         seekTo(target)
     }
@@ -718,38 +791,40 @@ class ExoPlayerWrapper(private val context: Context) {
             retry()
             return
         }
+        val active = getActivePlayer()
         if (player.playbackState == Player.STATE_ENDED) {
-            player.seekTo(0L)
-            player.playWhenReady = true
-            player.play()
+            active.seekTo(0L)
+            active.playWhenReady = true
+            active.play()
             return
         }
         if (player.isPlaying) {
-            player.pause()
+            active.pause()
         } else {
-            player.playWhenReady = true
-            player.play()
+            active.playWhenReady = true
+            active.play()
         }
     }
 
     fun pauseForLifecycle() {
         val player = exoPlayer ?: return
         wasPlayingBeforeLifecycleStop = player.isPlaying || player.playWhenReady
-        if (player.isPlaying) {
-            player.pause()
+        if (player.isPlaying || player.playWhenReady) {
+            getActivePlayer().pause()
         }
     }
 
     fun resumeForLifecycle() {
         val player = exoPlayer ?: return
         if (wasPlayingBeforeLifecycleStop && _playerUiState.value != PlayerUiState.ERROR) {
-            player.playWhenReady = true
-            player.play()
+            wasPlayingBeforeLifecycleStop = false
+            getActivePlayer().playWhenReady = true
+            getActivePlayer().play()
         }
     }
 
     fun setPlaybackSpeed(speed: Float) {
-        exoPlayer?.playbackParameters = PlaybackParameters(speed)
+        getActivePlayer().playbackParameters = PlaybackParameters(speed)
     }
 
     fun updatePosition() {
@@ -762,6 +837,10 @@ class ExoPlayerWrapper(private val context: Context) {
     }
 
     fun stop() {
+        wasPlayingBeforeLifecycleStop = false
+        if (isBackgroundAudioOnly) {
+            setBackgroundAudioOnlyMode(false)
+        }
         exoPlayer?.stop()
         exoPlayer?.clearMediaItems()
         lastMediaUrl = null
@@ -773,8 +852,13 @@ class ExoPlayerWrapper(private val context: Context) {
     }
 
     fun release() {
-        exoPlayer?.stop()
-        exoPlayer?.release()
+        wasPlayingBeforeLifecycleStop = false
+        controllerFuture?.let { MediaController.releaseFuture(it) }
+        controllerFuture = null
+        _mediaController.value = null
+        attachedListenerPlayer?.removeListener(playerListener)
+        attachedListenerPlayer = null
         exoPlayer = null
+        KrasMediaPlaybackService.releaseSharedPlayer()
     }
 }
