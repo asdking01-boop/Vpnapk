@@ -11,6 +11,16 @@ enum class TmdbAuthStatus {
     CONNECTED
 }
 
+enum class TmdbAuthErrorType {
+    NONE,
+    CANCELLED,
+    DENIED,
+    EXPIRED_TOKEN,
+    STATE_MISMATCH,
+    NETWORK_ERROR,
+    SERVICE_UNAVAILABLE
+}
+
 enum class TmdbSyncStatus {
     IDLE,
     SYNCING,

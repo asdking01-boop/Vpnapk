@@ -166,6 +166,17 @@ class MainActivity : ComponentActivity() {
                 val totalLiveCount by viewModel.totalLiveCount.collectAsState()
                 val updateState by viewModel.updateState.collectAsState()
                 val tmdbAccountState by viewModel.tmdbAccountState.collectAsState()
+                val navigateToSettingsFromAuth by viewModel.navigateToSettingsFromAuth.collectAsState()
+
+                LaunchedEffect(navigateToSettingsFromAuth) {
+                    if (navigateToSettingsFromAuth) {
+                        isSearchOpen = false
+                        isLoginOpen = false
+                        selectedSeriesForDetails = null
+                        currentScreen = NavScreen.SETTINGS
+                        viewModel.consumeNavigateToSettingsFromAuth()
+                    }
+                }
 
                 // Play original cinematic intro sound on cold start launch only
                 LaunchedEffect(Unit) {

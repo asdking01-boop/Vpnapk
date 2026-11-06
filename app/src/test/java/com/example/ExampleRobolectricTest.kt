@@ -1622,9 +1622,24 @@ class ExampleRobolectricTest {
     assertTrue(repo.getLocalTmdbSyncFavorites(userA).isEmpty())
     assertTrue(repo.getFavorites(krasAccountId = userB).any { it.tmdbId == 100088 })
     assertTrue(repo.getWatchHistory().any { it.mediaId == "mov_alpha_1" && it.positionMs == 42_000L })
+
+    // 5. Installation ID persistence and pending authorization expiration check
+    val installationId1 = sessionStore.getOrCreateInstallationId()
+    val installationId2 = sessionStore.getOrCreateInstallationId()
+    assertTrue(installationId1.startsWith("kras_inst_"))
+    assertEquals(installationId1, installationId2)
+
+    sessionStore.savePendingAuthRequest(
+      krasAccountId = userA,
+      requestToken = "req_token_test_123",
+      stateNonce = "nonce_abc",
+      authSessionId = "auth_sess_123",
+      ttlMs = 60_000L
+    )
+    val pendingReq = sessionStore.getPendingAuthRequest(userA)
+    assertNotNull(pendingReq)
+    assertFalse(pendingReq!!.isExpired(pendingReq.createdAtMs + 10_000L))
+    assertTrue(pendingReq.isExpired(pendingReq.createdAtMs + 120_000L))
+    sessionStore.clearPendingRequestToken(userA)
   }
 }
-
-
-
-

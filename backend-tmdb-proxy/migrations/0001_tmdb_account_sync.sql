@@ -1,69 +1,97 @@
 -- ============================================================================
--- KRAS TV — Cloudflare D1 Multi-User TMDb Account & Two-Way Sync Schema
+-- KRAS TV — Cloudflare D1 Database Migration for Multi-User TMDb Account Sync
 -- Migration: 0001_tmdb_account_sync.sql
 -- ============================================================================
 
--- 1. Pending Authorization Request Tokens (CSRF & Multi-User Callback Validation)
+-- 1. Pending browser authorization requests (15-minute TTL)
 CREATE TABLE IF NOT EXISTS tmdb_auth_requests (
     request_token TEXT PRIMARY KEY,
-    kras_user_id TEXT NOT NULL DEFAULT 'default',
+    auth_session_id TEXT NOT NULL,
+    installation_id TEXT NOT NULL DEFAULT '',
+    kras_user_id TEXT NOT NULL,
     state_nonce TEXT NOT NULL DEFAULT '',
-    redirect_to TEXT NOT NULL DEFAULT 'krastv://tmdb-auth',
-    status TEXT NOT NULL DEFAULT 'PENDING',
-    expires_at TEXT NOT NULL DEFAULT '',
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    redirect_uri TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'approved', 'denied', 'expired', 'consumed'
+    approved INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tmdb_auth_requests_user
-    ON tmdb_auth_requests(kras_user_id, created_at DESC);
+    ON tmdb_auth_requests(kras_user_id, installation_id, created_at DESC);
 
--- 2. Authenticated Multi-User TMDb Sessions (Isolated per KRAS TV user & TMDb account)
-CREATE TABLE IF NOT EXISTS tmdb_user_sessions (
-    session_id TEXT PRIMARY KEY,
-    kras_user_id TEXT NOT NULL DEFAULT 'default',
+-- 2. Single-use authorization codes issued after TMDb browser callback (5-minute TTL)
+--    Used by Android App Link handoff so TMDb session tokens never appear in URLs or APK.
+CREATE TABLE IF NOT EXISTS tmdb_auth_codes (
+    auth_code TEXT PRIMARY KEY,
+    client_token TEXT NOT NULL,
+    tmdb_session_id TEXT NOT NULL,
     tmdb_account_id INTEGER NOT NULL,
     username TEXT NOT NULL,
     display_name TEXT NOT NULL DEFAULT '',
     avatar_url TEXT NOT NULL DEFAULT '',
+    installation_id TEXT NOT NULL DEFAULT '',
+    kras_user_id TEXT NOT NULL,
+    state_nonce TEXT NOT NULL DEFAULT '',
+    consumed INTEGER NOT NULL DEFAULT 0,
+    expires_at_ms INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tmdb_auth_codes_lookup
+    ON tmdb_auth_codes(kras_user_id, installation_id, consumed);
+
+-- 3. Multi-user TMDb sessions bound to KRAS TV installation + user profile
+--    Maps opaque `client_token` -> server-side `tmdb_session_id`.
+CREATE TABLE IF NOT EXISTS tmdb_user_sessions (
+    session_id TEXT PRIMARY KEY,          -- Opaque KRAS client_token
+    tmdb_session_id TEXT NOT NULL DEFAULT '', -- Official TMDb v3 session_id (kept server-side only)
+    installation_id TEXT NOT NULL DEFAULT '',
+    kras_user_id TEXT NOT NULL,
+    tmdb_account_id INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT,
     include_adult INTEGER NOT NULL DEFAULT 0,
-    revoked INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
-    last_verified_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    last_sync_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_tmdb_user_sessions_kras_user
-    ON tmdb_user_sessions(kras_user_id, revoked);
+    ON tmdb_user_sessions(kras_user_id, installation_id);
 
-CREATE INDEX IF NOT EXISTS idx_tmdb_user_sessions_account
-    ON tmdb_user_sessions(tmdb_account_id, revoked);
+CREATE INDEX IF NOT EXISTS idx_tmdb_user_sessions_account_id
+    ON tmdb_user_sessions(tmdb_account_id);
 
--- 3. Connected TMDb Accounts Cache & Sync Timestamps
+-- 4. TMDb account profiles
 CREATE TABLE IF NOT EXISTS tmdb_accounts (
     account_id INTEGER PRIMARY KEY,
     username TEXT NOT NULL,
-    display_name TEXT NOT NULL DEFAULT '',
-    avatar_url TEXT NOT NULL DEFAULT '',
-    last_sync_at INTEGER NOT NULL DEFAULT 0,
-    updated_at INTEGER NOT NULL DEFAULT 0
+    name TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT,
+    session_id TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_sync_at INTEGER NOT NULL DEFAULT 0
 );
 
--- 4. Synchronized User Collections (Favorites, Watchlist, Ratings for Movies & TV Series)
+-- 5. Cached synchronized Favorites, Watchlist, and Ratings per TMDb account
 CREATE TABLE IF NOT EXISTS tmdb_sync_items (
     account_id INTEGER NOT NULL,
-    list_type TEXT NOT NULL,      -- 'FAVORITE' | 'WATCHLIST' | 'RATING'
-    media_type TEXT NOT NULL,     -- 'MOVIE' | 'SERIES'
     tmdb_id INTEGER NOT NULL,
+    media_type TEXT NOT NULL,
     title TEXT NOT NULL DEFAULT '',
-    year TEXT NOT NULL DEFAULT '',
-    poster_url TEXT NOT NULL DEFAULT '',
-    backdrop_url TEXT NOT NULL DEFAULT '',
-    overview TEXT NOT NULL DEFAULT '',
-    tmdb_rating REAL NOT NULL DEFAULT 0,
-    user_rating REAL NOT NULL DEFAULT 0,
-    updated_at INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (account_id, list_type, media_type, tmdb_id)
+    poster_url TEXT,
+    backdrop_url TEXT,
+    release_year TEXT,
+    tmdb_rating REAL,
+    user_rating REAL,
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    in_watchlist INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (account_id, tmdb_id, media_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tmdb_sync_items_account
-    ON tmdb_sync_items(account_id, list_type);
+    ON tmdb_sync_items(account_id, updated_at DESC);

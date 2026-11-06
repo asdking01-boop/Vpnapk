@@ -35,6 +35,19 @@
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Verified Android App Link for Cloudflare Worker HTTPS TMDb Auth Callback -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:scheme="https"
+                    android:host="kras-tmdb-proxy.asdking01.workers.dev"
+                    android:pathPrefix="/app/tmdb-auth" />
+            </intent-filter>
+            <!-- Fallback Deep Link for browsers that hand off custom schemes -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
 

@@ -1612,7 +1612,7 @@ private fun TmdbAccountSyncCard(
                                     text = if (isArabic) {
                                         "آخر مزامنة: ${tmdbAccountState.lastSyncFormatted(true)}"
                                     } else {
-                                        "Last Sync: ${tmdbAccountState.lastSyncFormatted(false)}"
+                                        "Last Synced: ${tmdbAccountState.lastSyncFormatted(false)}"
                                     },
                                     color = TextSecondary,
                                     fontSize = 11.sp,

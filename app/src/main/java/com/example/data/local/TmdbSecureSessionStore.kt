@@ -14,7 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 data class StoredTmdbSession(
     val krasAccountId: String,
-    val sessionId: String,
+    val sessionId: String, // Opaque installation-bound client token issued by Cloudflare Worker (never exposes raw TMDb session_id)
     val accountId: Int,
     val username: String,
     val displayName: String,
@@ -22,24 +22,38 @@ data class StoredTmdbSession(
     val lastSyncTimestampMs: Long,
     val syncedFavoritesCount: Int,
     val syncedWatchlistCount: Int,
-    val syncedRatingsCount: Int
+    val syncedRatingsCount: Int,
+    val installationId: String = ""
 )
 
 data class PendingTmdbAuthRequest(
     val krasAccountId: String,
     val requestToken: String,
     val stateNonce: String,
-    val createdAtMs: Long
-)
+    val createdAtMs: Long,
+    val expiresAtMs: Long = createdAtMs + DEFAULT_PENDING_AUTH_TTL_MS,
+    val authSessionId: String = "",
+    val installationId: String = ""
+) {
+    fun isExpired(nowMs: Long = System.currentTimeMillis()): Boolean {
+        return createdAtMs > 0L && nowMs > expiresAtMs
+    }
+
+    companion object {
+        const val DEFAULT_PENDING_AUTH_TTL_MS = 15 * 60 * 1000L // 15 minutes
+    }
+}
 
 /**
  * Multi-user encrypted TMDb session store backed by Android Keystore AES-256-GCM encryption.
  *
  * Security & Multi-User Isolation Guarantees:
+ * - Each KRAS TV installation has a unique cryptographic `installationId`.
  * - Each KRAS TV user (`krasAccountId`) has an isolated encrypted TMDb session record.
+ * - Stores only the opaque installation-bound client token issued by the Cloudflare Worker;
+ *   the raw TMDb `session_id` and `TMDB_API_KEY` remain server-side on the Worker.
  * - Users cannot read or overwrite another KRAS TV user's TMDb session or pending auth state.
  * - Legacy single-user session keys from older versions are migrated/cleaned automatically.
- * - Session tokens and request tokens are encrypted at rest and never exposed in UI states or logs.
  */
 class TmdbSecureSessionStore(context: Context) {
 
@@ -60,6 +74,24 @@ class TmdbSecureSessionStore(context: Context) {
 
     private fun pendingAuthKeyForUser(krasAccountId: String?): String {
         return "${KEY_USER_PENDING_AUTH_PREFIX}${normalizeUserKey(krasAccountId)}"
+    }
+
+    /**
+     * Returns a persistent cryptographic installation identifier unique to this KRAS TV installation.
+     */
+    fun getOrCreateInstallationId(): String {
+        val existingEncrypted = prefs.getString(KEY_INSTALLATION_ID, null)
+        if (!existingEncrypted.isNullOrBlank()) {
+            val decrypted = decryptValue(existingEncrypted).trim()
+            if (decrypted.length >= 16) {
+                return decrypted
+            }
+        }
+        val bytes = ByteArray(16)
+        SecureRandom().nextBytes(bytes)
+        val generated = "kras_inst_" + bytes.joinToString("") { "%02x".format(it) }
+        prefs.edit().putString(KEY_INSTALLATION_ID, encryptValue(generated)).apply()
+        return generated
     }
 
     /**
@@ -118,8 +150,10 @@ class TmdbSecureSessionStore(context: Context) {
     ) {
         val normalizedUser = normalizeUserKey(krasAccountId)
         val existing = getSession(normalizedUser)
+        val installationId = getOrCreateInstallationId()
         val payload = JSONObject().apply {
             put("krasAccountId", normalizedUser)
+            put("installationId", installationId)
             put("sessionId", sessionId.trim())
             put("accountId", accountId)
             put("username", username.trim())
@@ -159,7 +193,8 @@ class TmdbSecureSessionStore(context: Context) {
                 lastSyncTimestampMs = obj.optLong("lastSyncTimestampMs", 0L),
                 syncedFavoritesCount = obj.optInt("syncedFavoritesCount", 0),
                 syncedWatchlistCount = obj.optInt("syncedWatchlistCount", 0),
-                syncedRatingsCount = obj.optInt("syncedRatingsCount", 0)
+                syncedRatingsCount = obj.optInt("syncedRatingsCount", 0),
+                installationId = obj.optString("installationId", getOrCreateInstallationId())
             )
         } catch (_: Exception) {
             null
@@ -209,19 +244,25 @@ class TmdbSecureSessionStore(context: Context) {
     fun savePendingAuthRequest(
         krasAccountId: String = DEFAULT_USER_ID,
         requestToken: String,
-        stateNonce: String
+        stateNonce: String,
+        authSessionId: String = "",
+        ttlMs: Long = PendingTmdbAuthRequest.DEFAULT_PENDING_AUTH_TTL_MS
     ) {
         val normalizedUser = normalizeUserKey(krasAccountId)
         val trimmedToken = requestToken.trim()
-        if (trimmedToken.isEmpty()) {
+        if (trimmedToken.isEmpty() && authSessionId.isBlank()) {
             prefs.edit().remove(pendingAuthKeyForUser(normalizedUser)).apply()
             return
         }
+        val nowMs = System.currentTimeMillis()
         val payload = JSONObject().apply {
             put("krasAccountId", normalizedUser)
+            put("installationId", getOrCreateInstallationId())
             put("requestToken", trimmedToken)
+            put("authSessionId", authSessionId.trim())
             put("stateNonce", stateNonce.trim())
-            put("createdAtMs", System.currentTimeMillis())
+            put("createdAtMs", nowMs)
+            put("expiresAtMs", nowMs + ttlMs.coerceAtLeast(60_000L))
         }
         prefs.edit()
             .putString(pendingAuthKeyForUser(normalizedUser), encryptValue(payload.toString()))
@@ -237,12 +278,21 @@ class TmdbSecureSessionStore(context: Context) {
             if (decrypted.startsWith("{")) {
                 val obj = JSONObject(decrypted)
                 val token = obj.optString("requestToken", "").trim()
-                if (token.isEmpty()) return null
+                val authSessionId = obj.optString("authSessionId", "").trim()
+                if (token.isEmpty() && authSessionId.isEmpty()) return null
+                val createdAtMs = obj.optLong("createdAtMs", 0L)
+                val expiresAtMs = obj.optLong(
+                    "expiresAtMs",
+                    if (createdAtMs > 0L) createdAtMs + PendingTmdbAuthRequest.DEFAULT_PENDING_AUTH_TTL_MS else Long.MAX_VALUE
+                )
                 PendingTmdbAuthRequest(
                     krasAccountId = obj.optString("krasAccountId", normalizedUser),
                     requestToken = token,
                     stateNonce = obj.optString("stateNonce", "").trim(),
-                    createdAtMs = obj.optLong("createdAtMs", 0L)
+                    createdAtMs = createdAtMs,
+                    expiresAtMs = expiresAtMs,
+                    authSessionId = authSessionId,
+                    installationId = obj.optString("installationId", getOrCreateInstallationId())
                 )
             } else {
                 PendingTmdbAuthRequest(
@@ -351,6 +401,7 @@ class TmdbSecureSessionStore(context: Context) {
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val DEFAULT_USER_ID = "demo"
 
+        private const val KEY_INSTALLATION_ID = "enc_kras_installation_id_v1"
         private const val KEY_USER_SESSION_PREFIX = "enc_user_session_v2_"
         private const val KEY_USER_PENDING_AUTH_PREFIX = "enc_pending_auth_v2_"
 

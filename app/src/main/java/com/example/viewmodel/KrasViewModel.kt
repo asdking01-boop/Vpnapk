@@ -811,6 +811,13 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val _navigateToSettingsFromAuth = MutableStateFlow(false)
+    val navigateToSettingsFromAuth = _navigateToSettingsFromAuth.asStateFlow()
+
+    fun consumeNavigateToSettingsFromAuth() {
+        _navigateToSettingsFromAuth.value = false
+    }
+
     private fun buildInitialTmdbAccountUiState(krasUserId: String = repository.getActiveAccount().id): TmdbAccountUiState {
         val settings = repository.getUserSettings()
         val stored = tmdbSessionStore.getSession(krasUserId)
@@ -818,7 +825,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         val localFavCount = repository.getLocalTmdbSyncFavorites(krasUserId).size
         val localWatchlistCount = repository.getWatchlist(krasUserId).size
         val localRatingsCount = repository.getUserRatings(krasUserId).size
-        if (stored != null) {
+        if (stored != null && stored.sessionId.isNotBlank() && stored.username.isNotBlank()) {
             return TmdbAccountUiState(
                 krasAccountId = krasUserId,
                 authStatus = TmdbAuthStatus.CONNECTED,
@@ -836,6 +843,20 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         val pendingAuth = tmdbSessionStore.getPendingAuthRequest(krasUserId)
+        if (pendingAuth != null && pendingAuth.isExpired()) {
+            tmdbSessionStore.clearPendingRequestToken(krasUserId)
+            return TmdbAccountUiState(
+                krasAccountId = krasUserId,
+                authStatus = TmdbAuthStatus.DISCONNECTED,
+                autoSyncEnabled = settings.tmdbAutoSyncEnabled,
+                syncedFavoritesCount = localFavCount,
+                syncedWatchlistCount = localWatchlistCount,
+                syncedRatingsCount = localRatingsCount,
+                pendingOfflineChangesCount = pendingCount,
+                statusMessage = "Your TMDb authorization session expired. Tap Connect TMDb Account to start a new session.",
+                isError = false
+            )
+        }
         return TmdbAccountUiState(
             krasAccountId = krasUserId,
             authStatus = if (pendingAuth != null) TmdbAuthStatus.AUTHORIZING_IN_BROWSER else TmdbAuthStatus.DISCONNECTED,
@@ -852,13 +873,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Initiates official TMDb user account authorization for the active KRAS TV user via the
-     * Cloudflare Worker proxy and opens TMDb's official authorization page in the browser.
+     * Initiates official browser-based TMDb user account authorization for the active KRAS TV user
+     * via the Cloudflare Worker proxy and opens TMDb's official authorization page in the external browser.
      */
     fun startTmdbAccountAuthorization(onOpenBrowserUrl: (String) -> Unit) {
         val proxyUrl = canonicalTmdbProxyUrl()
         val krasUserId = activeKrasUserId()
+        val installationId = tmdbSessionStore.getOrCreateInstallationId()
         val stateNonce = tmdbSessionStore.generateStateNonce()
+        val verifiedAppLinkRedirect = "$proxyUrl/app/tmdb-auth"
         _tmdbAccountState.value = _tmdbAccountState.value.copy(
             krasAccountId = krasUserId,
             authStatus = TmdbAuthStatus.VERIFYING_SESSION,
@@ -868,16 +891,18 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val result = tmdbProxyClient.createAuthRequestToken(
                 rawProxyUrl = proxyUrl,
-                redirectTo = "krastv://tmdb-auth",
+                redirectTo = verifiedAppLinkRedirect,
                 krasUserId = krasUserId,
-                stateNonce = stateNonce
+                stateNonce = stateNonce,
+                installationId = installationId
             )
             if (result.ok && result.requestToken.isNotBlank() && result.authUrl.isNotBlank()) {
                 val effectiveNonce = result.stateNonce.ifBlank { stateNonce }
                 tmdbSessionStore.savePendingAuthRequest(
                     krasAccountId = krasUserId,
                     requestToken = result.requestToken,
-                    stateNonce = effectiveNonce
+                    stateNonce = effectiveNonce,
+                    authSessionId = result.authSessionId
                 )
                 _tmdbAccountState.value = _tmdbAccountState.value.copy(
                     krasAccountId = krasUserId,
@@ -902,32 +927,81 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Handles the `krastv://tmdb-auth?request_token=...&approved=true&state=...&kras_user=...`
-     * deep-link callback from the browser and validates callback state to prevent CSRF/cross-user confusion.
+     * Checks whether an incoming URI is a verified Android App Link (`https://kras-tmdb-proxy.asdking01.workers.dev/app/tmdb-auth`)
+     * or the custom fallback deep link (`krastv://tmdb-auth`).
      */
-    fun handleTmdbAuthCallback(uri: Uri?) {
-        if (uri == null) return
+    fun isTmdbAuthCallbackUri(uri: Uri?): Boolean {
+        if (uri == null) return false
         val scheme = uri.scheme?.lowercase().orEmpty()
         val host = uri.host?.lowercase().orEmpty()
-        if (scheme != "krastv" || host != "tmdb-auth") return
+        val path = uri.path?.lowercase().orEmpty()
+        if (scheme == "krastv" && host == "tmdb-auth") return true
+        if ((scheme == "https" || scheme == "http") &&
+            (host == "kras-tmdb-proxy.asdking01.workers.dev" || host.endsWith(".workers.dev")) &&
+            (path.startsWith("/app/tmdb-auth") || path.startsWith("/api/tmdb/auth/callback"))
+        ) {
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Handles both verified Android App Link callbacks (`https://kras-tmdb-proxy.asdking01.workers.dev/app/tmdb-auth?code=...&state=...`)
+     * and custom scheme callbacks (`krastv://tmdb-auth?code=...&state=...`), validates the state nonce,
+     * and exchanges the one-time authorization code (`code`) with the Cloudflare Worker.
+     */
+    fun handleTmdbAuthCallback(uri: Uri?) {
+        if (!isTmdbAuthCallbackUri(uri) || uri == null) return
+
+        // Automatically navigate to the Settings screen so the user sees their connected TMDb status
+        _navigateToSettingsFromAuth.value = true
 
         val krasUserId = uri.getQueryParameter("kras_user")?.trim()?.takeIf { it.isNotBlank() }
+            ?: uri.getQueryParameter("uid")?.trim()?.takeIf { it.isNotBlank() }
             ?: activeKrasUserId()
 
-        val denied = uri.getQueryParameter("denied")?.equals("true", ignoreCase = true) == true ||
+        val statusParam = uri.getQueryParameter("status")?.trim()?.lowercase().orEmpty()
+        val cancelled = statusParam == "cancelled" ||
+            uri.getQueryParameter("cancelled")?.equals("true", ignoreCase = true) == true
+        if (cancelled) {
+            tmdbSessionStore.clearPendingRequestToken(krasUserId)
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                krasAccountId = krasUserId,
+                authStatus = TmdbAuthStatus.DISCONNECTED,
+                statusMessage = "TMDb sign-in was cancelled.",
+                isError = false
+            )
+            return
+        }
+
+        val denied = statusParam == "denied" ||
+            uri.getQueryParameter("denied")?.equals("true", ignoreCase = true) == true ||
             uri.getQueryParameter("approved")?.equals("false", ignoreCase = true) == true
         if (denied) {
             tmdbSessionStore.clearPendingRequestToken(krasUserId)
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
                 krasAccountId = krasUserId,
                 authStatus = TmdbAuthStatus.DISCONNECTED,
-                statusMessage = "TMDb account authorization was cancelled.",
-                isError = false
+                statusMessage = "Authorization was denied on TMDb. Tap Connect TMDb Account if you wish to try again.",
+                isError = true
             )
             return
         }
 
+        val expired = statusParam == "expired" ||
+            uri.getQueryParameter("expired")?.equals("true", ignoreCase = true) == true
         val pendingAuth = tmdbSessionStore.getPendingAuthRequest(krasUserId)
+        if (expired || (pendingAuth != null && pendingAuth.isExpired())) {
+            tmdbSessionStore.clearPendingRequestToken(krasUserId)
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                krasAccountId = krasUserId,
+                authStatus = TmdbAuthStatus.DISCONNECTED,
+                statusMessage = "Your TMDb authorization session expired. Tap Connect TMDb Account to start a new session.",
+                isError = true
+            )
+            return
+        }
+
         val callbackState = uri.getQueryParameter("state")?.trim().orEmpty()
         if (pendingAuth != null && pendingAuth.stateNonce.isNotBlank() && callbackState.isNotBlank() &&
             pendingAuth.stateNonce != callbackState
@@ -936,15 +1010,20 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
                 krasAccountId = krasUserId,
                 authStatus = TmdbAuthStatus.DISCONNECTED,
-                statusMessage = "TMDb authorization state check failed. Please reconnect your account.",
+                statusMessage = "Security state check failed. Please tap Connect TMDb Account to reconnect.",
                 isError = true
             )
             return
         }
 
+        // Extract one-time authorization code (`code`) or fallback `request_token`
+        val oneTimeAuthCode = uri.getQueryParameter("code")?.trim().orEmpty()
+            .ifBlank { uri.getQueryParameter("auth_code")?.trim().orEmpty() }
         val tokenFromUri = uri.getQueryParameter("request_token")?.trim().orEmpty()
+
         completeTmdbAuthorization(
             explicitToken = tokenFromUri,
+            authCode = oneTimeAuthCode,
             isAutoResumeCheck = false,
             targetKrasUserId = krasUserId,
             callbackStateNonce = callbackState.ifBlank { pendingAuth?.stateNonce.orEmpty() }
@@ -952,21 +1031,41 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Completes TMDb authorization by exchanging the approved `request_token` for an encrypted
-     * per-user session and running initial two-way synchronization.
+     * Completes TMDb authorization by exchanging the one-time authorization `authCode` (or verifying
+     * the pending session) with the Cloudflare Worker.
+     *
+     * Never sets `TmdbAuthStatus.CONNECTED` until the backend verifies the TMDb session (`sessionResult.verified`).
      */
     fun completeTmdbAuthorization(
         explicitToken: String? = null,
+        authCode: String = "",
         isAutoResumeCheck: Boolean = false,
         targetKrasUserId: String? = null,
         callbackStateNonce: String = ""
     ) {
         val krasUserId = targetKrasUserId?.takeIf { it.isNotBlank() } ?: activeKrasUserId()
         val pendingAuth = tmdbSessionStore.getPendingAuthRequest(krasUserId)
+        if (pendingAuth != null && pendingAuth.isExpired() && authCode.isBlank()) {
+            tmdbSessionStore.clearPendingRequestToken(krasUserId)
+            if (krasUserId == activeKrasUserId()) {
+                _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    krasAccountId = krasUserId,
+                    authStatus = TmdbAuthStatus.DISCONNECTED,
+                    statusMessage = "Your TMDb authorization session expired. Tap Connect TMDb Account to start a new session.",
+                    isError = true
+                )
+            }
+            return
+        }
+
         val token = explicitToken?.trim()?.takeIf { it.isNotEmpty() }
-            ?: pendingAuth?.requestToken
-            ?: return
+            ?: pendingAuth?.requestToken.orEmpty()
+        val cleanCode = authCode.trim()
+        val authSessionId = pendingAuth?.authSessionId.orEmpty()
+        if (token.isEmpty() && cleanCode.isEmpty() && authSessionId.isEmpty()) return
+
         val stateNonce = callbackStateNonce.ifBlank { pendingAuth?.stateNonce.orEmpty() }
+        val installationId = tmdbSessionStore.getOrCreateInstallationId()
 
         val proxyUrl = canonicalTmdbProxyUrl()
         if (!isAutoResumeCheck) {
@@ -983,9 +1082,12 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 rawProxyUrl = proxyUrl,
                 requestToken = token,
                 krasUserId = krasUserId,
-                stateNonce = stateNonce
+                stateNonce = stateNonce,
+                authCode = cleanCode,
+                authSessionId = authSessionId,
+                installationId = installationId
             )
-            if (sessionResult.ok && sessionResult.sessionId.isNotBlank() && sessionResult.username.isNotBlank()) {
+            if (sessionResult.ok && sessionResult.verified && sessionResult.sessionId.isNotBlank() && sessionResult.username.isNotBlank()) {
                 tmdbSessionStore.saveSession(
                     krasAccountId = krasUserId,
                     sessionId = sessionResult.sessionId,
@@ -1007,11 +1109,17 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         isError = false
                     )
                 }
-                // Automatically synchronize immediately after login
+                // Automatically synchronize immediately after login verification
                 syncTmdbAccountNow(isAuto = true, targetKrasUserId = krasUserId)
             } else {
+                val isTerminalError = sessionResult.authErrorType == com.example.data.model.TmdbAuthErrorType.EXPIRED_TOKEN ||
+                    sessionResult.authErrorType == com.example.data.model.TmdbAuthErrorType.DENIED ||
+                    sessionResult.authErrorType == com.example.data.model.TmdbAuthErrorType.STATE_MISMATCH
+                if (isTerminalError) {
+                    tmdbSessionStore.clearPendingRequestToken(krasUserId)
+                }
                 if (krasUserId == activeKrasUserId()) {
-                    if (isAutoResumeCheck) {
+                    if (isAutoResumeCheck && !isTerminalError) {
                         _tmdbAccountState.value = _tmdbAccountState.value.copy(
                             krasAccountId = krasUserId,
                             authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER
@@ -1019,7 +1127,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     } else {
                         _tmdbAccountState.value = _tmdbAccountState.value.copy(
                             krasAccountId = krasUserId,
-                            authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER,
+                            authStatus = if (isTerminalError) TmdbAuthStatus.DISCONNECTED else TmdbAuthStatus.AUTHORIZING_IN_BROWSER,
                             statusMessage = sessionResult.userMessage,
                             isError = true
                         )
@@ -1035,7 +1143,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         _tmdbAccountState.value = _tmdbAccountState.value.copy(
             krasAccountId = krasUserId,
             authStatus = TmdbAuthStatus.DISCONNECTED,
-            statusMessage = null,
+            statusMessage = "TMDb sign-in was cancelled.",
             isError = false
         )
     }
@@ -1059,6 +1167,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         if (krasUserId == activeKrasUserId() && _tmdbAccountState.value.syncStatus == TmdbSyncStatus.SYNCING) return
 
         val proxyUrl = canonicalTmdbProxyUrl()
+        val installationId = tmdbSessionStore.getOrCreateInstallationId()
         if (krasUserId == activeKrasUserId()) {
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
                 krasAccountId = krasUserId,
@@ -1084,7 +1193,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 localWatchlist = localWatchlist,
                 localRatings = localRatings,
                 pendingMutations = pendingMutations,
-                language = langCode
+                language = langCode,
+                installationId = installationId
             )
 
             if (syncResult.ok) {
@@ -1154,6 +1264,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         val krasUserId = activeKrasUserId()
         val stored = tmdbSessionStore.getSession(krasUserId)
         val proxyUrl = canonicalTmdbProxyUrl()
+        val installationId = tmdbSessionStore.getOrCreateInstallationId()
         tmdbSessionStore.clearSession(krasUserId)
         repository.clearTmdbSyncedDataOnDisconnect(krasUserId)
         _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder, krasUserId)
@@ -1171,7 +1282,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         )
         if (stored != null && stored.sessionId.isNotBlank()) {
             viewModelScope.launch(Dispatchers.IO) {
-                tmdbProxyClient.disconnectSession(proxyUrl, stored.sessionId, krasUserId)
+                tmdbProxyClient.disconnectSession(proxyUrl, stored.sessionId, krasUserId, installationId)
             }
         }
     }

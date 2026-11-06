@@ -95,19 +95,22 @@ data class TmdbMediaMetadata(
 data class TmdbRequestTokenResult(
     val ok: Boolean,
     val requestToken: String = "",
+    val authSessionId: String = "",
     val authUrl: String = "",
     val expiresAt: String = "",
     val stateNonce: String = "",
     val endpointNotDeployed: Boolean = false,
     val httpStatusCode: Int = 0,
     val errorCategory: TmdbErrorCategory = TmdbErrorCategory.NONE,
+    val authErrorType: com.example.data.model.TmdbAuthErrorType = com.example.data.model.TmdbAuthErrorType.NONE,
     val requestUrl: String = "",
     val userMessage: String = ""
 )
 
 data class TmdbSessionResult(
     val ok: Boolean,
-    val sessionId: String = "",
+    val verified: Boolean = false,
+    val sessionId: String = "", // Opaque installation-bound client token issued by Worker (never raw TMDb session_id)
     val accountId: Int = 0,
     val username: String = "",
     val displayName: String = "",
@@ -115,6 +118,7 @@ data class TmdbSessionResult(
     val endpointNotDeployed: Boolean = false,
     val httpStatusCode: Int = 0,
     val errorCategory: TmdbErrorCategory = TmdbErrorCategory.NONE,
+    val authErrorType: com.example.data.model.TmdbAuthErrorType = com.example.data.model.TmdbAuthErrorType.NONE,
     val requestUrl: String = "",
     val userMessage: String = ""
 )
@@ -138,9 +142,9 @@ data class TmdbTwoWaySyncResult(
  * Client for communicating with the secure server-side KRAS TV TMDb API v3 Backend Proxy.
  *
  * Security Guarantee:
- * - Never embeds, stores, or transmits `TMDB_API_KEY` from the Android client.
- * - All TMDb API v3 authentication and user session exchanges occur strictly through the backend proxy.
- * - User session IDs are sent only via `X-TMDb-Session-Id` request header over HTTPS.
+ * - Never embeds, stores, or transmits `TMDB_API_KEY` or raw TMDb `session_id` in the Android APK.
+ * - All TMDb API v3 authentication and user session exchanges occur strictly through the Cloudflare Worker.
+ * - Returns to KRAS TV via a verified Android App Link with a single-use authorization code (`code`).
  */
 class TmdbProxyClient(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
@@ -251,6 +255,7 @@ class TmdbProxyClient(
         proxyAuthToken: String,
         tmdbSessionId: String = "",
         krasUserId: String = "",
+        installationId: String = "",
         method: String = "GET",
         jsonBody: JSONObject? = null
     ): Request {
@@ -270,6 +275,9 @@ class TmdbProxyClient(
         if (krasUserId.isNotBlank()) {
             builder.header("X-KRAS-User-Id", krasUserId)
         }
+        if (installationId.isNotBlank()) {
+            builder.header("X-KRAS-Installation-Id", installationId)
+        }
 
         if (method.equals("POST", ignoreCase = true)) {
             val bodyStr = jsonBody?.toString() ?: "{}"
@@ -284,19 +292,21 @@ class TmdbProxyClient(
     }
 
     // =========================================================================
-    // 1. Official TMDb User Account Authorization & Two-Way Sync via Backend
+    // 1. Official Browser-Based TMDb User Account Authorization & Two-Way Sync
     // =========================================================================
 
     /**
-     * Step 1 of official TMDb user authorization:
-     * Requests a fresh TMDb `request_token` from `/api/tmdb/auth/request-token` on the backend proxy
-     * and returns the official `https://www.themoviedb.org/authenticate/{request_token}` URL.
+     * Step 1 of official browser-based TMDb user authorization:
+     * Requests a new authentication session from the Cloudflare Worker.
+     * The Worker creates an official TMDb `request_token`, associates it with `(installationId, krasUserId, stateNonce)`,
+     * and returns the official `https://www.themoviedb.org/authenticate/{request_token}?redirect_to=...` URL.
      */
     suspend fun createAuthRequestToken(
         rawProxyUrl: String,
-        redirectTo: String = "krastv://tmdb-auth",
+        redirectTo: String = "https://kras-tmdb-proxy.asdking01.workers.dev/app/tmdb-auth",
         krasUserId: String = "demo",
-        stateNonce: String = ""
+        stateNonce: String = "",
+        installationId: String = ""
     ): TmdbRequestTokenResult = withContext(Dispatchers.IO) {
         val effectiveRawUrl = rawProxyUrl.trim().ifBlank { CANONICAL_BACKEND_BASE_URL }
         val endpoint = parseProxyEndpoint(effectiveRawUrl)
@@ -305,18 +315,26 @@ class TmdbProxyClient(
                 ok = false,
                 endpointNotDeployed = false,
                 errorCategory = TmdbErrorCategory.UNCONFIGURED,
-                userMessage = "TMDb Account Sync service URL is not configured."
+                authErrorType = com.example.data.model.TmdbAuthErrorType.SERVICE_UNAVAILABLE,
+                userMessage = "TMDb Account Sync service is not configured."
             )
         }
 
         val requestUrl = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/auth/request-token")
+        val verifiedAppLinkUrl = "${endpoint.baseUrl}/app/tmdb-auth"
 
         try {
             val payload = JSONObject().apply {
                 put("redirectTo", redirectTo)
                 put("redirect_to", redirectTo)
+                put("appLinkUrl", verifiedAppLinkUrl)
+                put("app_link_url", verifiedAppLinkUrl)
                 put("krasUserId", krasUserId)
                 put("kras_user_id", krasUserId)
+                if (installationId.isNotBlank()) {
+                    put("installationId", installationId)
+                    put("installation_id", installationId)
+                }
                 if (stateNonce.isNotBlank()) {
                     put("state", stateNonce)
                 }
@@ -325,6 +343,7 @@ class TmdbProxyClient(
                 url = requestUrl,
                 proxyAuthToken = endpoint.proxyAuthToken,
                 krasUserId = krasUserId,
+                installationId = installationId,
                 method = "POST",
                 jsonBody = payload
             )
@@ -338,13 +357,17 @@ class TmdbProxyClient(
                 val token = json?.optString("requestToken", "")?.trim()
                     ?.ifBlank { json.optString("request_token", "").trim() }
                     .orEmpty()
+                val authSessionId = json?.optString("authSessionId", "")?.trim()
+                    ?.ifBlank { json.optString("auth_session_id", "").trim() }
+                    .orEmpty()
+                    .ifBlank { token }
 
-                if (response.isSuccessful && token.isNotEmpty()) {
+                if (response.isSuccessful && (token.isNotEmpty() || authSessionId.isNotEmpty())) {
                     val returnedState = json?.optString("state", stateNonce)?.trim().orEmpty().ifBlank { stateNonce }
                     val callbackUrl = buildString {
                         append(endpoint.baseUrl)
                         append("/api/tmdb/auth/callback?app_redirect=")
-                        append(URLEncoder.encode(redirectTo, "UTF-8"))
+                        append(URLEncoder.encode(verifiedAppLinkUrl, "UTF-8"))
                         if (returnedState.isNotBlank()) {
                             append("&state=")
                             append(URLEncoder.encode(returnedState, "UTF-8"))
@@ -353,95 +376,93 @@ class TmdbProxyClient(
                             append("&kras_user=")
                             append(URLEncoder.encode(krasUserId, "UTF-8"))
                         }
+                        if (installationId.isNotBlank()) {
+                            append("&iid=")
+                            append(URLEncoder.encode(installationId, "UTF-8"))
+                        }
                     }
                     val encodedCallback = URLEncoder.encode(callbackUrl, "UTF-8")
                     val authUrl = json?.optString("authUrl", "")?.trim()
                         ?.ifBlank { json.optString("auth_url", "").trim() }
+                        ?.ifBlank { json.optString("authenticateUrl", "").trim() }
                         .takeIf { !it.isNullOrBlank() }
                         ?: "https://www.themoviedb.org/authenticate/$token?redirect_to=$encodedCallback"
                     return@withContext TmdbRequestTokenResult(
                         ok = true,
-                        requestToken = token,
+                        requestToken = token.ifBlank { authSessionId },
+                        authSessionId = authSessionId,
                         authUrl = authUrl,
                         expiresAt = json?.optString("expiresAt", json.optString("expires_at", "")).orEmpty(),
                         stateNonce = returnedState,
                         httpStatusCode = response.code,
                         errorCategory = TmdbErrorCategory.NONE,
+                        authErrorType = com.example.data.model.TmdbAuthErrorType.NONE,
                         requestUrl = requestUrl,
-                        userMessage = "Approve access in your browser to finish connecting your TMDb account."
+                        userMessage = "Sign in on TMDb and approve access in your browser to connect your account."
                     )
                 }
 
-                // Distinguish between a missing authentication endpoint on an otherwise live Worker
-                // (verified via /api/tmdb/test) vs. general HTTP errors.
-                if (response.code == 404 || response.code == 405 || response.code == 501 || response.code == 400) {
-                    val healthCheck = verifyConnection(endpoint.baseUrl)
-                    if (healthCheck.isConnected) {
-                        return@withContext TmdbRequestTokenResult(
-                            ok = false,
-                            endpointNotDeployed = true,
-                            httpStatusCode = response.code,
-                            errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
-                            requestUrl = requestUrl,
-                            userMessage = "Backend connected at ${endpoint.baseUrl}/api/tmdb/test, but the TMDb account authentication endpoint (/api/tmdb/auth/request-token) is not deployed on your Cloudflare Worker yet (HTTP ${response.code})."
-                        )
-                    }
-                    if (response.code == 404 || response.code == 405 || response.code == 501) {
-                        return@withContext TmdbRequestTokenResult(
-                            ok = false,
-                            endpointNotDeployed = true,
-                            httpStatusCode = response.code,
-                            errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
-                            requestUrl = requestUrl,
-                            userMessage = "The TMDb Account & Sync endpoint (/api/tmdb/auth/request-token) returned HTTP ${response.code} on ${endpoint.baseUrl}. Deploy the updated Cloudflare Worker to enable account sign-in."
-                        )
-                    }
+                if (response.code == 404 || response.code == 405 || response.code == 501) {
+                    return@withContext TmdbRequestTokenResult(
+                        ok = false,
+                        endpointNotDeployed = true,
+                        httpStatusCode = response.code,
+                        errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
+                        authErrorType = com.example.data.model.TmdbAuthErrorType.SERVICE_UNAVAILABLE,
+                        requestUrl = requestUrl,
+                        userMessage = "TMDb account sign-in service is awaiting the latest Cloudflare Worker deployment."
+                    )
                 }
-
-                val serverError = json?.optString("error", "")?.trim()
-                    ?.ifBlank { json.optString("message", "").trim() }
-                    .orEmpty()
 
                 return@withContext TmdbRequestTokenResult(
                     ok = false,
                     httpStatusCode = response.code,
                     errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                    authErrorType = com.example.data.model.TmdbAuthErrorType.SERVICE_UNAVAILABLE,
                     requestUrl = requestUrl,
-                    userMessage = if (serverError.isNotBlank()) {
-                        "HTTP ${response.code} from ${endpoint.baseUrl}: $serverError"
-                    } else {
-                        "TMDb authorization service at ${endpoint.baseUrl} returned HTTP ${response.code}."
-                    }
+                    userMessage = "Unable to start TMDb authorization right now. Please try again in a moment."
                 )
             }
         } catch (_: Exception) {
             TmdbRequestTokenResult(
                 ok = false,
                 errorCategory = TmdbErrorCategory.NETWORK_ERROR,
+                authErrorType = com.example.data.model.TmdbAuthErrorType.NETWORK_ERROR,
                 requestUrl = requestUrl,
-                userMessage = "Network error: Unable to reach ${endpoint.baseUrl}. Please check your internet connection."
+                userMessage = "Unable to reach the TMDb service. Please check your internet connection."
             )
         }
     }
 
     /**
-     * Step 2 of official TMDb user authorization:
-     * Exchanges an approved `request_token` for a TMDb `session_id` and fetches the user's TMDb profile
-     * (`accountId`, `username`, `displayName`, `avatarUrl`) via `/api/tmdb/auth/session`.
+     * Step 2 of official browser-based TMDb user authorization:
+     * Exchanges the one-time authorization `authCode` (returned via the verified Android App Link)
+     * or verifies the pending `requestToken`/`authSessionId` with the Cloudflare Worker.
+     *
+     * The Cloudflare Worker creates and stores the official TMDb `session_id` server-side and returns
+     * an opaque installation-bound client token (`sessionId` / `clientToken`) and verified TMDb profile
+     * (`accountId`, `username`, `displayName`, `avatarUrl`).
      */
     suspend fun createAuthorizedSession(
         rawProxyUrl: String,
         requestToken: String,
         krasUserId: String = "demo",
-        stateNonce: String = ""
+        stateNonce: String = "",
+        authCode: String = "",
+        authSessionId: String = "",
+        installationId: String = ""
     ): TmdbSessionResult = withContext(Dispatchers.IO) {
         val effectiveRawUrl = rawProxyUrl.trim().ifBlank { CANONICAL_BACKEND_BASE_URL }
         val endpoint = parseProxyEndpoint(effectiveRawUrl)
         val cleanToken = requestToken.trim()
-        if (endpoint.baseUrl.isEmpty() || cleanToken.isEmpty()) {
+        val cleanCode = authCode.trim()
+        val cleanSessionRef = authSessionId.trim().ifBlank { cleanToken }
+        if (endpoint.baseUrl.isEmpty() || (cleanToken.isEmpty() && cleanCode.isEmpty() && cleanSessionRef.isEmpty())) {
             return@withContext TmdbSessionResult(
                 ok = false,
+                verified = false,
                 errorCategory = TmdbErrorCategory.UNCONFIGURED,
+                authErrorType = com.example.data.model.TmdbAuthErrorType.SERVICE_UNAVAILABLE,
                 userMessage = "Authorization session could not be verified."
             )
         }
@@ -450,10 +471,25 @@ class TmdbProxyClient(
 
         try {
             val payload = JSONObject().apply {
-                put("requestToken", cleanToken)
-                put("request_token", cleanToken)
+                if (cleanCode.isNotEmpty()) {
+                    put("code", cleanCode)
+                    put("authCode", cleanCode)
+                    put("auth_code", cleanCode)
+                }
+                if (cleanToken.isNotEmpty()) {
+                    put("requestToken", cleanToken)
+                    put("request_token", cleanToken)
+                }
+                if (cleanSessionRef.isNotEmpty()) {
+                    put("authSessionId", cleanSessionRef)
+                    put("auth_session_id", cleanSessionRef)
+                }
                 put("krasUserId", krasUserId)
                 put("kras_user_id", krasUserId)
+                if (installationId.isNotBlank()) {
+                    put("installationId", installationId)
+                    put("installation_id", installationId)
+                }
                 if (stateNonce.isNotBlank()) {
                     put("state", stateNonce)
                 }
@@ -462,6 +498,7 @@ class TmdbProxyClient(
                 url = requestUrl,
                 proxyAuthToken = endpoint.proxyAuthToken,
                 krasUserId = krasUserId,
+                installationId = installationId,
                 method = "POST",
                 jsonBody = payload
             )
@@ -475,16 +512,46 @@ class TmdbProxyClient(
                 if (response.code == 404 || response.code == 405 || response.code == 501) {
                     return@withContext TmdbSessionResult(
                         ok = false,
+                        verified = false,
                         endpointNotDeployed = true,
                         httpStatusCode = response.code,
                         errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
+                        authErrorType = com.example.data.model.TmdbAuthErrorType.SERVICE_UNAVAILABLE,
                         requestUrl = requestUrl,
-                        userMessage = "The TMDb Account Sync endpoint (/api/tmdb/auth/session) is not deployed on ${endpoint.baseUrl} yet (HTTP ${response.code})."
+                        userMessage = "TMDb account sign-in service is awaiting the latest Cloudflare Worker deployment."
+                    )
+                }
+
+                val errorCode = json?.optString("errorCode", json.optString("error_code", ""))?.trim()?.lowercase().orEmpty()
+                if (response.code == 410 || errorCode == "expired_token" || errorCode == "expired_code") {
+                    return@withContext TmdbSessionResult(
+                        ok = false,
+                        verified = false,
+                        httpStatusCode = response.code,
+                        errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                        authErrorType = com.example.data.model.TmdbAuthErrorType.EXPIRED_TOKEN,
+                        requestUrl = requestUrl,
+                        userMessage = "Your TMDb authorization session expired. Tap Connect TMDb Account to start a new session."
+                    )
+                }
+
+                if (errorCode == "denied" || errorCode == "access_denied") {
+                    return@withContext TmdbSessionResult(
+                        ok = false,
+                        verified = false,
+                        httpStatusCode = response.code,
+                        errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                        authErrorType = com.example.data.model.TmdbAuthErrorType.DENIED,
+                        requestUrl = requestUrl,
+                        userMessage = "Authorization was denied on TMDb. Tap Connect TMDb Account if you wish to try again."
                     )
                 }
 
                 val accountObj = json?.optJSONObject("account")
-                val sessionId = json?.optString("sessionId", "")?.trim()
+                // Prefer opaque `clientToken` issued by the Worker so raw TMDb session_id is never stored in the APK
+                val clientToken = json?.optString("clientToken", "")?.trim()
+                    ?.ifBlank { json.optString("client_token", "").trim() }
+                    ?.ifBlank { json.optString("sessionId", "").trim() }
                     ?.ifBlank { json.optString("session_id", "").trim() }
                     .orEmpty()
                 val username = accountObj?.optString("username", "")?.trim()
@@ -501,41 +568,41 @@ class TmdbProxyClient(
                     ?.ifBlank { json?.optString("avatarUrl", "")?.trim().orEmpty() }
                     ?: json?.optString("avatarUrl", json.optString("avatar_url", ""))?.trim().orEmpty()
 
-                if (response.isSuccessful && sessionId.isNotEmpty() && username.isNotEmpty()) {
+                if (response.isSuccessful && clientToken.isNotEmpty() && username.isNotEmpty()) {
                     return@withContext TmdbSessionResult(
                         ok = true,
-                        sessionId = sessionId,
-                        accountId = accountId,
+                        verified = true,
+                        sessionId = clientToken,
+                        accountId = if (accountId > 0) accountId else username.hashCode().let { if (it < 0) -it else it + 1 },
                         username = username,
                         displayName = displayName.ifBlank { username },
                         avatarUrl = avatarUrl,
                         httpStatusCode = response.code,
                         errorCategory = TmdbErrorCategory.NONE,
+                        authErrorType = com.example.data.model.TmdbAuthErrorType.NONE,
                         requestUrl = requestUrl,
-                        userMessage = "TMDb account @$username connected."
+                        userMessage = "Connected to TMDb as @$username."
                     )
                 }
 
-                val serverError = json?.optString("error", "")?.trim()
-                    ?.ifBlank { json.optString("message", "").trim() }
-                    .orEmpty()
-
                 return@withContext TmdbSessionResult(
                     ok = false,
+                    verified = false,
                     httpStatusCode = response.code,
                     errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                    authErrorType = com.example.data.model.TmdbAuthErrorType.SERVICE_UNAVAILABLE,
                     requestUrl = requestUrl,
-                    userMessage = serverError.ifBlank {
-                        "Please approve the TMDb authorization request in your browser first, then tap Complete Sign-In (HTTP ${response.code})."
-                    }
+                    userMessage = "Please approve the TMDb authorization request in your browser first, then return to KRAS TV."
                 )
             }
         } catch (_: Exception) {
             TmdbSessionResult(
                 ok = false,
+                verified = false,
                 errorCategory = TmdbErrorCategory.NETWORK_ERROR,
+                authErrorType = com.example.data.model.TmdbAuthErrorType.NETWORK_ERROR,
                 requestUrl = requestUrl,
-                userMessage = "Network error: Unable to reach ${endpoint.baseUrl} to complete TMDb sign-in."
+                userMessage = "Unable to reach the TMDb service to verify your sign-in. Please check your internet connection."
             )
         }
     }
@@ -553,7 +620,8 @@ class TmdbProxyClient(
         localWatchlist: List<TmdbSyncItem>,
         localRatings: List<TmdbSyncItem>,
         pendingMutations: List<PendingTmdbMutation> = emptyList(),
-        language: String = "en-US"
+        language: String = "en-US",
+        installationId: String = ""
     ): TmdbTwoWaySyncResult = withContext(Dispatchers.IO) {
         val effectiveRawUrl = rawProxyUrl.trim().ifBlank { CANONICAL_BACKEND_BASE_URL }
         val endpoint = parseProxyEndpoint(effectiveRawUrl)
@@ -569,12 +637,18 @@ class TmdbProxyClient(
 
         try {
             val payload = JSONObject().apply {
+                put("clientToken", sessionId)
+                put("client_token", sessionId)
                 put("session_id", sessionId)
                 put("sessionId", sessionId)
                 put("account_id", accountId)
                 put("accountId", accountId)
                 put("kras_user_id", krasUserId)
                 put("krasUserId", krasUserId)
+                if (installationId.isNotBlank()) {
+                    put("installation_id", installationId)
+                    put("installationId", installationId)
+                }
                 put("language", language)
                 put("favorites", serializeSyncItemsArray(localFavorites))
                 put("watchlist", serializeSyncItemsArray(localWatchlist))
@@ -587,6 +661,7 @@ class TmdbProxyClient(
                 proxyAuthToken = endpoint.proxyAuthToken,
                 tmdbSessionId = sessionId,
                 krasUserId = krasUserId,
+                installationId = installationId,
                 method = "POST",
                 jsonBody = payload
             )
@@ -604,7 +679,7 @@ class TmdbProxyClient(
                         httpStatusCode = response.code,
                         errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
                         requestUrl = requestUrl,
-                        userMessage = "The TMDb Account Sync endpoint (/api/tmdb/sync) is not deployed on ${endpoint.baseUrl} yet (HTTP ${response.code})."
+                        userMessage = "TMDb synchronization service is awaiting the latest Cloudflare Worker deployment."
                     )
                 }
 
@@ -627,18 +702,12 @@ class TmdbProxyClient(
                     )
                 }
 
-                val serverError = json?.optString("error", "")?.trim()
-                    ?.ifBlank { json.optString("message", "").trim() }
-                    .orEmpty()
-
                 return@withContext TmdbTwoWaySyncResult(
                     ok = false,
                     httpStatusCode = response.code,
                     errorCategory = TmdbErrorCategory.HTTP_ERROR,
                     requestUrl = requestUrl,
-                    userMessage = serverError.ifBlank {
-                        "TMDb synchronization returned HTTP ${response.code} from ${endpoint.baseUrl}."
-                    }
+                    userMessage = "Unable to synchronize with TMDb right now. Your changes are saved locally and will sync automatically."
                 )
             }
         } catch (_: Exception) {
@@ -646,7 +715,7 @@ class TmdbProxyClient(
                 ok = false,
                 errorCategory = TmdbErrorCategory.NETWORK_ERROR,
                 requestUrl = requestUrl,
-                userMessage = "Network error: Unable to reach ${endpoint.baseUrl} during TMDb synchronization."
+                userMessage = "Unable to reach the TMDb sync service. Your changes are queued locally and will sync when back online."
             )
         }
     }
@@ -759,7 +828,8 @@ class TmdbProxyClient(
     suspend fun disconnectSession(
         rawProxyUrl: String,
         sessionId: String,
-        krasUserId: String = "demo"
+        krasUserId: String = "demo",
+        installationId: String = ""
     ): Boolean = withContext(Dispatchers.IO) {
         val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty() || sessionId.isBlank()) return@withContext true
@@ -770,12 +840,19 @@ class TmdbProxyClient(
                 proxyAuthToken = endpoint.proxyAuthToken,
                 tmdbSessionId = sessionId,
                 krasUserId = krasUserId,
+                installationId = installationId,
                 method = "POST",
                 jsonBody = JSONObject().apply {
+                    put("clientToken", sessionId)
+                    put("client_token", sessionId)
                     put("sessionId", sessionId)
                     put("session_id", sessionId)
                     put("krasUserId", krasUserId)
                     put("kras_user_id", krasUserId)
+                    if (installationId.isNotBlank()) {
+                        put("installationId", installationId)
+                        put("installation_id", installationId)
+                    }
                 }
             )
             httpClient.newCall(request).execute().use { response ->
@@ -1256,10 +1333,13 @@ class TmdbProxyClient(
         internal fun stripKnownEndpointSuffixes(rawPathOrUrl: String): String {
             var current = rawPathOrUrl.trim().trimEnd('/')
             val suffixes = listOf(
+                "/api/tmdb/auth/session/start",
                 "/api/tmdb/auth/request-token",
                 "/api/tmdb/auth/callback",
+                "/api/tmdb/auth/exchange",
                 "/api/tmdb/auth/session",
                 "/api/tmdb/auth/logout",
+                "/app/tmdb-auth",
                 "/api/tmdb/account/favorite",
                 "/api/tmdb/account/watchlist",
                 "/api/tmdb/account/rating",
