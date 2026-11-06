@@ -18,15 +18,68 @@ enum class TmdbSyncStatus {
     ERROR
 }
 
+enum class TmdbMutationCategory {
+    FAVORITE,
+    WATCHLIST,
+    RATING
+}
+
+enum class TmdbMutationAction {
+    ADD,
+    REMOVE,
+    RATE
+}
+
 data class TmdbSyncItem(
     val tmdbId: Int,
-    val mediaType: String, // "movie" or "tv"
+    val mediaType: String, // "MOVIE" or "SERIES" (also accepts "movie" or "tv")
     val title: String,
     val posterUrl: String = "",
     val releaseYear: String = "",
     val rating: Double = 0.0,
-    val userRating: Double = 0.0
-)
+    val userRating: Double = 0.0,
+    val favorite: Boolean = true,
+    val watchlist: Boolean = true,
+    val updatedAtMs: Long = System.currentTimeMillis()
+) {
+    val normalizedMediaType: String
+        get() = if (mediaType.equals("tv", ignoreCase = true) || mediaType.equals("series", ignoreCase = true)) {
+            "SERIES"
+        } else {
+            "MOVIE"
+        }
+
+    val deduplicationKey: String
+        get() = "$normalizedMediaType:$tmdbId"
+}
+
+/**
+ * Tracks offline or un-synced user mutations (add/remove Favorite, add/remove Watchlist, set Rating)
+ * per KRAS TV user profile so changes made while offline or before reconnecting are replayed and
+ * local removals are never overwritten by stale remote lists during conflict resolution.
+ */
+data class PendingTmdbMutation(
+    val krasAccountId: String,
+    val tmdbId: Int,
+    val mediaId: String,
+    val mediaType: String, // "MOVIE" or "SERIES"
+    val title: String = "",
+    val year: String = "",
+    val category: TmdbMutationCategory,
+    val action: TmdbMutationAction,
+    val userRating: Double = 0.0,
+    val updatedAtMs: Long = System.currentTimeMillis()
+) {
+    val normalizedMediaType: String
+        get() = if (mediaType.equals("tv", ignoreCase = true) || mediaType.equals("series", ignoreCase = true)) {
+            "SERIES"
+        } else {
+            "MOVIE"
+        }
+
+    val deduplicationKey: String
+        get() = "${category.name}:$normalizedMediaType:${if (tmdbId > 0) tmdbId else mediaId}"
+}
 
 data class TmdbWatchlistItem(
     val id: String,
@@ -55,9 +108,11 @@ data class TmdbUserRatingItem(
 
 /**
  * UI state for the "TMDb Account & Sync" section in Settings.
+ * Scoped per active KRAS TV user account.
  * Never holds or exposes TMDB_API_KEY, request tokens, or user session tokens.
  */
 data class TmdbAccountUiState(
+    val krasAccountId: String = "demo",
     val authStatus: TmdbAuthStatus = TmdbAuthStatus.DISCONNECTED,
     val syncStatus: TmdbSyncStatus = TmdbSyncStatus.IDLE,
     val accountId: Int = 0,
@@ -69,6 +124,7 @@ data class TmdbAccountUiState(
     val syncedFavoritesCount: Int = 0,
     val syncedWatchlistCount: Int = 0,
     val syncedRatingsCount: Int = 0,
+    val pendingOfflineChangesCount: Int = 0,
     val statusMessage: String? = null,
     val isError: Boolean = false
 ) {

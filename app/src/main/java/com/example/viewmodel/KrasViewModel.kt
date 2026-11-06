@@ -249,6 +249,24 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         CinematicSoundPlayer.stop()
     }
 
+    private fun activeKrasUserId(): String {
+        return _activeAccount.value?.id?.takeIf { it.isNotBlank() }
+            ?: repository.getActiveAccount().id
+    }
+
+    private fun refreshActiveUserTmdbAndFavoritesState(krasUserId: String) {
+        val currentOrder = _userSettings.value.liveChannelOrder
+        _favorites.value = repository.getFavorites(currentOrder, krasUserId)
+        _tmdbAccountState.value = buildInitialTmdbAccountUiState(krasUserId)
+    }
+
+    private fun shouldRunLaunchAutoSync(state: TmdbAccountUiState): Boolean {
+        if (!state.isConnected || !_userSettings.value.tmdbAutoSyncEnabled) return false
+        if (state.pendingOfflineChangesCount > 0) return true
+        val elapsed = System.currentTimeMillis() - state.lastSyncTimestampMs
+        return state.lastSyncTimestampMs <= 0L || elapsed >= AUTO_LAUNCH_SYNC_COOLDOWN_MS
+    }
+
     private fun loadInitialData() {
         viewModelScope.launch {
             try {
@@ -256,7 +274,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 val (loadedAccounts, active, favs, history, dlList) = withContext(Dispatchers.IO) {
                     val accs = repository.getAccounts()
                     val act = repository.getActiveAccount()
-                    val f = repository.getFavorites(currentOrder)
+                    val f = repository.getFavorites(currentOrder, act.id)
                     val h = repository.getWatchHistory()
                     val d = repository.getDownloads()
                     Tuple5(accs, act, f, h, d)
@@ -267,6 +285,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _favorites.value = favs
                 _watchHistory.value = history
                 _downloads.value = dlList
+                _tmdbAccountState.value = withContext(Dispatchers.IO) {
+                    buildInitialTmdbAccountUiState(active.id)
+                }
                 _recentLiveChannels.value = withContext(Dispatchers.IO) { repository.getRecentLiveChannels() }
                 _lastWatchedLiveChannel.value = withContext(Dispatchers.IO) { repository.getLastWatchedLiveChannel() }
 
@@ -279,12 +300,12 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 // Start background content sync
                 loadContentForAccount(active, isBackgroundRefresh = true)
 
-                // Verify TMDb metadata proxy connection silently & run auto-sync if account connected
+                // Verify TMDb metadata proxy connection silently & run rate-limited auto-sync if account connected
                 if (_userSettings.value.tmdbProxyUrl.isNotBlank()) {
                     verifyTmdbProxyConnection(_userSettings.value.tmdbProxyUrl)
                 }
-                if (_tmdbAccountState.value.isConnected && _userSettings.value.tmdbAutoSyncEnabled) {
-                    syncTmdbAccountNow(isAuto = true)
+                if (shouldRunLaunchAutoSync(_tmdbAccountState.value)) {
+                    syncTmdbAccountNow(isAuto = true, targetKrasUserId = active.id)
                 }
 
                 // Clean up old downloaded APKs after update & run automatic 6-hour update check
@@ -379,7 +400,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _availableMovieYears.value = repository.getAvailableYears(account.id, "MOVIE", movieCatFilter)
                 _availableSeriesYears.value = repository.getAvailableYears(account.id, "SERIES", seriesCatFilter)
 
-                _favorites.value = repository.getFavorites(order)
+                _favorites.value = repository.getFavorites(order, account.id)
 
                 _isLoading.value = false
             } else if (account.isDemo) {
@@ -459,9 +480,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _accounts.value = withContext(Dispatchers.IO) { repository.getAccounts() }
                 val active = withContext(Dispatchers.IO) { repository.getActiveAccount() }
                 _activeAccount.value = active
+                withContext(Dispatchers.IO) {
+                    refreshActiveUserTmdbAndFavoritesState(active.id)
+                }
                 resetPaginationStates()
                 loadInitialPagesFromRoom(active)
                 loadContentForAccount(active, isBackgroundRefresh = false)
+                if (shouldRunLaunchAutoSync(_tmdbAccountState.value)) {
+                    syncTmdbAccountNow(isAuto = true, targetKrasUserId = active.id)
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -480,8 +507,14 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     _accounts.value = withContext(Dispatchers.IO) { repository.getAccounts() }
                     _activeAccount.value = account
+                    withContext(Dispatchers.IO) {
+                        refreshActiveUserTmdbAndFavoritesState(account.id)
+                    }
                     resetPaginationStates()
                     loadContentForAccount(account, isBackgroundRefresh = false)
+                    if (shouldRunLaunchAutoSync(_tmdbAccountState.value)) {
+                        syncTmdbAccountNow(isAuto = true, targetKrasUserId = account.id)
+                    }
                     _isLoading.value = false
                     onResult(true, null)
                 }.onFailure { error ->
@@ -506,8 +539,14 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 _accounts.value = withContext(Dispatchers.IO) { repository.getAccounts() }
                 _activeAccount.value = SampleData.demoAccount
+                withContext(Dispatchers.IO) {
+                    refreshActiveUserTmdbAndFavoritesState(SampleData.demoAccount.id)
+                }
                 resetPaginationStates()
                 loadContentForAccount(SampleData.demoAccount, isBackgroundRefresh = false)
+                if (shouldRunLaunchAutoSync(_tmdbAccountState.value)) {
+                    syncTmdbAccountNow(isAuto = true, targetKrasUserId = SampleData.demoAccount.id)
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -518,6 +557,12 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
+                    val removedSession = tmdbSessionStore.getSession(accountId)
+                    tmdbSessionStore.clearSession(accountId)
+                    repository.clearTmdbSyncedDataOnDisconnect(accountId)
+                    if (removedSession != null && removedSession.sessionId.isNotBlank()) {
+                        tmdbProxyClient.disconnectSession(canonicalTmdbProxyUrl(), removedSession.sessionId, accountId)
+                    }
                     repository.removeAccount(accountId)
                     repository.mediaDao.deleteAllByAccount(accountId)
                     repository.mediaDao.deleteCategoriesByAccount(accountId)
@@ -525,6 +570,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _accounts.value = withContext(Dispatchers.IO) { repository.getAccounts() }
                 val active = withContext(Dispatchers.IO) { repository.getActiveAccount() }
                 _activeAccount.value = active
+                withContext(Dispatchers.IO) {
+                    refreshActiveUserTmdbAndFavoritesState(active.id)
+                }
                 resetPaginationStates()
                 loadInitialPagesFromRoom(active)
                 loadContentForAccount(active, isBackgroundRefresh = false)
@@ -763,11 +811,16 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun buildInitialTmdbAccountUiState(): TmdbAccountUiState {
+    private fun buildInitialTmdbAccountUiState(krasUserId: String = repository.getActiveAccount().id): TmdbAccountUiState {
         val settings = repository.getUserSettings()
-        val stored = tmdbSessionStore.getSession()
+        val stored = tmdbSessionStore.getSession(krasUserId)
+        val pendingCount = repository.getPendingTmdbMutations(krasUserId).size
+        val localFavCount = repository.getLocalTmdbSyncFavorites(krasUserId).size
+        val localWatchlistCount = repository.getWatchlist(krasUserId).size
+        val localRatingsCount = repository.getUserRatings(krasUserId).size
         if (stored != null) {
             return TmdbAccountUiState(
+                krasAccountId = krasUserId,
                 authStatus = TmdbAuthStatus.CONNECTED,
                 syncStatus = TmdbSyncStatus.IDLE,
                 accountId = stored.accountId,
@@ -776,18 +829,21 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 avatarUrl = stored.avatarUrl,
                 autoSyncEnabled = settings.tmdbAutoSyncEnabled,
                 lastSyncTimestampMs = stored.lastSyncTimestampMs,
-                syncedFavoritesCount = stored.syncedFavoritesCount.coerceAtLeast(repository.getLocalTmdbSyncFavorites().size),
-                syncedWatchlistCount = stored.syncedWatchlistCount.coerceAtLeast(repository.getWatchlist().size),
-                syncedRatingsCount = stored.syncedRatingsCount.coerceAtLeast(repository.getUserRatings().size)
+                syncedFavoritesCount = stored.syncedFavoritesCount.coerceAtLeast(localFavCount),
+                syncedWatchlistCount = stored.syncedWatchlistCount.coerceAtLeast(localWatchlistCount),
+                syncedRatingsCount = stored.syncedRatingsCount.coerceAtLeast(localRatingsCount),
+                pendingOfflineChangesCount = pendingCount
             )
         }
-        val pendingToken = tmdbSessionStore.getPendingRequestToken()
+        val pendingAuth = tmdbSessionStore.getPendingAuthRequest(krasUserId)
         return TmdbAccountUiState(
-            authStatus = if (pendingToken != null) TmdbAuthStatus.AUTHORIZING_IN_BROWSER else TmdbAuthStatus.DISCONNECTED,
+            krasAccountId = krasUserId,
+            authStatus = if (pendingAuth != null) TmdbAuthStatus.AUTHORIZING_IN_BROWSER else TmdbAuthStatus.DISCONNECTED,
             autoSyncEnabled = settings.tmdbAutoSyncEnabled,
-            syncedFavoritesCount = repository.getLocalTmdbSyncFavorites().size,
-            syncedWatchlistCount = repository.getWatchlist().size,
-            syncedRatingsCount = repository.getUserRatings().size
+            syncedFavoritesCount = localFavCount,
+            syncedWatchlistCount = localWatchlistCount,
+            syncedRatingsCount = localRatingsCount,
+            pendingOfflineChangesCount = pendingCount
         )
     }
 
@@ -796,12 +852,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Initiates official TMDb user account authorization via the backend proxy and opens the
-     * TMDb approval URL in the user's browser.
+     * Initiates official TMDb user account authorization for the active KRAS TV user via the
+     * Cloudflare Worker proxy and opens TMDb's official authorization page in the browser.
      */
     fun startTmdbAccountAuthorization(onOpenBrowserUrl: (String) -> Unit) {
         val proxyUrl = canonicalTmdbProxyUrl()
+        val krasUserId = activeKrasUserId()
+        val stateNonce = tmdbSessionStore.generateStateNonce()
         _tmdbAccountState.value = _tmdbAccountState.value.copy(
+            krasAccountId = krasUserId,
             authStatus = TmdbAuthStatus.VERIFYING_SESSION,
             statusMessage = null,
             isError = false
@@ -809,11 +868,19 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val result = tmdbProxyClient.createAuthRequestToken(
                 rawProxyUrl = proxyUrl,
-                redirectTo = "krastv://tmdb-auth"
+                redirectTo = "krastv://tmdb-auth",
+                krasUserId = krasUserId,
+                stateNonce = stateNonce
             )
             if (result.ok && result.requestToken.isNotBlank() && result.authUrl.isNotBlank()) {
-                tmdbSessionStore.savePendingRequestToken(result.requestToken)
+                val effectiveNonce = result.stateNonce.ifBlank { stateNonce }
+                tmdbSessionStore.savePendingAuthRequest(
+                    krasAccountId = krasUserId,
+                    requestToken = result.requestToken,
+                    stateNonce = effectiveNonce
+                )
                 _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    krasAccountId = krasUserId,
                     authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER,
                     statusMessage = result.userMessage,
                     isError = false
@@ -823,6 +890,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } else {
                 _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    krasAccountId = krasUserId,
                     authStatus = TmdbAuthStatus.DISCONNECTED,
                     statusMessage = result.userMessage.ifBlank {
                         "Unable to start TMDb sign-in right now. Please try again later."
@@ -834,7 +902,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Handles the `krastv://tmdb-auth?request_token=...&approved=true` deep-link callback from the browser.
+     * Handles the `krastv://tmdb-auth?request_token=...&approved=true&state=...&kras_user=...`
+     * deep-link callback from the browser and validates callback state to prevent CSRF/cross-user confusion.
      */
     fun handleTmdbAuthCallback(uri: Uri?) {
         if (uri == null) return
@@ -842,11 +911,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         val host = uri.host?.lowercase().orEmpty()
         if (scheme != "krastv" || host != "tmdb-auth") return
 
+        val krasUserId = uri.getQueryParameter("kras_user")?.trim()?.takeIf { it.isNotBlank() }
+            ?: activeKrasUserId()
+
         val denied = uri.getQueryParameter("denied")?.equals("true", ignoreCase = true) == true ||
             uri.getQueryParameter("approved")?.equals("false", ignoreCase = true) == true
         if (denied) {
-            tmdbSessionStore.clearPendingRequestToken()
+            tmdbSessionStore.clearPendingRequestToken(krasUserId)
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                krasAccountId = krasUserId,
                 authStatus = TmdbAuthStatus.DISCONNECTED,
                 statusMessage = "TMDb account authorization was cancelled.",
                 isError = false
@@ -854,22 +927,51 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        val pendingAuth = tmdbSessionStore.getPendingAuthRequest(krasUserId)
+        val callbackState = uri.getQueryParameter("state")?.trim().orEmpty()
+        if (pendingAuth != null && pendingAuth.stateNonce.isNotBlank() && callbackState.isNotBlank() &&
+            pendingAuth.stateNonce != callbackState
+        ) {
+            tmdbSessionStore.clearPendingRequestToken(krasUserId)
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                krasAccountId = krasUserId,
+                authStatus = TmdbAuthStatus.DISCONNECTED,
+                statusMessage = "TMDb authorization state check failed. Please reconnect your account.",
+                isError = true
+            )
+            return
+        }
+
         val tokenFromUri = uri.getQueryParameter("request_token")?.trim().orEmpty()
-        completeTmdbAuthorization(explicitToken = tokenFromUri, isAutoResumeCheck = false)
+        completeTmdbAuthorization(
+            explicitToken = tokenFromUri,
+            isAutoResumeCheck = false,
+            targetKrasUserId = krasUserId,
+            callbackStateNonce = callbackState.ifBlank { pendingAuth?.stateNonce.orEmpty() }
+        )
     }
 
     /**
-     * Completes TMDb authorization by exchanging the approved `request_token` for an encrypted session
-     * and running initial two-way synchronization.
+     * Completes TMDb authorization by exchanging the approved `request_token` for an encrypted
+     * per-user session and running initial two-way synchronization.
      */
-    fun completeTmdbAuthorization(explicitToken: String? = null, isAutoResumeCheck: Boolean = false) {
+    fun completeTmdbAuthorization(
+        explicitToken: String? = null,
+        isAutoResumeCheck: Boolean = false,
+        targetKrasUserId: String? = null,
+        callbackStateNonce: String = ""
+    ) {
+        val krasUserId = targetKrasUserId?.takeIf { it.isNotBlank() } ?: activeKrasUserId()
+        val pendingAuth = tmdbSessionStore.getPendingAuthRequest(krasUserId)
         val token = explicitToken?.trim()?.takeIf { it.isNotEmpty() }
-            ?: tmdbSessionStore.getPendingRequestToken()
+            ?: pendingAuth?.requestToken
             ?: return
+        val stateNonce = callbackStateNonce.ifBlank { pendingAuth?.stateNonce.orEmpty() }
 
         val proxyUrl = canonicalTmdbProxyUrl()
         if (!isAutoResumeCheck) {
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                krasAccountId = krasUserId,
                 authStatus = TmdbAuthStatus.VERIFYING_SESSION,
                 statusMessage = null,
                 isError = false
@@ -879,48 +981,59 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val sessionResult = tmdbProxyClient.createAuthorizedSession(
                 rawProxyUrl = proxyUrl,
-                requestToken = token
+                requestToken = token,
+                krasUserId = krasUserId,
+                stateNonce = stateNonce
             )
             if (sessionResult.ok && sessionResult.sessionId.isNotBlank() && sessionResult.username.isNotBlank()) {
                 tmdbSessionStore.saveSession(
+                    krasAccountId = krasUserId,
                     sessionId = sessionResult.sessionId,
                     accountId = sessionResult.accountId,
                     username = sessionResult.username,
                     displayName = sessionResult.displayName,
                     avatarUrl = sessionResult.avatarUrl
                 )
-                _tmdbAccountState.value = _tmdbAccountState.value.copy(
-                    authStatus = TmdbAuthStatus.CONNECTED,
-                    syncStatus = TmdbSyncStatus.IDLE,
-                    accountId = sessionResult.accountId,
-                    username = sessionResult.username,
-                    displayName = sessionResult.displayName.ifBlank { sessionResult.username },
-                    avatarUrl = sessionResult.avatarUrl,
-                    statusMessage = sessionResult.userMessage,
-                    isError = false
-                )
-                if (_userSettings.value.tmdbAutoSyncEnabled) {
-                    syncTmdbAccountNow(isAuto = true)
-                }
-            } else {
-                if (isAutoResumeCheck) {
+                if (krasUserId == activeKrasUserId()) {
                     _tmdbAccountState.value = _tmdbAccountState.value.copy(
-                        authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER
-                    )
-                } else {
-                    _tmdbAccountState.value = _tmdbAccountState.value.copy(
-                        authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER,
+                        krasAccountId = krasUserId,
+                        authStatus = TmdbAuthStatus.CONNECTED,
+                        syncStatus = TmdbSyncStatus.IDLE,
+                        accountId = sessionResult.accountId,
+                        username = sessionResult.username,
+                        displayName = sessionResult.displayName.ifBlank { sessionResult.username },
+                        avatarUrl = sessionResult.avatarUrl,
                         statusMessage = sessionResult.userMessage,
-                        isError = true
+                        isError = false
                     )
+                }
+                // Automatically synchronize immediately after login
+                syncTmdbAccountNow(isAuto = true, targetKrasUserId = krasUserId)
+            } else {
+                if (krasUserId == activeKrasUserId()) {
+                    if (isAutoResumeCheck) {
+                        _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                            krasAccountId = krasUserId,
+                            authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER
+                        )
+                    } else {
+                        _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                            krasAccountId = krasUserId,
+                            authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER,
+                            statusMessage = sessionResult.userMessage,
+                            isError = true
+                        )
+                    }
                 }
             }
         }
     }
 
     fun cancelTmdbAuthorization() {
-        tmdbSessionStore.clearPendingRequestToken()
+        val krasUserId = activeKrasUserId()
+        tmdbSessionStore.clearPendingRequestToken(krasUserId)
         _tmdbAccountState.value = _tmdbAccountState.value.copy(
+            krasAccountId = krasUserId,
             authStatus = TmdbAuthStatus.DISCONNECTED,
             statusMessage = null,
             isError = false
@@ -928,12 +1041,14 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Performs two-way synchronization of Favorites, Watchlist, and Ratings between KRAS TV and TMDb.
+     * Performs two-way synchronization of Favorites (Movies & TV), Watchlist (Movies & TV),
+     * and Ratings (Movies & TV) between the active KRAS TV user and their connected TMDb account.
      */
-    fun syncTmdbAccountNow(isAuto: Boolean = false) {
-        val stored = tmdbSessionStore.getSession()
+    fun syncTmdbAccountNow(isAuto: Boolean = false, targetKrasUserId: String? = null) {
+        val krasUserId = targetKrasUserId?.takeIf { it.isNotBlank() } ?: activeKrasUserId()
+        val stored = tmdbSessionStore.getSession(krasUserId)
         if (stored == null) {
-            if (!isAuto) {
+            if (!isAuto && krasUserId == activeKrasUserId()) {
                 _tmdbAccountState.value = _tmdbAccountState.value.copy(
                     statusMessage = "Please connect your TMDb account first.",
                     isError = true
@@ -941,28 +1056,34 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
-        if (_tmdbAccountState.value.syncStatus == TmdbSyncStatus.SYNCING) return
+        if (krasUserId == activeKrasUserId() && _tmdbAccountState.value.syncStatus == TmdbSyncStatus.SYNCING) return
 
         val proxyUrl = canonicalTmdbProxyUrl()
-        _tmdbAccountState.value = _tmdbAccountState.value.copy(
-            syncStatus = TmdbSyncStatus.SYNCING,
-            statusMessage = if (isAuto) _tmdbAccountState.value.statusMessage else null,
-            isError = false
-        )
+        if (krasUserId == activeKrasUserId()) {
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                krasAccountId = krasUserId,
+                syncStatus = TmdbSyncStatus.SYNCING,
+                statusMessage = if (isAuto) _tmdbAccountState.value.statusMessage else null,
+                isError = false
+            )
+        }
 
         viewModelScope.launch(Dispatchers.IO) {
-            val localFavorites = repository.getLocalTmdbSyncFavorites()
-            val localWatchlist = repository.getLocalTmdbSyncWatchlist()
-            val localRatings = repository.getLocalTmdbSyncRatings()
+            val localFavorites = repository.getLocalTmdbSyncFavorites(krasUserId)
+            val localWatchlist = repository.getLocalTmdbSyncWatchlist(krasUserId)
+            val localRatings = repository.getLocalTmdbSyncRatings(krasUserId)
+            val pendingMutations = repository.getPendingTmdbMutations(krasUserId)
             val langCode = if (_userSettings.value.language.contains("Arabic", ignoreCase = true)) "ar-SA" else "en-US"
 
             val syncResult = tmdbProxyClient.performTwoWaySync(
                 rawProxyUrl = proxyUrl,
                 sessionId = stored.sessionId,
                 accountId = stored.accountId,
+                krasUserId = krasUserId,
                 localFavorites = localFavorites,
                 localWatchlist = localWatchlist,
                 localRatings = localRatings,
+                pendingMutations = pendingMutations,
                 language = langCode
             )
 
@@ -970,37 +1091,48 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 repository.mergeTmdbSyncedData(
                     remoteFavorites = syncResult.favorites,
                     remoteWatchlist = syncResult.watchlist,
-                    remoteRatings = syncResult.ratings
+                    remoteRatings = syncResult.ratings,
+                    krasAccountId = krasUserId
                 )
-                _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder)
 
                 val nowMs = System.currentTimeMillis()
-                val favCount = repository.getLocalTmdbSyncFavorites().size.coerceAtLeast(syncResult.favorites.size)
-                val wlCount = repository.getWatchlist().size.coerceAtLeast(syncResult.watchlist.size)
-                val rtCount = repository.getUserRatings().size.coerceAtLeast(syncResult.ratings.size)
+                val favCount = repository.getLocalTmdbSyncFavorites(krasUserId).size.coerceAtLeast(syncResult.favorites.size)
+                val wlCount = repository.getWatchlist(krasUserId).size.coerceAtLeast(syncResult.watchlist.size)
+                val rtCount = repository.getUserRatings(krasUserId).size.coerceAtLeast(syncResult.ratings.size)
 
                 tmdbSessionStore.updateSyncStats(
+                    krasAccountId = krasUserId,
                     lastSyncTimestampMs = nowMs,
                     favoritesCount = favCount,
                     watchlistCount = wlCount,
                     ratingsCount = rtCount
                 )
 
-                _tmdbAccountState.value = _tmdbAccountState.value.copy(
-                    syncStatus = TmdbSyncStatus.SUCCESS,
-                    lastSyncTimestampMs = nowMs,
-                    syncedFavoritesCount = favCount,
-                    syncedWatchlistCount = wlCount,
-                    syncedRatingsCount = rtCount,
-                    statusMessage = if (isAuto) null else syncResult.userMessage,
-                    isError = false
-                )
+                if (krasUserId == activeKrasUserId()) {
+                    _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder, krasUserId)
+                    _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                        krasAccountId = krasUserId,
+                        syncStatus = TmdbSyncStatus.SUCCESS,
+                        lastSyncTimestampMs = nowMs,
+                        syncedFavoritesCount = favCount,
+                        syncedWatchlistCount = wlCount,
+                        syncedRatingsCount = rtCount,
+                        pendingOfflineChangesCount = 0,
+                        statusMessage = if (isAuto) null else syncResult.userMessage,
+                        isError = false
+                    )
+                }
             } else {
-                _tmdbAccountState.value = _tmdbAccountState.value.copy(
-                    syncStatus = TmdbSyncStatus.ERROR,
-                    statusMessage = if (isAuto) null else syncResult.userMessage,
-                    isError = !isAuto
-                )
+                val remainingPending = repository.getPendingTmdbMutations(krasUserId).size
+                if (krasUserId == activeKrasUserId()) {
+                    _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                        krasAccountId = krasUserId,
+                        syncStatus = TmdbSyncStatus.ERROR,
+                        pendingOfflineChangesCount = remainingPending,
+                        statusMessage = if (isAuto) null else syncResult.userMessage,
+                        isError = !isAuto
+                    )
+                }
             }
         }
     }
@@ -1019,22 +1151,27 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnectTmdbAccount() {
-        val stored = tmdbSessionStore.getSession()
+        val krasUserId = activeKrasUserId()
+        val stored = tmdbSessionStore.getSession(krasUserId)
         val proxyUrl = canonicalTmdbProxyUrl()
-        tmdbSessionStore.clearSession()
+        tmdbSessionStore.clearSession(krasUserId)
+        repository.clearTmdbSyncedDataOnDisconnect(krasUserId)
+        _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder, krasUserId)
         _tmdbAccountState.value = TmdbAccountUiState(
+            krasAccountId = krasUserId,
             authStatus = TmdbAuthStatus.DISCONNECTED,
             syncStatus = TmdbSyncStatus.IDLE,
             autoSyncEnabled = _userSettings.value.tmdbAutoSyncEnabled,
-            syncedFavoritesCount = repository.getLocalTmdbSyncFavorites().size,
-            syncedWatchlistCount = repository.getWatchlist().size,
-            syncedRatingsCount = repository.getUserRatings().size,
+            syncedFavoritesCount = 0,
+            syncedWatchlistCount = 0,
+            syncedRatingsCount = 0,
+            pendingOfflineChangesCount = 0,
             statusMessage = "TMDb account disconnected.",
             isError = false
         )
         if (stored != null && stored.sessionId.isNotBlank()) {
             viewModelScope.launch(Dispatchers.IO) {
-                tmdbProxyClient.disconnectSession(proxyUrl, stored.sessionId)
+                tmdbProxyClient.disconnectSession(proxyUrl, stored.sessionId, krasUserId)
             }
         }
     }
@@ -2029,12 +2166,19 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         _isLiveFullscreen.value = false
     }
 
-    // --- Favorites, Watchlist & Ratings (with Automatic Two-Way TMDb Sync) ---
+    // --- Favorites, Watchlist & Ratings (with Automatic Two-Way TMDb Sync & Offline Queue) ---
     fun toggleFavorite(item: MediaItem) {
         val order = _userSettings.value.liveChannelOrder
+        val krasUserId = activeKrasUserId()
         viewModelScope.launch(Dispatchers.IO) {
-            val isAdded = repository.toggleFavorite(item)
-            _favorites.value = repository.getFavorites(order)
+            val isAdded = repository.toggleFavorite(item, krasUserId)
+            _favorites.value = repository.getFavorites(order, krasUserId)
+            val favSyncCount = repository.getLocalTmdbSyncFavorites(krasUserId).size
+            val pendingCount = repository.getPendingTmdbMutations(krasUserId).size
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                syncedFavoritesCount = favSyncCount,
+                pendingOfflineChangesCount = pendingCount
+            )
             if (liveCatFilter == "favorites") {
                 val account = _activeAccount.value
                 if (account != null) {
@@ -2066,7 +2210,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
             // Automatic two-way TMDb sync for Movie and Series favorites when connected & Auto Sync enabled
             if ((item.type == MediaType.MOVIE || item.type == MediaType.SERIES) && _userSettings.value.tmdbAutoSyncEnabled) {
-                val stored = tmdbSessionStore.getSession()
+                val stored = tmdbSessionStore.getSession(krasUserId)
                 val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
                 if (stored != null && proxyUrl.isNotBlank()) {
                     val resolvedTmdbId = resolveTmdbIdForItem(item, proxyUrl)
@@ -2081,16 +2225,16 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         )
                         if (pushed) {
                             val nowMs = System.currentTimeMillis()
-                            val favCount = repository.getLocalTmdbSyncFavorites().size
                             tmdbSessionStore.updateSyncStats(
+                                krasAccountId = krasUserId,
                                 lastSyncTimestampMs = nowMs,
-                                favoritesCount = favCount,
+                                favoritesCount = favSyncCount,
                                 watchlistCount = _tmdbAccountState.value.syncedWatchlistCount,
                                 ratingsCount = _tmdbAccountState.value.syncedRatingsCount
                             )
                             _tmdbAccountState.value = _tmdbAccountState.value.copy(
                                 lastSyncTimestampMs = nowMs,
-                                syncedFavoritesCount = favCount
+                                syncedFavoritesCount = favSyncCount
                             )
                         }
                     }
@@ -2101,13 +2245,18 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleWatchlist(item: MediaItem) {
         if (item.type != MediaType.MOVIE && item.type != MediaType.SERIES) return
+        val krasUserId = activeKrasUserId()
         viewModelScope.launch(Dispatchers.IO) {
-            val isAdded = repository.toggleWatchlist(item)
-            val wlCount = repository.getWatchlist().size
-            _tmdbAccountState.value = _tmdbAccountState.value.copy(syncedWatchlistCount = wlCount)
+            val isAdded = repository.toggleWatchlist(item, krasUserId)
+            val wlCount = repository.getWatchlist(krasUserId).size
+            val pendingCount = repository.getPendingTmdbMutations(krasUserId).size
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                syncedWatchlistCount = wlCount,
+                pendingOfflineChangesCount = pendingCount
+            )
 
             if (_userSettings.value.tmdbAutoSyncEnabled) {
-                val stored = tmdbSessionStore.getSession()
+                val stored = tmdbSessionStore.getSession(krasUserId)
                 val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
                 if (stored != null && proxyUrl.isNotBlank()) {
                     val resolvedTmdbId = resolveTmdbIdForItem(item, proxyUrl)
@@ -2123,6 +2272,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         if (pushed) {
                             val nowMs = System.currentTimeMillis()
                             tmdbSessionStore.updateSyncStats(
+                                krasAccountId = krasUserId,
                                 lastSyncTimestampMs = nowMs,
                                 favoritesCount = _tmdbAccountState.value.syncedFavoritesCount,
                                 watchlistCount = wlCount,
@@ -2141,13 +2291,18 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rateMediaItem(item: MediaItem, rating: Double) {
         if (item.type != MediaType.MOVIE && item.type != MediaType.SERIES) return
+        val krasUserId = activeKrasUserId()
         viewModelScope.launch(Dispatchers.IO) {
-            repository.setUserRating(item, rating)
-            val rtCount = repository.getUserRatings().size
-            _tmdbAccountState.value = _tmdbAccountState.value.copy(syncedRatingsCount = rtCount)
+            repository.setUserRating(item, rating, krasUserId)
+            val rtCount = repository.getUserRatings(krasUserId).size
+            val pendingCount = repository.getPendingTmdbMutations(krasUserId).size
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                syncedRatingsCount = rtCount,
+                pendingOfflineChangesCount = pendingCount
+            )
 
             if (_userSettings.value.tmdbAutoSyncEnabled) {
-                val stored = tmdbSessionStore.getSession()
+                val stored = tmdbSessionStore.getSession(krasUserId)
                 val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
                 if (stored != null && proxyUrl.isNotBlank()) {
                     val resolvedTmdbId = resolveTmdbIdForItem(item, proxyUrl)
@@ -2163,6 +2318,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         if (pushed) {
                             val nowMs = System.currentTimeMillis()
                             tmdbSessionStore.updateSyncStats(
+                                krasAccountId = krasUserId,
                                 lastSyncTimestampMs = nowMs,
                                 favoritesCount = _tmdbAccountState.value.syncedFavoritesCount,
                                 watchlistCount = _tmdbAccountState.value.syncedWatchlistCount,
@@ -2536,4 +2692,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         appUpdater.cancelActiveDownload()
         playerWrapper.release()
     }
+
+    companion object {
+        private const val AUTO_LAUNCH_SYNC_COOLDOWN_MS = 60_000L
+    }
 }
+

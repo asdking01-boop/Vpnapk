@@ -24,6 +24,69 @@ class KrasRepository(context: Context) {
 
     init {
         migrateStoredTmdbProxyUrl()
+        migrateLegacyGlobalSyncListsIfPresent()
+    }
+
+    private fun resolveUserKey(krasAccountId: String? = null): String {
+        val explicit = krasAccountId?.trim().orEmpty()
+        val id = explicit.ifEmpty { getActiveAccount().id.trim() }.ifEmpty { "demo" }
+        return id.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
+    }
+
+    private fun favoritesKeyForUser(krasAccountId: String? = null): String =
+        "favorites_list_v2_${resolveUserKey(krasAccountId)}"
+
+    private fun watchlistKeyForUser(krasAccountId: String? = null): String =
+        "tmdb_watchlist_items_v2_${resolveUserKey(krasAccountId)}"
+
+    private fun ratingsKeyForUser(krasAccountId: String? = null): String =
+        "tmdb_user_ratings_v2_${resolveUserKey(krasAccountId)}"
+
+    private fun pendingMutationsKeyForUser(krasAccountId: String? = null): String =
+        "tmdb_pending_mutations_v2_${resolveUserKey(krasAccountId)}"
+
+    /**
+     * Migrates legacy un-scoped favorites/watchlist/ratings keys to the active user's scoped keys
+     * and removes the legacy un-scoped keys so users never share TMDb sync lists.
+     */
+    private fun migrateLegacyGlobalSyncListsIfPresent() {
+        val activeUserKey = resolveUserKey(null)
+        val editor = prefs.edit()
+        var migratedAny = false
+
+        val legacyFavs = prefs.getString("favorites_list", null)
+        if (legacyFavs != null) {
+            val targetKey = "favorites_list_v2_$activeUserKey"
+            if (!prefs.contains(targetKey)) {
+                editor.putString(targetKey, legacyFavs)
+            }
+            editor.remove("favorites_list")
+            migratedAny = true
+        }
+
+        val legacyWatchlist = prefs.getString("tmdb_watchlist_items", null)
+        if (legacyWatchlist != null) {
+            val targetKey = "tmdb_watchlist_items_v2_$activeUserKey"
+            if (!prefs.contains(targetKey)) {
+                editor.putString(targetKey, legacyWatchlist)
+            }
+            editor.remove("tmdb_watchlist_items")
+            migratedAny = true
+        }
+
+        val legacyRatings = prefs.getString("tmdb_user_ratings", null)
+        if (legacyRatings != null) {
+            val targetKey = "tmdb_user_ratings_v2_$activeUserKey"
+            if (!prefs.contains(targetKey)) {
+                editor.putString(targetKey, legacyRatings)
+            }
+            editor.remove("tmdb_user_ratings")
+            migratedAny = true
+        }
+
+        if (migratedAny) {
+            editor.apply()
+        }
     }
 
     // --- Accounts ---
@@ -130,9 +193,9 @@ class KrasRepository(context: Context) {
         saveAccounts(if (finalAccounts.isEmpty()) listOf(SampleData.demoAccount) else finalAccounts)
     }
 
-    // --- Favorites ---
-    private fun getFavoritesRaw(): List<FavoriteItem> {
-        val jsonStr = prefs.getString("favorites_list", null) ?: return emptyList()
+    // --- Favorites (Scoped Per KRAS TV User) ---
+    private fun getFavoritesRaw(krasAccountId: String? = null): List<FavoriteItem> {
+        val jsonStr = prefs.getString(favoritesKeyForUser(krasAccountId), null) ?: return emptyList()
         val list = mutableListOf<FavoriteItem>()
         val tracker = ChannelNameNormalizer.ChannelGroupingTracker()
         try {
@@ -179,17 +242,42 @@ class KrasRepository(context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return list
+        return deduplicateFavorites(list)
     }
 
-    fun getFavorites(order: LiveChannelOrder = getUserSettings().liveChannelOrder): List<FavoriteItem> {
-        val raw = getFavoritesRaw()
+    private fun deduplicateFavorites(items: List<FavoriteItem>): List<FavoriteItem> {
+        val map = LinkedHashMap<String, FavoriteItem>()
+        for (fav in items) {
+            val key = if (fav.type != MediaType.LIVE && fav.tmdbId > 0) {
+                "${fav.type.name}:tmdb:${fav.tmdbId}"
+            } else {
+                "${fav.type.name}:id:${fav.mediaId}"
+            }
+            val existing = map[key]
+            if (existing == null) {
+                map[key] = fav
+            } else if (existing.streamUrl.isBlank() && fav.streamUrl.isNotBlank()) {
+                map[key] = fav
+            }
+        }
+        return map.values.toList()
+    }
+
+    fun getFavorites(
+        order: LiveChannelOrder = getUserSettings().liveChannelOrder,
+        krasAccountId: String? = null
+    ): List<FavoriteItem> {
+        val raw = getFavoritesRaw(krasAccountId)
         return ChannelNameNormalizer.sortFavorites(raw, order)
     }
 
-    fun toggleFavorite(item: MediaItem): Boolean {
-        val list = getFavoritesRaw().toMutableList()
-        val existing = list.find { it.mediaId == item.id }
+    fun toggleFavorite(item: MediaItem, krasAccountId: String? = null): Boolean {
+        val userKey = resolveUserKey(krasAccountId)
+        val list = getFavoritesRaw(userKey).toMutableList()
+        val existing = list.find {
+            it.mediaId == item.id ||
+                (item.type != MediaType.LIVE && item.tmdbId > 0 && it.tmdbId == item.tmdbId && it.type == item.type)
+        }
         val isAdded: Boolean
         if (existing != null) {
             list.remove(existing)
@@ -220,9 +308,8 @@ class KrasRepository(context: Context) {
             )
             isAdded = true
         }
-        // Recompute groupOrder/serverOrder across the raw favorite list if needed
         val tracker = ChannelNameNormalizer.ChannelGroupingTracker()
-        val updatedList = list.map { fav ->
+        val updatedList = deduplicateFavorites(list).map { fav ->
             val computed = tracker.nextChannel(fav.title)
             if (fav.groupOrder == 0 && fav.serverOrder == 0) {
                 fav.copy(
@@ -235,14 +322,30 @@ class KrasRepository(context: Context) {
                 fav
             }
         }
-        saveFavoritesList(updatedList)
+        saveFavoritesList(updatedList, userKey)
+
+        if (item.type == MediaType.MOVIE || item.type == MediaType.SERIES) {
+            recordPendingTmdbMutation(
+                PendingTmdbMutation(
+                    krasAccountId = userKey,
+                    tmdbId = item.tmdbId.takeIf { it > 0 } ?: (existing?.tmdbId ?: 0),
+                    mediaId = item.id,
+                    mediaType = item.type.name,
+                    title = item.name,
+                    year = item.year,
+                    category = TmdbMutationCategory.FAVORITE,
+                    action = if (isAdded) TmdbMutationAction.ADD else TmdbMutationAction.REMOVE
+                )
+            )
+        }
         return isAdded
     }
 
-    private fun saveFavoritesList(updatedList: List<FavoriteItem>) {
+    private fun saveFavoritesList(updatedList: List<FavoriteItem>, krasAccountId: String? = null) {
         try {
+            val deduplicated = deduplicateFavorites(updatedList)
             val array = JSONArray()
-            for (fav in updatedList) {
+            for (fav in deduplicated) {
                 val obj = JSONObject().apply {
                     put("id", fav.id)
                     put("mediaId", fav.mediaId)
@@ -263,19 +366,19 @@ class KrasRepository(context: Context) {
                 }
                 array.put(obj)
             }
-            prefs.edit().putString("favorites_list", array.toString()).apply()
+            prefs.edit().putString(favoritesKeyForUser(krasAccountId), array.toString()).apply()
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    fun isFavorite(mediaId: String): Boolean {
-        return getFavoritesRaw().any { it.mediaId == mediaId }
+    fun isFavorite(mediaId: String, krasAccountId: String? = null): Boolean {
+        return getFavoritesRaw(krasAccountId).any { it.mediaId == mediaId }
     }
 
-    // --- Watchlist (Local + TMDb Two-Way Sync) ---
-    fun getWatchlist(): List<TmdbWatchlistItem> {
-        val jsonStr = prefs.getString("tmdb_watchlist_items", null) ?: return emptyList()
+    // --- Watchlist (Scoped Per KRAS TV User + TMDb Two-Way Sync) ---
+    fun getWatchlist(krasAccountId: String? = null): List<TmdbWatchlistItem> {
+        val jsonStr = prefs.getString(watchlistKeyForUser(krasAccountId), null) ?: return emptyList()
         val list = mutableListOf<TmdbWatchlistItem>()
         try {
             val array = JSONArray(jsonStr)
@@ -300,13 +403,29 @@ class KrasRepository(context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return list
+        return deduplicateWatchlist(list)
     }
 
-    private fun saveWatchlist(items: List<TmdbWatchlistItem>) {
+    private fun deduplicateWatchlist(items: List<TmdbWatchlistItem>): List<TmdbWatchlistItem> {
+        val map = LinkedHashMap<String, TmdbWatchlistItem>()
+        for (item in items) {
+            val key = if (item.tmdbId > 0) {
+                "${item.type.name}:tmdb:${item.tmdbId}"
+            } else {
+                "${item.type.name}:id:${item.mediaId.ifBlank { item.title.lowercase() }}"
+            }
+            if (!map.containsKey(key)) {
+                map[key] = item
+            }
+        }
+        return map.values.toList()
+    }
+
+    private fun saveWatchlist(items: List<TmdbWatchlistItem>, krasAccountId: String? = null) {
         try {
+            val deduplicated = deduplicateWatchlist(items)
             val array = JSONArray()
-            for (item in items) {
+            for (item in deduplicated) {
                 val obj = JSONObject().apply {
                     put("id", item.id)
                     put("mediaId", item.mediaId)
@@ -322,15 +441,18 @@ class KrasRepository(context: Context) {
                 }
                 array.put(obj)
             }
-            prefs.edit().putString("tmdb_watchlist_items", array.toString()).apply()
+            prefs.edit().putString(watchlistKeyForUser(krasAccountId), array.toString()).apply()
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    fun toggleWatchlist(item: MediaItem): Boolean {
-        val list = getWatchlist().toMutableList()
-        val existing = list.find { it.mediaId == item.id || (item.tmdbId > 0 && it.tmdbId == item.tmdbId && it.type == item.type) }
+    fun toggleWatchlist(item: MediaItem, krasAccountId: String? = null): Boolean {
+        val userKey = resolveUserKey(krasAccountId)
+        val list = getWatchlist(userKey).toMutableList()
+        val existing = list.find {
+            it.mediaId == item.id || (item.tmdbId > 0 && it.tmdbId == item.tmdbId && it.type == item.type)
+        }
         val isAdded: Boolean
         if (existing != null) {
             list.remove(existing)
@@ -353,17 +475,32 @@ class KrasRepository(context: Context) {
             )
             isAdded = true
         }
-        saveWatchlist(list)
+        saveWatchlist(list, userKey)
+
+        if (item.type == MediaType.MOVIE || item.type == MediaType.SERIES) {
+            recordPendingTmdbMutation(
+                PendingTmdbMutation(
+                    krasAccountId = userKey,
+                    tmdbId = item.tmdbId.takeIf { it > 0 } ?: (existing?.tmdbId ?: 0),
+                    mediaId = item.id,
+                    mediaType = item.type.name,
+                    title = item.name,
+                    year = item.year,
+                    category = TmdbMutationCategory.WATCHLIST,
+                    action = if (isAdded) TmdbMutationAction.ADD else TmdbMutationAction.REMOVE
+                )
+            )
+        }
         return isAdded
     }
 
-    fun isInWatchlist(mediaId: String): Boolean {
-        return getWatchlist().any { it.mediaId == mediaId }
+    fun isInWatchlist(mediaId: String, krasAccountId: String? = null): Boolean {
+        return getWatchlist(krasAccountId).any { it.mediaId == mediaId }
     }
 
-    // --- User Ratings (Local + TMDb Two-Way Sync) ---
-    fun getUserRatings(): List<TmdbUserRatingItem> {
-        val jsonStr = prefs.getString("tmdb_user_ratings", null) ?: return emptyList()
+    // --- User Ratings (Scoped Per KRAS TV User + TMDb Two-Way Sync) ---
+    fun getUserRatings(krasAccountId: String? = null): List<TmdbUserRatingItem> {
+        val jsonStr = prefs.getString(ratingsKeyForUser(krasAccountId), null) ?: return emptyList()
         val list = mutableListOf<TmdbUserRatingItem>()
         try {
             val array = JSONArray(jsonStr)
@@ -385,13 +522,30 @@ class KrasRepository(context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return list
+        return deduplicateRatings(list)
     }
 
-    private fun saveUserRatings(items: List<TmdbUserRatingItem>) {
+    private fun deduplicateRatings(items: List<TmdbUserRatingItem>): List<TmdbUserRatingItem> {
+        val map = LinkedHashMap<String, TmdbUserRatingItem>()
+        for (item in items) {
+            val key = if (item.tmdbId > 0) {
+                "${item.type.name}:tmdb:${item.tmdbId}"
+            } else {
+                "${item.type.name}:id:${item.mediaId.ifBlank { item.title.lowercase() }}"
+            }
+            val existing = map[key]
+            if (existing == null || item.updatedAt >= existing.updatedAt) {
+                map[key] = item
+            }
+        }
+        return map.values.toList()
+    }
+
+    private fun saveUserRatings(items: List<TmdbUserRatingItem>, krasAccountId: String? = null) {
         try {
+            val deduplicated = deduplicateRatings(items)
             val array = JSONArray()
-            for (item in items) {
+            for (item in deduplicated) {
                 val obj = JSONObject().apply {
                     put("mediaId", item.mediaId)
                     put("tmdbId", item.tmdbId)
@@ -404,15 +558,17 @@ class KrasRepository(context: Context) {
                 }
                 array.put(obj)
             }
-            prefs.edit().putString("tmdb_user_ratings", array.toString()).apply()
+            prefs.edit().putString(ratingsKeyForUser(krasAccountId), array.toString()).apply()
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    fun setUserRating(item: MediaItem, rating: Double) {
+    fun setUserRating(item: MediaItem, rating: Double, krasAccountId: String? = null) {
+        val userKey = resolveUserKey(krasAccountId)
         val clamped = rating.coerceIn(0.5, 10.0)
-        val list = getUserRatings().filterNot {
+        val nowMs = System.currentTimeMillis()
+        val list = getUserRatings(userKey).filterNot {
             it.mediaId == item.id || (item.tmdbId > 0 && it.tmdbId == item.tmdbId && it.type == item.type)
         }.toMutableList()
         list.add(
@@ -424,76 +580,208 @@ class KrasRepository(context: Context) {
                 title = item.name,
                 posterUrl = item.streamIcon,
                 year = item.year,
-                userRating = clamped
+                userRating = clamped,
+                updatedAt = nowMs
             )
         )
-        saveUserRatings(list)
+        saveUserRatings(list, userKey)
+
+        if (item.type == MediaType.MOVIE || item.type == MediaType.SERIES) {
+            recordPendingTmdbMutation(
+                PendingTmdbMutation(
+                    krasAccountId = userKey,
+                    tmdbId = item.tmdbId,
+                    mediaId = item.id,
+                    mediaType = item.type.name,
+                    title = item.name,
+                    year = item.year,
+                    category = TmdbMutationCategory.RATING,
+                    action = TmdbMutationAction.RATE,
+                    userRating = clamped,
+                    updatedAtMs = nowMs
+                )
+            )
+        }
     }
 
-    fun getUserRating(mediaId: String): Double? {
-        return getUserRatings().find { it.mediaId == mediaId }?.userRating
+    fun getUserRating(mediaId: String, krasAccountId: String? = null): Double? {
+        return getUserRatings(krasAccountId).find { it.mediaId == mediaId }?.userRating
     }
 
-    fun getLocalTmdbSyncFavorites(): List<TmdbSyncItem> {
-        return getFavoritesRaw()
+    // --- Offline Mutation Queue & Conflict Tracking (Scoped Per KRAS TV User) ---
+    fun getPendingTmdbMutations(krasAccountId: String? = null): List<PendingTmdbMutation> {
+        val userKey = resolveUserKey(krasAccountId)
+        val jsonStr = prefs.getString(pendingMutationsKeyForUser(userKey), null) ?: return emptyList()
+        val list = mutableListOf<PendingTmdbMutation>()
+        try {
+            val arr = JSONArray(jsonStr)
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val category = try {
+                    TmdbMutationCategory.valueOf(obj.optString("category", "FAVORITE"))
+                } catch (_: Exception) {
+                    TmdbMutationCategory.FAVORITE
+                }
+                val action = try {
+                    TmdbMutationAction.valueOf(obj.optString("action", "ADD"))
+                } catch (_: Exception) {
+                    TmdbMutationAction.ADD
+                }
+                list.add(
+                    PendingTmdbMutation(
+                        krasAccountId = obj.optString("krasAccountId", userKey),
+                        tmdbId = obj.optInt("tmdbId", 0),
+                        mediaId = obj.optString("mediaId", ""),
+                        mediaType = obj.optString("mediaType", "MOVIE"),
+                        title = obj.optString("title", ""),
+                        year = obj.optString("year", ""),
+                        category = category,
+                        action = action,
+                        userRating = obj.optDouble("userRating", 0.0),
+                        updatedAtMs = obj.optLong("updatedAtMs", 0L)
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return list
+    }
+
+    fun recordPendingTmdbMutation(mutation: PendingTmdbMutation) {
+        val userKey = resolveUserKey(mutation.krasAccountId)
+        val existing = getPendingTmdbMutations(userKey)
+            .filterNot { it.deduplicationKey == mutation.deduplicationKey }
+            .toMutableList()
+        existing.add(mutation.copy(krasAccountId = userKey))
+        savePendingTmdbMutations(existing, userKey)
+    }
+
+    fun clearPendingTmdbMutations(krasAccountId: String? = null) {
+        val userKey = resolveUserKey(krasAccountId)
+        prefs.edit().remove(pendingMutationsKeyForUser(userKey)).apply()
+    }
+
+    private fun savePendingTmdbMutations(mutations: List<PendingTmdbMutation>, krasAccountId: String? = null) {
+        try {
+            val userKey = resolveUserKey(krasAccountId)
+            val arr = JSONArray()
+            for (m in mutations) {
+                arr.put(
+                    JSONObject().apply {
+                        put("krasAccountId", userKey)
+                        put("tmdbId", m.tmdbId)
+                        put("mediaId", m.mediaId)
+                        put("mediaType", m.normalizedMediaType)
+                        put("title", m.title)
+                        put("year", m.year)
+                        put("category", m.category.name)
+                        put("action", m.action.name)
+                        put("userRating", m.userRating)
+                        put("updatedAtMs", m.updatedAtMs)
+                    }
+                )
+            }
+            prefs.edit().putString(pendingMutationsKeyForUser(userKey), arr.toString()).apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun getLocalTmdbSyncFavorites(krasAccountId: String? = null): List<TmdbSyncItem> {
+        return getFavoritesRaw(krasAccountId)
             .filter { it.type == MediaType.MOVIE || it.type == MediaType.SERIES }
             .map { fav ->
                 TmdbSyncItem(
                     tmdbId = fav.tmdbId,
-                    mediaType = if (fav.type == MediaType.SERIES) "tv" else "movie",
+                    mediaType = if (fav.type == MediaType.SERIES) "SERIES" else "MOVIE",
                     title = fav.title,
                     posterUrl = fav.posterUrl,
                     releaseYear = fav.year,
-                    rating = fav.rating
+                    rating = fav.rating,
+                    favorite = true,
+                    updatedAtMs = fav.timestamp
                 )
             }
     }
 
-    fun getLocalTmdbSyncWatchlist(): List<TmdbSyncItem> {
-        return getWatchlist()
+    fun getLocalTmdbSyncWatchlist(krasAccountId: String? = null): List<TmdbSyncItem> {
+        return getWatchlist(krasAccountId)
             .filter { it.type == MediaType.MOVIE || it.type == MediaType.SERIES }
             .map { wl ->
                 TmdbSyncItem(
                     tmdbId = wl.tmdbId,
-                    mediaType = if (wl.type == MediaType.SERIES) "tv" else "movie",
+                    mediaType = if (wl.type == MediaType.SERIES) "SERIES" else "MOVIE",
                     title = wl.title,
                     posterUrl = wl.posterUrl,
                     releaseYear = wl.year,
-                    rating = wl.rating
+                    rating = wl.rating,
+                    watchlist = true,
+                    updatedAtMs = wl.timestamp
                 )
             }
     }
 
-    fun getLocalTmdbSyncRatings(): List<TmdbSyncItem> {
-        return getUserRatings()
+    fun getLocalTmdbSyncRatings(krasAccountId: String? = null): List<TmdbSyncItem> {
+        return getUserRatings(krasAccountId)
             .filter { (it.type == MediaType.MOVIE || it.type == MediaType.SERIES) && it.userRating >= 0.5 }
             .map { rt ->
                 TmdbSyncItem(
                     tmdbId = rt.tmdbId,
-                    mediaType = if (rt.type == MediaType.SERIES) "tv" else "movie",
+                    mediaType = if (rt.type == MediaType.SERIES) "SERIES" else "MOVIE",
                     title = rt.title,
                     posterUrl = rt.posterUrl,
                     releaseYear = rt.year,
                     rating = rt.userRating,
-                    userRating = rt.userRating
+                    userRating = rt.userRating,
+                    updatedAtMs = rt.updatedAt
                 )
             }
     }
 
     /**
      * Merges remote TMDb Favorites, Watchlist, and Ratings into local KRAS TV persistence
-     * without duplicating existing entries.
+     * for a specific KRAS TV user (`krasAccountId`) using a deterministic conflict resolution policy:
+     * 1. Tombstone Protection: Items explicitly removed locally while offline (`PendingTmdbMutation` with `REMOVE`)
+     *    are not resurrected by a stale remote list.
+     * 2. Deduplicated Union: Additions from both TMDb and KRAS TV are merged without duplicate records.
+     * 3. Latest-Timestamp Wins for Ratings: If an item is rated on both sides, the newer rating wins.
      */
     fun mergeTmdbSyncedData(
         remoteFavorites: List<TmdbSyncItem>,
         remoteWatchlist: List<TmdbSyncItem>,
-        remoteRatings: List<TmdbSyncItem>
+        remoteRatings: List<TmdbSyncItem>,
+        krasAccountId: String? = null
     ) {
-        // 1. Merge Favorites
-        val currentFavorites = getFavoritesRaw().toMutableList()
+        val userKey = resolveUserKey(krasAccountId)
+        val pendingMutations = getPendingTmdbMutations(userKey)
+        val removedFavTmdbIds = pendingMutations
+            .filter { it.category == TmdbMutationCategory.FAVORITE && it.action == TmdbMutationAction.REMOVE }
+            .map { "${it.normalizedMediaType}:${it.tmdbId}" }
+            .toSet()
+        val removedFavTitles = pendingMutations
+            .filter { it.category == TmdbMutationCategory.FAVORITE && it.action == TmdbMutationAction.REMOVE && it.title.isNotBlank() }
+            .map { "${it.normalizedMediaType}:${it.title.lowercase()}" }
+            .toSet()
+
+        val removedWlTmdbIds = pendingMutations
+            .filter { it.category == TmdbMutationCategory.WATCHLIST && it.action == TmdbMutationAction.REMOVE }
+            .map { "${it.normalizedMediaType}:${it.tmdbId}" }
+            .toSet()
+        val removedWlTitles = pendingMutations
+            .filter { it.category == TmdbMutationCategory.WATCHLIST && it.action == TmdbMutationAction.REMOVE && it.title.isNotBlank() }
+            .map { "${it.normalizedMediaType}:${it.title.lowercase()}" }
+            .toSet()
+
+        // 1. Merge Favorites (Movies & TV Series)
+        val currentFavorites = getFavoritesRaw(userKey).toMutableList()
         var favChanged = false
         for (remote in remoteFavorites) {
-            val targetType = if (remote.mediaType.equals("tv", true)) MediaType.SERIES else MediaType.MOVIE
+            val normType = remote.normalizedMediaType
+            if (remote.tmdbId > 0 && "$normType:${remote.tmdbId}" in removedFavTmdbIds) continue
+            if (remote.title.isNotBlank() && "$normType:${remote.title.lowercase()}" in removedFavTitles) continue
+
+            val targetType = if (normType == "SERIES") MediaType.SERIES else MediaType.MOVIE
             val existingIdx = currentFavorites.indexOfFirst { fav ->
                 fav.type == targetType && (
                     (remote.tmdbId > 0 && fav.tmdbId == remote.tmdbId) ||
@@ -512,10 +800,11 @@ class KrasRepository(context: Context) {
                 }
             } else if (remote.title.isNotBlank()) {
                 val norm = ChannelNameNormalizer.normalize(remote.title)
+                val typeSlug = if (targetType == MediaType.SERIES) "tv" else "movie"
                 currentFavorites.add(
                     FavoriteItem(
                         id = java.util.UUID.randomUUID().toString(),
-                        mediaId = "tmdb_${remote.mediaType}_${remote.tmdbId}",
+                        mediaId = "tmdb_${typeSlug}_${remote.tmdbId}",
                         type = targetType,
                         title = remote.title,
                         posterUrl = remote.posterUrl,
@@ -532,14 +821,18 @@ class KrasRepository(context: Context) {
             }
         }
         if (favChanged) {
-            saveFavoritesList(currentFavorites)
+            saveFavoritesList(currentFavorites, userKey)
         }
 
-        // 2. Merge Watchlist
-        val currentWatchlist = getWatchlist().toMutableList()
+        // 2. Merge Watchlist (Movies & TV Series)
+        val currentWatchlist = getWatchlist(userKey).toMutableList()
         var wlChanged = false
         for (remote in remoteWatchlist) {
-            val targetType = if (remote.mediaType.equals("tv", true)) MediaType.SERIES else MediaType.MOVIE
+            val normType = remote.normalizedMediaType
+            if (remote.tmdbId > 0 && "$normType:${remote.tmdbId}" in removedWlTmdbIds) continue
+            if (remote.title.isNotBlank() && "$normType:${remote.title.lowercase()}" in removedWlTitles) continue
+
+            val targetType = if (normType == "SERIES") MediaType.SERIES else MediaType.MOVIE
             val exists = currentWatchlist.any { wl ->
                 wl.type == targetType && (
                     (remote.tmdbId > 0 && wl.tmdbId == remote.tmdbId) ||
@@ -547,10 +840,11 @@ class KrasRepository(context: Context) {
                     )
             }
             if (!exists && remote.title.isNotBlank()) {
+                val typeSlug = if (targetType == MediaType.SERIES) "tv" else "movie"
                 currentWatchlist.add(
                     TmdbWatchlistItem(
                         id = java.util.UUID.randomUUID().toString(),
-                        mediaId = "tmdb_${remote.mediaType}_${remote.tmdbId}",
+                        mediaId = "tmdb_${typeSlug}_${remote.tmdbId}",
                         tmdbId = remote.tmdbId,
                         type = targetType,
                         title = remote.title,
@@ -564,40 +858,70 @@ class KrasRepository(context: Context) {
             }
         }
         if (wlChanged) {
-            saveWatchlist(currentWatchlist)
+            saveWatchlist(currentWatchlist, userKey)
         }
 
-        // 3. Merge User Ratings
-        val currentRatings = getUserRatings().toMutableList()
+        // 3. Merge User Ratings (Latest Timestamp Wins)
+        val currentRatings = getUserRatings(userKey).toMutableList()
         var ratingsChanged = false
         for (remote in remoteRatings) {
             val effectiveRating = if (remote.userRating > 0.0) remote.userRating else remote.rating
             if (effectiveRating <= 0.0) continue
-            val targetType = if (remote.mediaType.equals("tv", true)) MediaType.SERIES else MediaType.MOVIE
+            val normType = remote.normalizedMediaType
+            val targetType = if (normType == "SERIES") MediaType.SERIES else MediaType.MOVIE
             val existingIdx = currentRatings.indexOfFirst { rt ->
                 rt.type == targetType && (
                     (remote.tmdbId > 0 && rt.tmdbId == remote.tmdbId) ||
                         rt.title.equals(remote.title, ignoreCase = true)
                     )
             }
-            if (existingIdx < 0 && remote.title.isNotBlank()) {
+            if (existingIdx >= 0) {
+                val existing = currentRatings[existingIdx]
+                if (remote.updatedAtMs > existing.updatedAt && existing.userRating != effectiveRating) {
+                    currentRatings[existingIdx] = existing.copy(
+                        tmdbId = if (existing.tmdbId > 0) existing.tmdbId else remote.tmdbId,
+                        userRating = effectiveRating,
+                        updatedAt = remote.updatedAtMs
+                    )
+                    ratingsChanged = true
+                }
+            } else if (remote.title.isNotBlank()) {
+                val typeSlug = if (targetType == MediaType.SERIES) "tv" else "movie"
                 currentRatings.add(
                     TmdbUserRatingItem(
-                        mediaId = "tmdb_${remote.mediaType}_${remote.tmdbId}",
+                        mediaId = "tmdb_${typeSlug}_${remote.tmdbId}",
                         tmdbId = remote.tmdbId,
                         type = targetType,
                         title = remote.title,
                         posterUrl = remote.posterUrl,
                         year = remote.releaseYear,
-                        userRating = effectiveRating
+                        userRating = effectiveRating,
+                        updatedAt = remote.updatedAtMs.takeIf { it > 0L } ?: System.currentTimeMillis()
                     )
                 )
                 ratingsChanged = true
             }
         }
         if (ratingsChanged) {
-            saveUserRatings(currentRatings)
+            saveUserRatings(currentRatings, userKey)
         }
+
+        // Clear replayed offline mutations after successful merge
+        clearPendingTmdbMutations(userKey)
+    }
+
+    /**
+     * Clears TMDb-synced items for a disconnected user while keeping Live TV favorites intact.
+     */
+    fun clearTmdbSyncedDataOnDisconnect(krasAccountId: String? = null) {
+        val userKey = resolveUserKey(krasAccountId)
+        val liveOnlyFavs = getFavoritesRaw(userKey).filter { it.type == MediaType.LIVE }
+        saveFavoritesList(liveOnlyFavs, userKey)
+        prefs.edit()
+            .remove(watchlistKeyForUser(userKey))
+            .remove(ratingsKeyForUser(userKey))
+            .remove(pendingMutationsKeyForUser(userKey))
+            .apply()
     }
 
     // --- Watch History ---
@@ -1091,7 +1415,7 @@ class KrasRepository(context: Context) {
     ): List<MediaItem> = withContext(Dispatchers.IO) {
         if (type.equals("LIVE", ignoreCase = true)) {
             if (categoryId == "favorites") {
-                val favIds = getFavoritesRaw().filter { it.type == MediaType.LIVE }.map { it.mediaId }
+                val favIds = getFavoritesRaw(accountId).filter { it.type == MediaType.LIVE }.map { it.mediaId }
                 if (favIds.isEmpty()) return@withContext emptyList()
                 val favEntities = when (liveChannelOrder) {
                     LiveChannelOrder.SMART -> mediaDao.getFavoritesSmart(accountId, favIds, query, qualityFilter, sortByQuality)
@@ -1143,7 +1467,7 @@ class KrasRepository(context: Context) {
         qualityFilter: String = "All"
     ): Int = withContext(Dispatchers.IO) {
         if (type.equals("LIVE", ignoreCase = true) && categoryId == "favorites") {
-            val favIds = getFavoritesRaw().filter { it.type == MediaType.LIVE }.map { it.mediaId }
+            val favIds = getFavoritesRaw(accountId).filter { it.type == MediaType.LIVE }.map { it.mediaId }
             if (favIds.isEmpty()) return@withContext 0
             return@withContext mediaDao.getFavoritesSmart(accountId, favIds, query, qualityFilter, false).size
         }

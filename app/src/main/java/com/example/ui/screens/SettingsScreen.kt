@@ -1644,7 +1644,21 @@ private fun TmdbAccountSyncCard(
                         )
                     }
 
-                    // Auto Sync Toggle Row
+                    if (tmdbAccountState.pendingOfflineChangesCount > 0) {
+                        Text(
+                            text = if (isArabic) {
+                                "${tmdbAccountState.pendingOfflineChangesCount} تغييرات محلية بانتظار المزامنة"
+                            } else {
+                                "${tmdbAccountState.pendingOfflineChangesCount} offline change(s) queued for sync"
+                            },
+                            color = AccentGold,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.testTag("tmdb_pending_offline_changes_text")
+                        )
+                    }
+
+                    // Automatic Sync Toggle Row
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1652,7 +1666,7 @@ private fun TmdbAccountSyncCard(
                     ) {
                         Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                             Text(
-                                text = if (isArabic) "مزامنة تلقائية (Auto Sync)" else "Auto Sync",
+                                text = if (isArabic) "مزامنة تلقائية (Automatic Sync)" else "Automatic Sync",
                                 color = Color.White,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold
@@ -1865,6 +1879,21 @@ private fun TmdbAccountSyncCard(
                             .testTag("tmdb_account_status_message")
                     )
                 }
+
+                // Official TMDb API Attribution Notice
+                Text(
+                    text = if (isArabic) {
+                        "يستخدم هذا التطبيق واجهة برمجة تطبيقات TMDB ولكنه غير معتمد أو مصادق عليه من قِبل TMDB."
+                    } else {
+                        "This product uses the TMDB API but is not endorsed or certified by TMDB."
+                    },
+                    color = TextSecondary.copy(alpha = 0.7f),
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("tmdb_attribution_notice")
+                )
             }
         }
     }

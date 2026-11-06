@@ -1451,7 +1451,180 @@ class ExampleRobolectricTest {
       assertEquals(com.example.data.api.TmdbErrorCategory.NETWORK_ERROR, netErr.errorCategory)
     }
   }
+
+  @Test
+  fun `multi user tmdb account isolation offline queue and conflict resolution`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+    val sessionStore = com.example.data.local.TmdbSecureSessionStore(context)
+
+    val userA = "kras_user_alpha"
+    val userB = "kras_user_beta"
+
+    sessionStore.clearSession(userA)
+    sessionStore.clearSession(userB)
+    repo.clearTmdbSyncedDataOnDisconnect(userA)
+    repo.clearTmdbSyncedDataOnDisconnect(userB)
+
+    // 1. Save independent sessions and pending auth state nonces for User A and User B
+    val nonceA = sessionStore.generateStateNonce()
+    val nonceB = sessionStore.generateStateNonce()
+    assertNotEquals(nonceA, nonceB)
+
+    sessionStore.savePendingAuthRequest(userA, "req_tok_alpha", nonceA)
+    sessionStore.savePendingAuthRequest(userB, "req_tok_beta", nonceB)
+
+    assertEquals("req_tok_alpha", sessionStore.getPendingAuthRequest(userA)?.requestToken)
+    assertEquals(nonceA, sessionStore.getPendingAuthRequest(userA)?.stateNonce)
+    assertEquals("req_tok_beta", sessionStore.getPendingAuthRequest(userB)?.requestToken)
+    assertEquals(nonceB, sessionStore.getPendingAuthRequest(userB)?.stateNonce)
+
+    sessionStore.saveSession(
+      krasAccountId = userA,
+      sessionId = "sess_alpha_secret",
+      accountId = 1001,
+      username = "alpha_cinema",
+      displayName = "Alpha User",
+      avatarUrl = "https://image.tmdb.org/t/p/w500/alpha.jpg"
+    )
+    sessionStore.saveSession(
+      krasAccountId = userB,
+      sessionId = "sess_beta_secret",
+      accountId = 2002,
+      username = "beta_cinema",
+      displayName = "Beta User",
+      avatarUrl = "https://image.tmdb.org/t/p/w500/beta.jpg"
+    )
+
+    val storedA = sessionStore.getSession(userA)!!
+    val storedB = sessionStore.getSession(userB)!!
+    assertEquals("alpha_cinema", storedA.username)
+    assertEquals(1001, storedA.accountId)
+    assertEquals("beta_cinema", storedB.username)
+    assertEquals(2002, storedB.accountId)
+
+    // 2. Verify User A and User B have isolated Favorites, Watchlist, and Ratings
+    val movieAlpha = com.example.data.model.MediaItem(
+      id = "mov_alpha_1",
+      streamId = 101,
+      name = "Interstellar",
+      title = "Interstellar",
+      type = MediaType.MOVIE,
+      tmdbId = 157336
+    )
+    val seriesBeta = com.example.data.model.MediaItem(
+      id = "ser_beta_1",
+      streamId = 202,
+      name = "The Last of Us",
+      title = "The Last of Us",
+      type = MediaType.SERIES,
+      tmdbId = 100088
+    )
+
+    assertTrue(repo.toggleFavorite(movieAlpha, userA))
+    assertTrue(repo.toggleWatchlist(movieAlpha, userA))
+    repo.setUserRating(movieAlpha, 9.0, userA)
+
+    assertTrue(repo.toggleFavorite(seriesBeta, userB))
+    assertTrue(repo.toggleWatchlist(seriesBeta, userB))
+    repo.setUserRating(seriesBeta, 8.5, userB)
+
+    // User A must NOT see User B's items and vice versa
+    assertTrue(repo.getFavorites(krasAccountId = userA).any { it.tmdbId == 157336 })
+    assertFalse(repo.getFavorites(krasAccountId = userA).any { it.tmdbId == 100088 })
+    assertTrue(repo.getFavorites(krasAccountId = userB).any { it.tmdbId == 100088 })
+    assertFalse(repo.getFavorites(krasAccountId = userB).any { it.tmdbId == 157336 })
+
+    assertEquals(9.0, repo.getUserRating("mov_alpha_1", userA) ?: 0.0, 0.01)
+    assertNull(repo.getUserRating("mov_alpha_1", userB))
+    assertEquals(8.5, repo.getUserRating("ser_beta_1", userB) ?: 0.0, 0.01)
+    assertNull(repo.getUserRating("ser_beta_1", userA))
+
+    // 3. Offline mutation queueing & Tombstone conflict resolution:
+    // Suppose User A removes "Interstellar" from Favorites while offline, and updates rating to 10.0
+    assertFalse(repo.toggleFavorite(movieAlpha, userA))
+    repo.setUserRating(movieAlpha, 10.0, userA)
+
+    val pendingMutationsA = repo.getPendingTmdbMutations(userA)
+    assertTrue(pendingMutationsA.any {
+      it.tmdbId == 157336 &&
+        it.category == com.example.data.model.TmdbMutationCategory.FAVORITE &&
+        it.action == com.example.data.model.TmdbMutationAction.REMOVE
+    })
+
+    // Save a local Continue Watching progress entry to verify it stays untouched by TMDb sync
+    repo.saveWatchProgress(
+      com.example.data.model.WatchProgress(
+        id = "mov_alpha_1",
+        mediaId = "mov_alpha_1",
+        title = "Interstellar",
+        type = MediaType.MOVIE,
+        posterUrl = "",
+        positionMs = 42_000L,
+        durationMs = 120_000L,
+        updatedAt = System.currentTimeMillis()
+      )
+    )
+
+    // Simulate a remote sync response that still contains stale "Interstellar" in Favorites,
+    // duplicate "Dune: Part Two" entries, and an older rating (7.0) for "Interstellar"
+    val remoteFavoritesWithStaleAndDuplicate = listOf(
+      com.example.data.model.TmdbSyncItem(
+        tmdbId = 157336,
+        mediaType = "MOVIE",
+        title = "Interstellar"
+      ),
+      com.example.data.model.TmdbSyncItem(
+        tmdbId = 693134,
+        mediaType = "MOVIE",
+        title = "Dune: Part Two"
+      ),
+      com.example.data.model.TmdbSyncItem(
+        tmdbId = 693134,
+        mediaType = "movie",
+        title = "Dune: Part Two"
+      )
+    )
+    val remoteRatingsWithStale = listOf(
+      com.example.data.model.TmdbSyncItem(
+        tmdbId = 157336,
+        mediaType = "MOVIE",
+        title = "Interstellar",
+        userRating = 7.0,
+        updatedAtMs = 1_000L // older than local rating
+      )
+    )
+
+    repo.mergeTmdbSyncedData(
+      remoteFavorites = remoteFavoritesWithStaleAndDuplicate,
+      remoteWatchlist = emptyList(),
+      remoteRatings = remoteRatingsWithStale,
+      krasAccountId = userA
+    )
+
+    // Tombstone protection: removed Interstellar must NOT be re-added from stale remote list
+    val mergedFavsA = repo.getFavorites(krasAccountId = userA)
+    assertFalse(mergedFavsA.any { it.tmdbId == 157336 })
+    // Deduplication: Dune: Part Two appears exactly once
+    assertEquals(1, mergedFavsA.count { it.tmdbId == 693134 })
+    // Conflict resolution: newer local rating (10.0) wins over older remote rating (7.0)
+    assertEquals(10.0, repo.getUserRating("mov_alpha_1", userA) ?: 0.0, 0.01)
+    // Pending mutations queue for User A is cleared after merge
+    assertTrue(repo.getPendingTmdbMutations(userA).isEmpty())
+
+    // 4. Disconnecting User A clears User A's TMDb session and synced lists,
+    //    leaves User B connected & untouched, and preserves local Continue Watching history.
+    sessionStore.clearSession(userA)
+    repo.clearTmdbSyncedDataOnDisconnect(userA)
+
+    assertNull(sessionStore.getSession(userA))
+    assertNotNull(sessionStore.getSession(userB))
+    assertTrue(repo.getLocalTmdbSyncFavorites(userA).isEmpty())
+    assertTrue(repo.getFavorites(krasAccountId = userB).any { it.tmdbId == 100088 })
+    assertTrue(repo.getWatchHistory().any { it.mediaId == "mov_alpha_1" && it.positionMs == 42_000L })
+  }
 }
+
 
 
 

@@ -2,6 +2,7 @@ package com.example.data.api
 
 import com.example.data.model.Episode
 import com.example.data.model.MediaItem
+import com.example.data.model.PendingTmdbMutation
 import com.example.data.model.Season
 import com.example.data.model.SeriesDetails
 import com.example.data.model.TmdbSyncItem
@@ -96,6 +97,7 @@ data class TmdbRequestTokenResult(
     val requestToken: String = "",
     val authUrl: String = "",
     val expiresAt: String = "",
+    val stateNonce: String = "",
     val endpointNotDeployed: Boolean = false,
     val httpStatusCode: Int = 0,
     val errorCategory: TmdbErrorCategory = TmdbErrorCategory.NONE,
@@ -248,6 +250,7 @@ class TmdbProxyClient(
         url: String,
         proxyAuthToken: String,
         tmdbSessionId: String = "",
+        krasUserId: String = "",
         method: String = "GET",
         jsonBody: JSONObject? = null
     ): Request {
@@ -262,6 +265,10 @@ class TmdbProxyClient(
         }
         if (tmdbSessionId.isNotBlank()) {
             builder.header("X-TMDb-Session-Id", tmdbSessionId)
+            builder.header("X-TMDb-Session", tmdbSessionId)
+        }
+        if (krasUserId.isNotBlank()) {
+            builder.header("X-KRAS-User-Id", krasUserId)
         }
 
         if (method.equals("POST", ignoreCase = true)) {
@@ -287,7 +294,9 @@ class TmdbProxyClient(
      */
     suspend fun createAuthRequestToken(
         rawProxyUrl: String,
-        redirectTo: String = "krastv://tmdb-auth"
+        redirectTo: String = "krastv://tmdb-auth",
+        krasUserId: String = "demo",
+        stateNonce: String = ""
     ): TmdbRequestTokenResult = withContext(Dispatchers.IO) {
         val effectiveRawUrl = rawProxyUrl.trim().ifBlank { CANONICAL_BACKEND_BASE_URL }
         val endpoint = parseProxyEndpoint(effectiveRawUrl)
@@ -305,10 +314,17 @@ class TmdbProxyClient(
         try {
             val payload = JSONObject().apply {
                 put("redirectTo", redirectTo)
+                put("redirect_to", redirectTo)
+                put("krasUserId", krasUserId)
+                put("kras_user_id", krasUserId)
+                if (stateNonce.isNotBlank()) {
+                    put("state", stateNonce)
+                }
             }
             val request = buildAuthenticatedRequest(
                 url = requestUrl,
                 proxyAuthToken = endpoint.proxyAuthToken,
+                krasUserId = krasUserId,
                 method = "POST",
                 jsonBody = payload
             )
@@ -324,16 +340,31 @@ class TmdbProxyClient(
                     .orEmpty()
 
                 if (response.isSuccessful && token.isNotEmpty()) {
-                    val encodedRedirect = URLEncoder.encode(redirectTo, "UTF-8")
+                    val returnedState = json?.optString("state", stateNonce)?.trim().orEmpty().ifBlank { stateNonce }
+                    val callbackUrl = buildString {
+                        append(endpoint.baseUrl)
+                        append("/api/tmdb/auth/callback?app_redirect=")
+                        append(URLEncoder.encode(redirectTo, "UTF-8"))
+                        if (returnedState.isNotBlank()) {
+                            append("&state=")
+                            append(URLEncoder.encode(returnedState, "UTF-8"))
+                        }
+                        if (krasUserId.isNotBlank()) {
+                            append("&kras_user=")
+                            append(URLEncoder.encode(krasUserId, "UTF-8"))
+                        }
+                    }
+                    val encodedCallback = URLEncoder.encode(callbackUrl, "UTF-8")
                     val authUrl = json?.optString("authUrl", "")?.trim()
                         ?.ifBlank { json.optString("auth_url", "").trim() }
                         .takeIf { !it.isNullOrBlank() }
-                        ?: "https://www.themoviedb.org/authenticate/$token?redirect_to=$encodedRedirect"
+                        ?: "https://www.themoviedb.org/authenticate/$token?redirect_to=$encodedCallback"
                     return@withContext TmdbRequestTokenResult(
                         ok = true,
                         requestToken = token,
                         authUrl = authUrl,
                         expiresAt = json?.optString("expiresAt", json.optString("expires_at", "")).orEmpty(),
+                        stateNonce = returnedState,
                         httpStatusCode = response.code,
                         errorCategory = TmdbErrorCategory.NONE,
                         requestUrl = requestUrl,
@@ -400,7 +431,9 @@ class TmdbProxyClient(
      */
     suspend fun createAuthorizedSession(
         rawProxyUrl: String,
-        requestToken: String
+        requestToken: String,
+        krasUserId: String = "demo",
+        stateNonce: String = ""
     ): TmdbSessionResult = withContext(Dispatchers.IO) {
         val effectiveRawUrl = rawProxyUrl.trim().ifBlank { CANONICAL_BACKEND_BASE_URL }
         val endpoint = parseProxyEndpoint(effectiveRawUrl)
@@ -419,10 +452,16 @@ class TmdbProxyClient(
             val payload = JSONObject().apply {
                 put("requestToken", cleanToken)
                 put("request_token", cleanToken)
+                put("krasUserId", krasUserId)
+                put("kras_user_id", krasUserId)
+                if (stateNonce.isNotBlank()) {
+                    put("state", stateNonce)
+                }
             }
             val request = buildAuthenticatedRequest(
                 url = requestUrl,
                 proxyAuthToken = endpoint.proxyAuthToken,
+                krasUserId = krasUserId,
                 method = "POST",
                 jsonBody = payload
             )
@@ -458,8 +497,9 @@ class TmdbProxyClient(
                     ?.ifBlank { json?.optString("name", "")?.trim().orEmpty() }
                     ?: json?.optString("name", "")?.trim().orEmpty()
                 val avatarUrl = accountObj?.optString("avatarUrl", "")?.trim()
+                    ?.ifBlank { accountObj.optString("avatar_url", "").trim() }
                     ?.ifBlank { json?.optString("avatarUrl", "")?.trim().orEmpty() }
-                    ?: json?.optString("avatarUrl", "")?.trim().orEmpty()
+                    ?: json?.optString("avatarUrl", json.optString("avatar_url", ""))?.trim().orEmpty()
 
                 if (response.isSuccessful && sessionId.isNotEmpty() && username.isNotEmpty()) {
                     return@withContext TmdbSessionResult(
@@ -508,9 +548,11 @@ class TmdbProxyClient(
         rawProxyUrl: String,
         sessionId: String,
         accountId: Int,
+        krasUserId: String = "demo",
         localFavorites: List<TmdbSyncItem>,
         localWatchlist: List<TmdbSyncItem>,
         localRatings: List<TmdbSyncItem>,
+        pendingMutations: List<PendingTmdbMutation> = emptyList(),
         language: String = "en-US"
     ): TmdbTwoWaySyncResult = withContext(Dispatchers.IO) {
         val effectiveRawUrl = rawProxyUrl.trim().ifBlank { CANONICAL_BACKEND_BASE_URL }
@@ -527,17 +569,24 @@ class TmdbProxyClient(
 
         try {
             val payload = JSONObject().apply {
+                put("session_id", sessionId)
+                put("sessionId", sessionId)
+                put("account_id", accountId)
                 put("accountId", accountId)
+                put("kras_user_id", krasUserId)
+                put("krasUserId", krasUserId)
                 put("language", language)
                 put("favorites", serializeSyncItemsArray(localFavorites))
                 put("watchlist", serializeSyncItemsArray(localWatchlist))
                 put("ratings", serializeSyncItemsArray(localRatings))
+                put("mutations", serializePendingMutationsArray(pendingMutations))
             }
 
             val request = buildAuthenticatedRequest(
                 url = requestUrl,
                 proxyAuthToken = endpoint.proxyAuthToken,
                 tmdbSessionId = sessionId,
+                krasUserId = krasUserId,
                 method = "POST",
                 jsonBody = payload
             )
@@ -709,7 +758,8 @@ class TmdbProxyClient(
 
     suspend fun disconnectSession(
         rawProxyUrl: String,
-        sessionId: String
+        sessionId: String,
+        krasUserId: String = "demo"
     ): Boolean = withContext(Dispatchers.IO) {
         val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty() || sessionId.isBlank()) return@withContext true
@@ -719,8 +769,14 @@ class TmdbProxyClient(
                 url = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/auth/logout"),
                 proxyAuthToken = endpoint.proxyAuthToken,
                 tmdbSessionId = sessionId,
+                krasUserId = krasUserId,
                 method = "POST",
-                jsonBody = JSONObject().apply { put("sessionId", sessionId) }
+                jsonBody = JSONObject().apply {
+                    put("sessionId", sessionId)
+                    put("session_id", sessionId)
+                    put("krasUserId", krasUserId)
+                    put("kras_user_id", krasUserId)
+                }
             )
             httpClient.newCall(request).execute().use { response ->
                 response.isSuccessful
@@ -1201,6 +1257,7 @@ class TmdbProxyClient(
             var current = rawPathOrUrl.trim().trimEnd('/')
             val suffixes = listOf(
                 "/api/tmdb/auth/request-token",
+                "/api/tmdb/auth/callback",
                 "/api/tmdb/auth/session",
                 "/api/tmdb/auth/logout",
                 "/api/tmdb/account/favorite",
@@ -1235,15 +1292,46 @@ class TmdbProxyClient(
             val arr = JSONArray()
             for (item in items) {
                 if (item.tmdbId <= 0 && item.title.isBlank()) continue
+                val normalizedType = item.normalizedMediaType
                 arr.put(
                     JSONObject().apply {
+                        put("tmdb_id", item.tmdbId)
                         put("tmdbId", item.tmdbId)
-                        put("mediaType", item.mediaType)
+                        put("media_type", normalizedType)
+                        put("mediaType", normalizedType)
                         put("title", item.title)
+                        put("poster_url", item.posterUrl)
                         put("posterUrl", item.posterUrl)
+                        put("year", item.releaseYear)
                         put("releaseYear", item.releaseYear)
                         put("rating", item.rating)
+                        put("user_rating", item.userRating)
                         put("userRating", item.userRating)
+                        put("favorite", item.favorite)
+                        put("watchlist", item.watchlist)
+                        put("updated_at", item.updatedAtMs)
+                    }
+                )
+            }
+            return arr
+        }
+
+        fun serializePendingMutationsArray(mutations: List<PendingTmdbMutation>): JSONArray {
+            val arr = JSONArray()
+            for (mut in mutations) {
+                if (mut.tmdbId <= 0 && mut.title.isBlank()) continue
+                val normalizedType = mut.normalizedMediaType
+                arr.put(
+                    JSONObject().apply {
+                        put("tmdb_id", mut.tmdbId)
+                        put("media_id", mut.mediaId)
+                        put("media_type", normalizedType)
+                        put("title", mut.title)
+                        put("year", mut.year)
+                        put("category", mut.category.name)
+                        put("action", mut.action.name)
+                        put("user_rating", mut.userRating)
+                        put("updated_at", mut.updatedAtMs)
                     }
                 )
             }
@@ -1252,26 +1340,38 @@ class TmdbProxyClient(
 
         fun parseSyncItemsArray(arr: JSONArray?): List<TmdbSyncItem> {
             if (arr == null) return emptyList()
-            val list = mutableListOf<TmdbSyncItem>()
+            val dedupMap = LinkedHashMap<String, TmdbSyncItem>()
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
-                val tmdbId = obj.optInt("tmdbId", obj.optInt("id", 0))
+                val tmdbId = obj.optInt("tmdb_id", obj.optInt("tmdbId", obj.optInt("id", 0)))
                 val title = obj.optString("title", obj.optString("name", "")).trim()
                 if (tmdbId <= 0 && title.isEmpty()) continue
-                val rawType = obj.optString("mediaType", "movie").lowercase()
-                list.add(
-                    TmdbSyncItem(
-                        tmdbId = tmdbId,
-                        mediaType = if (rawType == "tv" || rawType == "series") "tv" else "movie",
-                        title = title,
-                        posterUrl = obj.optString("posterUrl", "").trim(),
-                        releaseYear = obj.optString("releaseYear", obj.optString("year", "")).trim(),
-                        rating = obj.optDouble("rating", 0.0).let { if (it.isNaN()) 0.0 else it },
-                        userRating = obj.optDouble("userRating", 0.0).let { if (it.isNaN()) 0.0 else it }
-                    )
+                val rawType = obj.optString("media_type", obj.optString("mediaType", "MOVIE")).lowercase()
+                val normalizedType = if (rawType == "tv" || rawType == "series") "SERIES" else "MOVIE"
+                val posterUrl = obj.optString("poster_url", obj.optString("posterUrl", "")).trim()
+                val releaseYear = obj.optString("year", obj.optString("releaseYear", "")).trim()
+                val rating = obj.optDouble("rating", 0.0).let { if (it.isNaN()) 0.0 else it }
+                val userRating = obj.optDouble("user_rating", obj.optDouble("userRating", 0.0)).let { if (it.isNaN()) 0.0 else it }
+                val updatedAtMs = obj.optLong("updated_at", System.currentTimeMillis())
+
+                val item = TmdbSyncItem(
+                    tmdbId = tmdbId,
+                    mediaType = normalizedType,
+                    title = title,
+                    posterUrl = posterUrl,
+                    releaseYear = releaseYear,
+                    rating = rating,
+                    userRating = userRating,
+                    favorite = obj.optBoolean("favorite", true),
+                    watchlist = obj.optBoolean("watchlist", true),
+                    updatedAtMs = updatedAtMs
                 )
+                val key = if (tmdbId > 0) "$normalizedType:$tmdbId" else "$normalizedType:${title.lowercase()}"
+                if (!dedupMap.containsKey(key)) {
+                    dedupMap[key] = item
+                }
             }
-            return list
+            return dedupMap.values.toList()
         }
 
         fun cleanIptvTitleForTmdb(rawName: String): String {

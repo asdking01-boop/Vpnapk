@@ -4,13 +4,16 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import org.json.JSONObject
 import java.security.KeyStore
+import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 data class StoredTmdbSession(
+    val krasAccountId: String,
     val sessionId: String,
     val accountId: Int,
     val username: String,
@@ -22,100 +25,252 @@ data class StoredTmdbSession(
     val syncedRatingsCount: Int
 )
 
+data class PendingTmdbAuthRequest(
+    val krasAccountId: String,
+    val requestToken: String,
+    val stateNonce: String,
+    val createdAtMs: Long
+)
+
 /**
- * Encrypts and stores sensitive TMDb user session credentials in private device storage
- * using Android Keystore AES-256-GCM encryption.
+ * Multi-user encrypted TMDb session store backed by Android Keystore AES-256-GCM encryption.
  *
- * Security Guarantee:
- * - Session tokens and pending request tokens are encrypted at rest and never exposed in UI states or logs.
+ * Security & Multi-User Isolation Guarantees:
+ * - Each KRAS TV user (`krasAccountId`) has an isolated encrypted TMDb session record.
+ * - Users cannot read or overwrite another KRAS TV user's TMDb session or pending auth state.
+ * - Legacy single-user session keys from older versions are migrated/cleaned automatically.
+ * - Session tokens and request tokens are encrypted at rest and never exposed in UI states or logs.
  */
 class TmdbSecureSessionStore(context: Context) {
 
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    init {
+        migrateLegacySingleUserSessionIfPresent()
+    }
+
+    private fun normalizeUserKey(krasAccountId: String?): String {
+        val cleaned = krasAccountId?.trim().orEmpty()
+        return if (cleaned.isEmpty()) DEFAULT_USER_ID else cleaned.replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
+    }
+
+    private fun sessionKeyForUser(krasAccountId: String?): String {
+        return "${KEY_USER_SESSION_PREFIX}${normalizeUserKey(krasAccountId)}"
+    }
+
+    private fun pendingAuthKeyForUser(krasAccountId: String?): String {
+        return "${KEY_USER_PENDING_AUTH_PREFIX}${normalizeUserKey(krasAccountId)}"
+    }
+
+    /**
+     * Migrates and removes legacy single-user un-scoped session keys from earlier versions.
+     */
+    private fun migrateLegacySingleUserSessionIfPresent() {
+        val legacyEncryptedSession = prefs.getString(LEGACY_KEY_ENCRYPTED_SESSION_ID, null)
+        val legacyPending = prefs.getString(LEGACY_KEY_PENDING_REQUEST_TOKEN, null)
+        if (legacyEncryptedSession == null && legacyPending == null) return
+
+        val legacySessionId = legacyEncryptedSession?.let { decryptValue(it).trim() }.orEmpty()
+        val legacyUsername = prefs.getString(LEGACY_KEY_USERNAME, "")?.trim().orEmpty()
+        if (legacySessionId.isNotEmpty() && legacyUsername.isNotEmpty()) {
+            val defaultKey = sessionKeyForUser(DEFAULT_USER_ID)
+            if (!prefs.contains(defaultKey)) {
+                saveSession(
+                    krasAccountId = DEFAULT_USER_ID,
+                    sessionId = legacySessionId,
+                    accountId = prefs.getInt(LEGACY_KEY_ACCOUNT_ID, 0),
+                    username = legacyUsername,
+                    displayName = prefs.getString(LEGACY_KEY_DISPLAY_NAME, "")?.trim().orEmpty(),
+                    avatarUrl = prefs.getString(LEGACY_KEY_AVATAR_URL, "")?.trim().orEmpty(),
+                    lastSyncTimestampMs = prefs.getLong(LEGACY_KEY_LAST_SYNC_MS, 0L),
+                    syncedFavoritesCount = prefs.getInt(LEGACY_KEY_SYNCED_FAVORITES_COUNT, 0),
+                    syncedWatchlistCount = prefs.getInt(LEGACY_KEY_SYNCED_WATCHLIST_COUNT, 0),
+                    syncedRatingsCount = prefs.getInt(LEGACY_KEY_SYNCED_RATINGS_COUNT, 0)
+                )
+            }
+        }
+
+        prefs.edit()
+            .remove(LEGACY_KEY_ENCRYPTED_SESSION_ID)
+            .remove(LEGACY_KEY_ACCOUNT_ID)
+            .remove(LEGACY_KEY_USERNAME)
+            .remove(LEGACY_KEY_DISPLAY_NAME)
+            .remove(LEGACY_KEY_AVATAR_URL)
+            .remove(LEGACY_KEY_PENDING_REQUEST_TOKEN)
+            .remove(LEGACY_KEY_LAST_SYNC_MS)
+            .remove(LEGACY_KEY_SYNCED_FAVORITES_COUNT)
+            .remove(LEGACY_KEY_SYNCED_WATCHLIST_COUNT)
+            .remove(LEGACY_KEY_SYNCED_RATINGS_COUNT)
+            .apply()
+    }
+
     fun saveSession(
+        krasAccountId: String = DEFAULT_USER_ID,
         sessionId: String,
         accountId: Int,
         username: String,
         displayName: String,
-        avatarUrl: String
+        avatarUrl: String,
+        lastSyncTimestampMs: Long = 0L,
+        syncedFavoritesCount: Int = 0,
+        syncedWatchlistCount: Int = 0,
+        syncedRatingsCount: Int = 0
     ) {
-        val encryptedSession = encryptValue(sessionId.trim())
+        val normalizedUser = normalizeUserKey(krasAccountId)
+        val existing = getSession(normalizedUser)
+        val payload = JSONObject().apply {
+            put("krasAccountId", normalizedUser)
+            put("sessionId", sessionId.trim())
+            put("accountId", accountId)
+            put("username", username.trim())
+            put("displayName", displayName.trim())
+            put("avatarUrl", avatarUrl.trim())
+            put("lastSyncTimestampMs", if (lastSyncTimestampMs > 0L) lastSyncTimestampMs else (existing?.lastSyncTimestampMs ?: 0L))
+            put("syncedFavoritesCount", if (syncedFavoritesCount > 0) syncedFavoritesCount else (existing?.syncedFavoritesCount ?: 0))
+            put("syncedWatchlistCount", if (syncedWatchlistCount > 0) syncedWatchlistCount else (existing?.syncedWatchlistCount ?: 0))
+            put("syncedRatingsCount", if (syncedRatingsCount > 0) syncedRatingsCount else (existing?.syncedRatingsCount ?: 0))
+        }
+        val encryptedPayload = encryptValue(payload.toString())
         prefs.edit()
-            .putString(KEY_ENCRYPTED_SESSION_ID, encryptedSession)
-            .putInt(KEY_ACCOUNT_ID, accountId)
-            .putString(KEY_USERNAME, username.trim())
-            .putString(KEY_DISPLAY_NAME, displayName.trim())
-            .putString(KEY_AVATAR_URL, avatarUrl.trim())
-            .remove(KEY_PENDING_REQUEST_TOKEN)
+            .putString(sessionKeyForUser(normalizedUser), encryptedPayload)
+            .remove(pendingAuthKeyForUser(normalizedUser))
             .apply()
     }
 
-    fun getSession(): StoredTmdbSession? {
-        val encrypted = prefs.getString(KEY_ENCRYPTED_SESSION_ID, null) ?: return null
-        val sessionId = decryptValue(encrypted).trim()
-        val username = prefs.getString(KEY_USERNAME, "")?.trim().orEmpty()
-        if (sessionId.isEmpty() || username.isEmpty()) return null
+    fun getSession(krasAccountId: String = DEFAULT_USER_ID): StoredTmdbSession? {
+        val normalizedUser = normalizeUserKey(krasAccountId)
+        val encrypted = prefs.getString(sessionKeyForUser(normalizedUser), null) ?: return null
+        val decryptedJson = decryptValue(encrypted).trim()
+        if (decryptedJson.isEmpty()) return null
 
-        return StoredTmdbSession(
-            sessionId = sessionId,
-            accountId = prefs.getInt(KEY_ACCOUNT_ID, 0),
-            username = username,
-            displayName = prefs.getString(KEY_DISPLAY_NAME, "")?.trim().orEmpty(),
-            avatarUrl = prefs.getString(KEY_AVATAR_URL, "")?.trim().orEmpty(),
-            lastSyncTimestampMs = prefs.getLong(KEY_LAST_SYNC_MS, 0L),
-            syncedFavoritesCount = prefs.getInt(KEY_SYNCED_FAVORITES_COUNT, 0),
-            syncedWatchlistCount = prefs.getInt(KEY_SYNCED_WATCHLIST_COUNT, 0),
-            syncedRatingsCount = prefs.getInt(KEY_SYNCED_RATINGS_COUNT, 0)
-        )
+        return try {
+            val obj = JSONObject(decryptedJson)
+            val sessionId = obj.optString("sessionId", "").trim()
+            val username = obj.optString("username", "").trim()
+            if (sessionId.isEmpty() || username.isEmpty()) return null
+
+            StoredTmdbSession(
+                krasAccountId = obj.optString("krasAccountId", normalizedUser),
+                sessionId = sessionId,
+                accountId = obj.optInt("accountId", 0),
+                username = username,
+                displayName = obj.optString("displayName", "").trim(),
+                avatarUrl = obj.optString("avatarUrl", "").trim(),
+                lastSyncTimestampMs = obj.optLong("lastSyncTimestampMs", 0L),
+                syncedFavoritesCount = obj.optInt("syncedFavoritesCount", 0),
+                syncedWatchlistCount = obj.optInt("syncedWatchlistCount", 0),
+                syncedRatingsCount = obj.optInt("syncedRatingsCount", 0)
+            )
+        } catch (_: Exception) {
+            null
+        }
     }
 
     fun updateSyncStats(
+        krasAccountId: String = DEFAULT_USER_ID,
         lastSyncTimestampMs: Long,
         favoritesCount: Int,
         watchlistCount: Int,
         ratingsCount: Int
     ) {
-        prefs.edit()
-            .putLong(KEY_LAST_SYNC_MS, lastSyncTimestampMs)
-            .putInt(KEY_SYNCED_FAVORITES_COUNT, favoritesCount)
-            .putInt(KEY_SYNCED_WATCHLIST_COUNT, watchlistCount)
-            .putInt(KEY_SYNCED_RATINGS_COUNT, ratingsCount)
-            .apply()
+        val current = getSession(krasAccountId) ?: return
+        saveSession(
+            krasAccountId = krasAccountId,
+            sessionId = current.sessionId,
+            accountId = current.accountId,
+            username = current.username,
+            displayName = current.displayName,
+            avatarUrl = current.avatarUrl,
+            lastSyncTimestampMs = lastSyncTimestampMs,
+            syncedFavoritesCount = favoritesCount,
+            syncedWatchlistCount = watchlistCount,
+            syncedRatingsCount = ratingsCount
+        )
     }
 
-    fun savePendingRequestToken(requestToken: String) {
-        val trimmed = requestToken.trim()
-        if (trimmed.isEmpty()) {
-            prefs.edit().remove(KEY_PENDING_REQUEST_TOKEN).apply()
+    fun generateStateNonce(): String {
+        val bytes = ByteArray(16)
+        SecureRandom().nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    fun savePendingRequestToken(
+        requestToken: String,
+        krasAccountId: String = DEFAULT_USER_ID,
+        stateNonce: String = generateStateNonce()
+    ) {
+        savePendingAuthRequest(
+            krasAccountId = krasAccountId,
+            requestToken = requestToken,
+            stateNonce = stateNonce
+        )
+    }
+
+    fun savePendingAuthRequest(
+        krasAccountId: String = DEFAULT_USER_ID,
+        requestToken: String,
+        stateNonce: String
+    ) {
+        val normalizedUser = normalizeUserKey(krasAccountId)
+        val trimmedToken = requestToken.trim()
+        if (trimmedToken.isEmpty()) {
+            prefs.edit().remove(pendingAuthKeyForUser(normalizedUser)).apply()
             return
         }
+        val payload = JSONObject().apply {
+            put("krasAccountId", normalizedUser)
+            put("requestToken", trimmedToken)
+            put("stateNonce", stateNonce.trim())
+            put("createdAtMs", System.currentTimeMillis())
+        }
         prefs.edit()
-            .putString(KEY_PENDING_REQUEST_TOKEN, encryptValue(trimmed))
+            .putString(pendingAuthKeyForUser(normalizedUser), encryptValue(payload.toString()))
             .apply()
     }
 
-    fun getPendingRequestToken(): String? {
-        val encrypted = prefs.getString(KEY_PENDING_REQUEST_TOKEN, null) ?: return null
-        return decryptValue(encrypted).trim().takeIf { it.isNotEmpty() }
+    fun getPendingAuthRequest(krasAccountId: String = DEFAULT_USER_ID): PendingTmdbAuthRequest? {
+        val normalizedUser = normalizeUserKey(krasAccountId)
+        val encrypted = prefs.getString(pendingAuthKeyForUser(normalizedUser), null) ?: return null
+        val decrypted = decryptValue(encrypted).trim()
+        if (decrypted.isEmpty()) return null
+        return try {
+            if (decrypted.startsWith("{")) {
+                val obj = JSONObject(decrypted)
+                val token = obj.optString("requestToken", "").trim()
+                if (token.isEmpty()) return null
+                PendingTmdbAuthRequest(
+                    krasAccountId = obj.optString("krasAccountId", normalizedUser),
+                    requestToken = token,
+                    stateNonce = obj.optString("stateNonce", "").trim(),
+                    createdAtMs = obj.optLong("createdAtMs", 0L)
+                )
+            } else {
+                PendingTmdbAuthRequest(
+                    krasAccountId = normalizedUser,
+                    requestToken = decrypted,
+                    stateNonce = "",
+                    createdAtMs = 0L
+                )
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
-    fun clearPendingRequestToken() {
-        prefs.edit().remove(KEY_PENDING_REQUEST_TOKEN).apply()
+    fun getPendingRequestToken(krasAccountId: String = DEFAULT_USER_ID): String? {
+        return getPendingAuthRequest(krasAccountId)?.requestToken
     }
 
-    fun clearSession() {
+    fun clearPendingRequestToken(krasAccountId: String = DEFAULT_USER_ID) {
+        val normalizedUser = normalizeUserKey(krasAccountId)
+        prefs.edit().remove(pendingAuthKeyForUser(normalizedUser)).apply()
+    }
+
+    fun clearSession(krasAccountId: String = DEFAULT_USER_ID) {
+        val normalizedUser = normalizeUserKey(krasAccountId)
         prefs.edit()
-            .remove(KEY_ENCRYPTED_SESSION_ID)
-            .remove(KEY_ACCOUNT_ID)
-            .remove(KEY_USERNAME)
-            .remove(KEY_DISPLAY_NAME)
-            .remove(KEY_AVATAR_URL)
-            .remove(KEY_PENDING_REQUEST_TOKEN)
-            .remove(KEY_LAST_SYNC_MS)
-            .remove(KEY_SYNCED_FAVORITES_COUNT)
-            .remove(KEY_SYNCED_WATCHLIST_COUNT)
-            .remove(KEY_SYNCED_RATINGS_COUNT)
+            .remove(sessionKeyForUser(normalizedUser))
+            .remove(pendingAuthKeyForUser(normalizedUser))
             .apply()
     }
 
@@ -194,16 +349,21 @@ class TmdbSecureSessionStore(context: Context) {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEYSTORE_ALIAS = "kras_tv_tmdb_session_key_v1"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
+        const val DEFAULT_USER_ID = "demo"
 
-        private const val KEY_ENCRYPTED_SESSION_ID = "enc_session_id"
-        private const val KEY_ACCOUNT_ID = "account_id"
-        private const val KEY_USERNAME = "username"
-        private const val KEY_DISPLAY_NAME = "display_name"
-        private const val KEY_AVATAR_URL = "avatar_url"
-        private const val KEY_PENDING_REQUEST_TOKEN = "enc_pending_request_token"
-        private const val KEY_LAST_SYNC_MS = "last_sync_ms"
-        private const val KEY_SYNCED_FAVORITES_COUNT = "synced_favorites_count"
-        private const val KEY_SYNCED_WATCHLIST_COUNT = "synced_watchlist_count"
-        private const val KEY_SYNCED_RATINGS_COUNT = "synced_ratings_count"
+        private const val KEY_USER_SESSION_PREFIX = "enc_user_session_v2_"
+        private const val KEY_USER_PENDING_AUTH_PREFIX = "enc_pending_auth_v2_"
+
+        // Legacy single-user keys (automatically migrated & removed)
+        private const val LEGACY_KEY_ENCRYPTED_SESSION_ID = "enc_session_id"
+        private const val LEGACY_KEY_ACCOUNT_ID = "account_id"
+        private const val LEGACY_KEY_USERNAME = "username"
+        private const val LEGACY_KEY_DISPLAY_NAME = "display_name"
+        private const val LEGACY_KEY_AVATAR_URL = "avatar_url"
+        private const val LEGACY_KEY_PENDING_REQUEST_TOKEN = "enc_pending_request_token"
+        private const val LEGACY_KEY_LAST_SYNC_MS = "last_sync_ms"
+        private const val LEGACY_KEY_SYNCED_FAVORITES_COUNT = "synced_favorites_count"
+        private const val LEGACY_KEY_SYNCED_WATCHLIST_COUNT = "synced_watchlist_count"
+        private const val LEGACY_KEY_SYNCED_RATINGS_COUNT = "synced_ratings_count"
     }
 }
