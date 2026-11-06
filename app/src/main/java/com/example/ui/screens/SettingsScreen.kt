@@ -16,21 +16,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import coil.compose.AsyncImage
 import com.example.BuildConfig
-import com.example.data.api.TmdbConnectionState
-import com.example.data.api.TmdbHealthResult
 import com.example.data.model.Account
 import com.example.data.model.AspectRatioMode
 import com.example.data.model.CardStyle
@@ -38,6 +39,9 @@ import com.example.data.model.LiveChannelOrder
 import com.example.data.model.SubscriptionInfo
 import com.example.data.model.SubscriptionInfoHelper
 import com.example.data.model.SubscriptionStatus
+import com.example.data.model.TmdbAccountUiState
+import com.example.data.model.TmdbAuthStatus
+import com.example.data.model.TmdbSyncStatus
 import com.example.data.model.UserSettings
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.KrasLogo
@@ -61,12 +65,13 @@ fun SettingsScreen(
     updateState: AppUpdateUiState = AppUpdateUiState(),
     onCheckForUpdatesClick: () -> Unit = {},
     onRefreshSubscriptionClick: () -> Unit = {},
-    tmdbHealthState: TmdbHealthResult = TmdbHealthResult(
-        state = TmdbConnectionState.NOT_CONFIGURED,
-        message = "Configure your server-side TMDb proxy URL to enable metadata enrichment."
-    ),
-    isTmdbVerifying: Boolean = false,
-    onVerifyTmdbConnectionClick: (String) -> Unit = {}
+    tmdbAccountState: TmdbAccountUiState = TmdbAccountUiState(),
+    onConnectTmdbAccountClick: () -> Unit = {},
+    onCompleteTmdbAuthClick: () -> Unit = {},
+    onCancelTmdbAuthClick: () -> Unit = {},
+    onSyncTmdbNowClick: () -> Unit = {},
+    onToggleTmdbAutoSync: (Boolean) -> Unit = {},
+    onDisconnectTmdbAccountClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -255,21 +260,17 @@ fun SettingsScreen(
             )
         }
 
-        // 1c. Server-Side TMDb Metadata Proxy Card (Never exposes TMDB_API_KEY in APK)
+        // 1c. TMDb Account & Sync Card (Official TMDb User Auth + Two-Way Sync)
         item {
-            TmdbBackendProxyCard(
-                userSettings = userSettings,
-                tmdbHealthState = tmdbHealthState,
-                isTmdbVerifying = isTmdbVerifying,
-                onSaveAndVerifyProxy = { proxyUrl, autoEnrich ->
-                    onUpdateSettings(
-                        userSettings.copy(
-                            tmdbProxyUrl = proxyUrl.trim(),
-                            tmdbAutoEnrichEnabled = autoEnrich
-                        )
-                    )
-                    onVerifyTmdbConnectionClick(proxyUrl.trim())
-                },
+            TmdbAccountSyncCard(
+                tmdbAccountState = tmdbAccountState,
+                isArabic = isArabic,
+                onConnectClick = onConnectTmdbAccountClick,
+                onCompleteAuthClick = onCompleteTmdbAuthClick,
+                onCancelAuthClick = onCancelTmdbAuthClick,
+                onSyncNowClick = onSyncTmdbNowClick,
+                onToggleAutoSync = onToggleTmdbAutoSync,
+                onDisconnectClick = onDisconnectTmdbAccountClick,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 16.dp)
@@ -1428,211 +1429,476 @@ private fun CountdownUnitBox(
 }
 
 @Composable
-private fun TmdbBackendProxyCard(
-    userSettings: UserSettings,
-    tmdbHealthState: TmdbHealthResult,
-    isTmdbVerifying: Boolean,
-    onSaveAndVerifyProxy: (String, Boolean) -> Unit,
+private fun TmdbAccountSyncCard(
+    tmdbAccountState: TmdbAccountUiState,
+    isArabic: Boolean,
+    onConnectClick: () -> Unit,
+    onCompleteAuthClick: () -> Unit,
+    onCancelAuthClick: () -> Unit,
+    onSyncNowClick: () -> Unit,
+    onToggleAutoSync: (Boolean) -> Unit,
+    onDisconnectClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var proxyUrlInput by remember(userSettings.tmdbProxyUrl) {
-        mutableStateOf(userSettings.tmdbProxyUrl)
-    }
-    var autoEnrichEnabled by remember(userSettings.tmdbAutoEnrichEnabled) {
-        mutableStateOf(userSettings.tmdbAutoEnrichEnabled)
+    val layoutDirection = if (isArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+    val isConnected = tmdbAccountState.isConnected
+    val isAuthorizing = tmdbAccountState.authStatus == TmdbAuthStatus.AUTHORIZING_IN_BROWSER
+    val isVerifying = tmdbAccountState.authStatus == TmdbAuthStatus.VERIFYING_SESSION
+    val isSyncing = tmdbAccountState.syncStatus == TmdbSyncStatus.SYNCING
+
+    val badgeColor = when {
+        isSyncing || isVerifying || isAuthorizing -> AccentGold
+        isConnected -> AccentEmerald
+        else -> TextSecondary
     }
 
-    val statusColor = when (tmdbHealthState.state) {
-        TmdbConnectionState.CONNECTED -> AccentEmerald
-        TmdbConnectionState.NOT_CONFIGURED,
-        TmdbConnectionState.CHECKING -> TextSecondary
-        TmdbConnectionState.SERVER_KEY_MISSING,
-        TmdbConnectionState.PROXY_UNREACHABLE,
-        TmdbConnectionState.TMDB_REJECTED -> KrasRedBright
-    }
+    val badgeLabel = tmdbAccountState.statusBadgeLabel(isArabic)
 
-    val statusBadgeText = when (tmdbHealthState.state) {
-        TmdbConnectionState.CONNECTED -> "Connected"
-        TmdbConnectionState.NOT_CONFIGURED -> "Not Configured"
-        TmdbConnectionState.CHECKING -> "Verifying..."
-        TmdbConnectionState.SERVER_KEY_MISSING -> "Key Missing"
-        TmdbConnectionState.PROXY_UNREACHABLE -> "Unreachable"
-        TmdbConnectionState.TMDB_REJECTED -> "Auth Error"
-    }
-
-    Box(
-        modifier = modifier
-            .liquidGlassPanel(cornerRadius = 20.dp)
-            .testTag("settings_tmdb_proxy_card")
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+    CompositionLocalProvider(LocalLayoutDirection provides layoutDirection) {
+        Box(
+            modifier = modifier
+                .liquidGlassPanel(
+                    cornerRadius = 20.dp,
+                    accentGlow = if (isConnected) AccentEmerald else KrasRed
+                )
+                .testTag("settings_tmdb_account_card")
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
+                // Header Row
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(KrasRed.copy(alpha = 0.18f))
-                            .border(1.dp, KrasRedBright.copy(alpha = 0.45f), RoundedCornerShape(10.dp)),
-                        contentAlignment = Alignment.Center
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.MovieFilter,
-                            contentDescription = "TMDb Metadata Proxy",
-                            tint = KrasRedBright,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(KrasRed.copy(alpha = 0.18f))
+                                .border(1.dp, KrasRedBright.copy(alpha = 0.45f), RoundedCornerShape(10.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Sync,
+                                contentDescription = if (isArabic) "حساب TMDb والمزامنة" else "TMDb Account & Sync",
+                                tint = KrasRedBright,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = if (isArabic) "حساب TMDb والمزامنة" else "TMDb Account & Sync",
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontFamily = OutfitFontFamily,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (isArabic) {
+                                    "مزامنة ثنائية للمفضلة وقائمة المشاهدة والتقييمات"
+                                } else {
+                                    "Two-way sync for Favorites, Watchlist & Ratings"
+                                },
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
                     }
-                    Column {
-                        Text(
-                            text = "TMDb Metadata Proxy",
-                            color = Color.White,
-                            fontSize = 15.sp,
-                            fontFamily = OutfitFontFamily,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Server-side TMDB_API_KEY enrichment for Xtream & M3U",
-                            color = TextSecondary,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
 
-                // Live Connection Status Badge (only shows Connected after real /api/tmdb/health check succeeds)
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(statusColor.copy(alpha = 0.16f))
-                        .border(1.dp, statusColor.copy(alpha = 0.55f), RoundedCornerShape(50))
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                        .testTag("tmdb_proxy_status_badge"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    Box(
+                    // Status Pill
+                    Row(
                         modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(statusColor)
-                    )
-                    Text(
-                        text = statusBadgeText,
-                        color = statusColor,
-                        fontSize = 11.sp,
-                        fontFamily = OutfitFontFamily,
-                        fontWeight = FontWeight.ExtraBold
-                    )
-                }
-            }
-
-            // Auto-enrich toggle
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                    Text(
-                        text = "Automatic TMDb Metadata Enrichment",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "Automatically fetch posters, descriptions, ratings, cast, seasons, and episodes when importing Xtream Codes or M3U playlists",
-                        color = TextSecondary,
-                        fontSize = 11.sp
-                    )
-                }
-                Switch(
-                    checked = autoEnrichEnabled,
-                    onCheckedChange = { enabled ->
-                        autoEnrichEnabled = enabled
-                        onSaveAndVerifyProxy(proxyUrlInput, enabled)
-                    },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = KrasRed,
-                        checkedTrackColor = KrasRedDark
-                    ),
-                    modifier = Modifier.testTag("tmdb_auto_enrich_switch")
-                )
-            }
-
-            // Backend Proxy URL Input
-            OutlinedTextField(
-                value = proxyUrlInput,
-                onValueChange = { proxyUrlInput = it },
-                label = {
-                    Text("Backend Proxy URL (e.g. https://your-proxy.example.com)", fontSize = 12.sp)
-                },
-                placeholder = {
-                    Text("https://your-tmdb-proxy.run.app", color = TextSecondary, fontSize = 12.sp)
-                },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = KrasRed,
-                    unfocusedBorderColor = GlassBorder,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    focusedLabelColor = KrasRedBright,
-                    unfocusedLabelColor = TextSecondary
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("tmdb_proxy_url_input")
-            )
-
-            // Save & Test Real Connection Button + Status Message
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = tmdbHealthState.message,
-                    color = if (tmdbHealthState.state == TmdbConnectionState.CONNECTED) AccentEmerald else TextSecondary,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 10.dp)
-                        .testTag("tmdb_proxy_status_message")
-                )
-
-                Button(
-                    onClick = {
-                        onSaveAndVerifyProxy(proxyUrlInput, autoEnrichEnabled)
-                    },
-                    enabled = !isTmdbVerifying,
-                    colors = ButtonDefaults.buttonColors(containerColor = KrasRed),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                    modifier = Modifier.testTag("tmdb_verify_connection_button")
-                ) {
-                    if (isTmdbVerifying) {
-                        CircularProgressIndicator(
-                            color = Color.White,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(14.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(badgeColor.copy(alpha = 0.16f))
+                            .border(1.dp, badgeColor.copy(alpha = 0.55f), RoundedCornerShape(50))
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .testTag("tmdb_account_status_badge"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(badgeColor)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Testing...", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    } else {
-                        Text("Save & Test", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = badgeLabel,
+                            color = badgeColor,
+                            fontSize = 11.sp,
+                            fontFamily = OutfitFontFamily,
+                            fontWeight = FontWeight.ExtraBold
+                        )
                     }
+                }
+
+                if (isConnected) {
+                    // Connected Account Profile Row (Avatar + Username + Synced Counts)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White.copy(alpha = 0.05f))
+                            .border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(CircleShape)
+                                    .background(KrasRed.copy(alpha = 0.25f))
+                                    .border(1.5.dp, AccentEmerald.copy(alpha = 0.7f), CircleShape)
+                                    .testTag("tmdb_account_avatar"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                val initial = (tmdbAccountState.displayName.firstOrNull()
+                                    ?: tmdbAccountState.username.firstOrNull()
+                                    ?: 'T').uppercaseChar().toString()
+                                Text(
+                                    text = initial,
+                                    color = Color.White,
+                                    fontSize = 17.sp,
+                                    fontFamily = OutfitFontFamily,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                                if (tmdbAccountState.avatarUrl.isNotBlank()) {
+                                    AsyncImage(
+                                        model = tmdbAccountState.avatarUrl,
+                                        contentDescription = "TMDb Avatar",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clip(CircleShape)
+                                    )
+                                }
+                            }
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = tmdbAccountState.displayName.ifBlank { tmdbAccountState.username },
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontFamily = OutfitFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "@${tmdbAccountState.username}",
+                                    color = AccentEmerald,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.testTag("tmdb_account_username")
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = if (isArabic) {
+                                        "آخر مزامنة: ${tmdbAccountState.lastSyncFormatted(true)}"
+                                    } else {
+                                        "Last Sync: ${tmdbAccountState.lastSyncFormatted(false)}"
+                                    },
+                                    color = TextSecondary,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.testTag("tmdb_last_sync_text")
+                                )
+                            }
+                        }
+                    }
+
+                    // Synced Stats Mini-Pills (Favorites, Watchlist, Ratings)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TmdbSyncCountPill(
+                            label = if (isArabic) "المفضلة" else "Favorites",
+                            count = tmdbAccountState.syncedFavoritesCount,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TmdbSyncCountPill(
+                            label = if (isArabic) "قائمة المشاهدة" else "Watchlist",
+                            count = tmdbAccountState.syncedWatchlistCount,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TmdbSyncCountPill(
+                            label = if (isArabic) "التقييمات" else "Ratings",
+                            count = tmdbAccountState.syncedRatingsCount,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    // Auto Sync Toggle Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(
+                                text = if (isArabic) "مزامنة تلقائية (Auto Sync)" else "Auto Sync",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = if (isArabic) {
+                                    "مزامنة التغييرات تلقائياً في المفضلة وقائمة المشاهدة والتقييمات"
+                                } else {
+                                    "Automatically sync Favorites, Watchlist, and Ratings changes"
+                                },
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = tmdbAccountState.autoSyncEnabled,
+                            onCheckedChange = onToggleAutoSync,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = KrasRed,
+                                checkedTrackColor = KrasRedDark
+                            ),
+                            modifier = Modifier.testTag("tmdb_auto_sync_switch")
+                        )
+                    }
+
+                    // Sync Now & Disconnect Account Buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = onSyncNowClick,
+                            enabled = !isSyncing,
+                            colors = ButtonDefaults.buttonColors(containerColor = KrasRed),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("tmdb_sync_now_button")
+                        ) {
+                            if (isSyncing) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (isArabic) "جارٍ المزامنة..." else "Syncing...",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Sync,
+                                    contentDescription = "Sync Now",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (isArabic) "مزامنة الآن" else "Sync Now",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = onDisconnectClick,
+                            enabled = !isSyncing,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, KrasRedBright.copy(alpha = 0.55f)),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = KrasRedBright),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("tmdb_disconnect_account_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LinkOff,
+                                contentDescription = "Disconnect Account",
+                                tint = KrasRedBright,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isArabic) "إلغاء الربط" else "Disconnect Account",
+                                color = KrasRedBright,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                } else {
+                    // Disconnected / Authorizing View
+                    Text(
+                        text = if (isArabic) {
+                            "اربط حسابك الشخصي في TMDb لمزامنة الأفلام والمسلسلات المفضلة وقائمة المشاهدة والتقييمات تلقائياً عبر جميع أجهزتك."
+                        } else {
+                            "Connect your personal TMDb account using official TMDb authorization to sync your Favorites, Watchlist, and Ratings automatically."
+                        },
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp
+                    )
+
+                    if (isAuthorizing) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(
+                                onClick = onCompleteAuthClick,
+                                colors = ButtonDefaults.buttonColors(containerColor = AccentEmerald),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("tmdb_complete_auth_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "Complete Sign-In",
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (isArabic) "إكمال الربط" else "Complete Sign-In",
+                                    color = Color.Black,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = onCancelAuthClick,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                                modifier = Modifier.testTag("tmdb_cancel_auth_button")
+                            ) {
+                                Text(
+                                    text = if (isArabic) "إلغاء" else "Cancel",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    } else {
+                        Button(
+                            onClick = onConnectClick,
+                            enabled = !isVerifying,
+                            colors = ButtonDefaults.buttonColors(containerColor = KrasRed),
+                            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 11.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("tmdb_connect_account_button")
+                        ) {
+                            if (isVerifying) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (isArabic) "جارٍ التحقق من الحساب..." else "Connecting TMDb Account...",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.AccountCircle,
+                                    contentDescription = "Connect TMDb Account",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (isArabic) "ربط حساب TMDb" else "Connect TMDb Account",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Friendly non-technical status message (shown only when non-blank)
+                val statusMsg = tmdbAccountState.statusMessage.orEmpty()
+                if (statusMsg.isNotBlank()) {
+                    val msgColor = when {
+                        tmdbAccountState.isError || tmdbAccountState.syncStatus == TmdbSyncStatus.ERROR -> Color(0xFFFFB4AB)
+                        tmdbAccountState.syncStatus == TmdbSyncStatus.SUCCESS -> AccentEmerald
+                        else -> TextSecondary
+                    }
+                    Text(
+                        text = statusMsg,
+                        color = msgColor,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("tmdb_account_status_message")
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TmdbSyncCountPill(
+    label: String,
+    count: Int,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.White.copy(alpha = 0.04f))
+            .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
+            .padding(vertical = 8.dp, horizontal = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Text(
+            text = count.toString(),
+            color = Color.White,
+            fontSize = 15.sp,
+            fontFamily = OutfitFontFamily,
+            fontWeight = FontWeight.ExtraBold
+        )
+        Text(
+            text = label,
+            color = TextSecondary,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

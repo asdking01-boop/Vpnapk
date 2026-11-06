@@ -3,6 +3,8 @@ package com.example
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -48,6 +50,7 @@ import android.content.res.Configuration
 import com.example.data.local.KrasRepository
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
+import com.example.data.model.TmdbAuthStatus
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.AppUpdateDialogs
 import com.example.ui.components.BottomNavBar
@@ -79,6 +82,10 @@ class MainActivity : ComponentActivity() {
 
         val isColdStart = (savedInstanceState == null && !hasColdStarted)
         hasColdStarted = true
+
+        intent?.data?.let { deepLinkUri ->
+            viewModel.handleTmdbAuthCallback(deepLinkUri)
+        }
 
         setContent {
             val userSettings by viewModel.userSettings.collectAsState()
@@ -158,8 +165,7 @@ class MainActivity : ComponentActivity() {
                 val totalSeriesCount by viewModel.totalSeriesCount.collectAsState()
                 val totalLiveCount by viewModel.totalLiveCount.collectAsState()
                 val updateState by viewModel.updateState.collectAsState()
-                val tmdbHealthState by viewModel.tmdbHealthState.collectAsState()
-                val isTmdbVerifying by viewModel.isTmdbVerifying.collectAsState()
+                val tmdbAccountState by viewModel.tmdbAccountState.collectAsState()
 
                 // Play original cinematic intro sound on cold start launch only
                 LaunchedEffect(Unit) {
@@ -177,6 +183,9 @@ class MainActivity : ComponentActivity() {
                     val observer = LifecycleEventObserver { _, event ->
                         when (event) {
                             Lifecycle.Event.ON_RESUME -> {
+                                if (tmdbAccountState.authStatus == TmdbAuthStatus.AUTHORIZING_IN_BROWSER) {
+                                    viewModel.completeTmdbAuthorization(isAutoResumeCheck = true)
+                                }
                                 if (currentActiveLive != null && currentNowPlaying == null) {
                                     viewModel.playerWrapper.setBackgroundAudioOnlyMode(false)
                                     if (!currentBgPlayback) {
@@ -552,9 +561,38 @@ class MainActivity : ComponentActivity() {
                                         updateState = updateState,
                                         onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) },
                                         onRefreshSubscriptionClick = { viewModel.refreshSubscriptionInfo() },
-                                        tmdbHealthState = tmdbHealthState,
-                                        isTmdbVerifying = isTmdbVerifying,
-                                        onVerifyTmdbConnectionClick = { url -> viewModel.verifyTmdbProxyConnection(url) }
+                                        tmdbAccountState = tmdbAccountState,
+                                        onConnectTmdbAccountClick = {
+                                            viewModel.startTmdbAccountAuthorization { authUrl ->
+                                                try {
+                                                    val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)).apply {
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                    context.startActivity(browserIntent)
+                                                } catch (_: Exception) {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Unable to open browser for TMDb authorization.",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                            }
+                                        },
+                                        onCompleteTmdbAuthClick = {
+                                            viewModel.completeTmdbAuthorization(isAutoResumeCheck = false)
+                                        },
+                                        onCancelTmdbAuthClick = {
+                                            viewModel.cancelTmdbAuthorization()
+                                        },
+                                        onSyncTmdbNowClick = {
+                                            viewModel.syncTmdbAccountNow(isAuto = false)
+                                        },
+                                        onToggleTmdbAutoSync = { enabled ->
+                                            viewModel.setTmdbAutoSyncEnabled(enabled)
+                                        },
+                                        onDisconnectTmdbAccountClick = {
+                                            viewModel.disconnectTmdbAccount()
+                                        }
                                     )
                                 }
                             }
@@ -739,6 +777,14 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.data?.let { deepLinkUri ->
+            viewModel.handleTmdbAuthCallback(deepLinkUri)
         }
     }
 

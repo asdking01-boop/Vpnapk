@@ -4,14 +4,17 @@ import com.example.data.model.Episode
 import com.example.data.model.MediaItem
 import com.example.data.model.Season
 import com.example.data.model.SeriesDetails
+import com.example.data.model.TmdbSyncItem
 import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -76,21 +79,50 @@ data class TmdbMediaMetadata(
     val seasons: List<TmdbSeasonSummary> = emptyList()
 )
 
+data class TmdbRequestTokenResult(
+    val ok: Boolean,
+    val requestToken: String = "",
+    val authUrl: String = "",
+    val expiresAt: String = "",
+    val endpointNotDeployed: Boolean = false,
+    val userMessage: String = ""
+)
+
+data class TmdbSessionResult(
+    val ok: Boolean,
+    val sessionId: String = "",
+    val accountId: Int = 0,
+    val username: String = "",
+    val displayName: String = "",
+    val avatarUrl: String = "",
+    val endpointNotDeployed: Boolean = false,
+    val userMessage: String = ""
+)
+
+data class TmdbTwoWaySyncResult(
+    val ok: Boolean,
+    val favorites: List<TmdbSyncItem> = emptyList(),
+    val watchlist: List<TmdbSyncItem> = emptyList(),
+    val ratings: List<TmdbSyncItem> = emptyList(),
+    val pushedFavorites: Int = 0,
+    val pushedWatchlist: Int = 0,
+    val pushedRatings: Int = 0,
+    val endpointNotDeployed: Boolean = false,
+    val userMessage: String = ""
+)
+
 /**
- * Client for communicating with the secure server-side KRAS TV TMDb API v3 Proxy (`/backend-tmdb-proxy`).
+ * Client for communicating with the secure server-side KRAS TV TMDb API v3 Backend Proxy.
  *
  * Security Guarantee:
  * - Never embeds, stores, or transmits `TMDB_API_KEY` from the Android client.
- * - All TMDb API v3 authentication occurs strictly on the backend proxy via `process.env.TMDB_API_KEY`
- *   (or Google Cloud Secret Manager).
- * - Supports optional proxy token authentication (`X-KRAS-Proxy-Token` / `Authorization: Bearer`) if the
- *   user includes `?token=<token>` in the Settings proxy URL.
- * - Reports `CONNECTED` ONLY when a live HTTP request to `/api/tmdb/health` succeeds with `tmdbConnected == true`.
+ * - All TMDb API v3 authentication and user session exchanges occur strictly through the backend proxy.
+ * - User session IDs are sent only via `X-TMDb-Session-Id` request header over HTTPS.
  */
 class TmdbProxyClient(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(18, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -100,12 +132,6 @@ class TmdbProxyClient(
     private val tvCache = ConcurrentHashMap<String, TmdbMediaMetadata>()
     private val seasonEpisodesCache = ConcurrentHashMap<String, List<TmdbEpisodeMetadata>>()
 
-    /**
-     * Parses a raw proxy URL from KRAS TV Settings into a clean base URL and optional proxy auth token.
-     * Supports URLs like:
-     * - `https://kras-tmdb-proxy-xxxx.europe-west3.run.app`
-     * - `https://kras-tmdb-proxy-xxxx.europe-west3.run.app?token=my_proxy_token`
-     */
     fun parseProxyEndpoint(rawUrl: String): ParsedProxyEndpoint {
         var trimmed = rawUrl.trim()
         if (trimmed.isEmpty()) return ParsedProxyEndpoint("", "")
@@ -128,7 +154,7 @@ class TmdbProxyClient(
             val cleanSchemeHostPort = buildString {
                 append(uri.scheme ?: "https")
                 append("://")
-                append(uri. authority ?: "")
+                append(uri.authority ?: "")
                 val cleanPath = (uri.path ?: "")
                     .removeSuffix("/")
                     .removeSuffix("/api/tmdb/health")
@@ -157,30 +183,396 @@ class TmdbProxyClient(
         return parseProxyEndpoint(rawUrl).baseUrl
     }
 
-    private fun buildAuthenticatedRequest(url: String, proxyAuthToken: String): Request {
+    private fun buildAuthenticatedRequest(
+        url: String,
+        proxyAuthToken: String,
+        tmdbSessionId: String = "",
+        method: String = "GET",
+        jsonBody: JSONObject? = null
+    ): Request {
         val builder = Request.Builder()
             .url(url)
             .header("Accept", "application/json")
             .header("X-Client-App", "KRAS-TV-Android")
-            .get()
+
         if (proxyAuthToken.isNotBlank()) {
             builder.header("X-KRAS-Proxy-Token", proxyAuthToken)
             builder.header("Authorization", "Bearer $proxyAuthToken")
         }
+        if (tmdbSessionId.isNotBlank()) {
+            builder.header("X-TMDb-Session-Id", tmdbSessionId)
+        }
+
+        if (method.equals("POST", ignoreCase = true)) {
+            val bodyStr = jsonBody?.toString() ?: "{}"
+            builder.post(bodyStr.toRequestBody(JSON_MEDIA_TYPE))
+        } else if (method.equals("DELETE", ignoreCase = true)) {
+            val bodyStr = jsonBody?.toString() ?: "{}"
+            builder.delete(bodyStr.toRequestBody(JSON_MEDIA_TYPE))
+        } else {
+            builder.get()
+        }
         return builder.build()
     }
 
+    // =========================================================================
+    // 1. Official TMDb User Account Authorization & Two-Way Sync via Backend
+    // =========================================================================
+
     /**
-     * Performs a real network request to `<proxyBaseUrl>/api/tmdb/health`.
-     * Never claims TMDb is connected unless the backend proxy responds with HTTP 200 and `tmdbConnected == true`.
+     * Step 1 of official TMDb user authorization:
+     * Requests a fresh TMDb `request_token` from `/api/tmdb/auth/request-token` on the backend proxy
+     * and returns the official `https://www.themoviedb.org/authenticate/{request_token}` URL.
      */
+    suspend fun createAuthRequestToken(
+        rawProxyUrl: String,
+        redirectTo: String = "krastv://tmdb-auth"
+    ): TmdbRequestTokenResult = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty()) {
+            return@withContext TmdbRequestTokenResult(
+                ok = false,
+                endpointNotDeployed = true,
+                userMessage = "TMDb Account Sync service is not configured yet."
+            )
+        }
+
+        try {
+            val payload = JSONObject().apply {
+                put("redirectTo", redirectTo)
+            }
+            val request = buildAuthenticatedRequest(
+                url = "${endpoint.baseUrl}/api/tmdb/auth/request-token",
+                proxyAuthToken = endpoint.proxyAuthToken,
+                method = "POST",
+                jsonBody = payload
+            )
+
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                val json = if (body.trimStart().startsWith("{")) {
+                    try { JSONObject(body) } catch (_: Exception) { null }
+                } else null
+
+                if (response.code == 404 || response.code == 501) {
+                    return@withContext TmdbRequestTokenResult(
+                        ok = false,
+                        endpointNotDeployed = true,
+                        userMessage = "The TMDb Account Sync endpoints are not yet deployed on your backend service."
+                    )
+                }
+
+                val token = json?.optString("requestToken", "")?.trim().orEmpty()
+                if (response.isSuccessful && token.isNotEmpty()) {
+                    val encodedRedirect = URLEncoder.encode(redirectTo, "UTF-8")
+                    val authUrl = json?.optString("authUrl", "")?.trim().takeIf { !it.isNullOrBlank() }
+                        ?: "https://www.themoviedb.org/authenticate/$token?redirect_to=$encodedRedirect"
+                    return@withContext TmdbRequestTokenResult(
+                        ok = true,
+                        requestToken = token,
+                        authUrl = authUrl,
+                        expiresAt = json?.optString("expiresAt", "").orEmpty(),
+                        userMessage = "Approve access in your browser to finish connecting your TMDb account."
+                    )
+                }
+
+                return@withContext TmdbRequestTokenResult(
+                    ok = false,
+                    userMessage = "Unable to start TMDb authorization right now. Please try again later."
+                )
+            }
+        } catch (_: Exception) {
+            TmdbRequestTokenResult(
+                ok = false,
+                userMessage = "Unable to reach the TMDb sync service. Please check your internet connection."
+            )
+        }
+    }
+
+    /**
+     * Step 2 of official TMDb user authorization:
+     * Exchanges an approved `request_token` for a TMDb `session_id` and fetches the user's TMDb profile
+     * (`accountId`, `username`, `displayName`, `avatarUrl`) via `/api/tmdb/auth/session`.
+     */
+    suspend fun createAuthorizedSession(
+        rawProxyUrl: String,
+        requestToken: String
+    ): TmdbSessionResult = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        val cleanToken = requestToken.trim()
+        if (endpoint.baseUrl.isEmpty() || cleanToken.isEmpty()) {
+            return@withContext TmdbSessionResult(
+                ok = false,
+                userMessage = "Authorization session could not be verified."
+            )
+        }
+
+        try {
+            val payload = JSONObject().apply {
+                put("requestToken", cleanToken)
+            }
+            val request = buildAuthenticatedRequest(
+                url = "${endpoint.baseUrl}/api/tmdb/auth/session",
+                proxyAuthToken = endpoint.proxyAuthToken,
+                method = "POST",
+                jsonBody = payload
+            )
+
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                val json = if (body.trimStart().startsWith("{")) {
+                    try { JSONObject(body) } catch (_: Exception) { null }
+                } else null
+
+                if (response.code == 404 || response.code == 501) {
+                    return@withContext TmdbSessionResult(
+                        ok = false,
+                        endpointNotDeployed = true,
+                        userMessage = "The TMDb Account Sync endpoints are not yet deployed on your backend service."
+                    )
+                }
+
+                val sessionId = json?.optString("sessionId", "")?.trim().orEmpty()
+                val username = json?.optString("username", "")?.trim().orEmpty()
+                if (response.isSuccessful && sessionId.isNotEmpty() && username.isNotEmpty()) {
+                    return@withContext TmdbSessionResult(
+                        ok = true,
+                        sessionId = sessionId,
+                        accountId = json?.optInt("accountId", 0) ?: 0,
+                        username = username,
+                        displayName = json?.optString("name", "")?.trim().orEmpty().ifBlank { username },
+                        avatarUrl = json?.optString("avatarUrl", "")?.trim().orEmpty(),
+                        userMessage = "TMDb account @$username connected."
+                    )
+                }
+
+                return@withContext TmdbSessionResult(
+                    ok = false,
+                    userMessage = "Please approve the TMDb authorization request in your browser first, then try again."
+                )
+            }
+        } catch (_: Exception) {
+            TmdbSessionResult(
+                ok = false,
+                userMessage = "Unable to complete TMDb sign-in right now. Please check your connection."
+            )
+        }
+    }
+
+    /**
+     * Performs two-way synchronization of Favorites, Watchlist, and Ratings with the user's TMDb account
+     * via `POST /api/tmdb/sync`.
+     */
+    suspend fun performTwoWaySync(
+        rawProxyUrl: String,
+        sessionId: String,
+        accountId: Int,
+        localFavorites: List<TmdbSyncItem>,
+        localWatchlist: List<TmdbSyncItem>,
+        localRatings: List<TmdbSyncItem>,
+        language: String = "en-US"
+    ): TmdbTwoWaySyncResult = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty() || sessionId.isBlank()) {
+            return@withContext TmdbTwoWaySyncResult(
+                ok = false,
+                userMessage = "Connect your TMDb account first to synchronize."
+            )
+        }
+
+        try {
+            val payload = JSONObject().apply {
+                put("accountId", accountId)
+                put("language", language)
+                put("favorites", serializeSyncItemsArray(localFavorites))
+                put("watchlist", serializeSyncItemsArray(localWatchlist))
+                put("ratings", serializeSyncItemsArray(localRatings))
+            }
+
+            val request = buildAuthenticatedRequest(
+                url = "${endpoint.baseUrl}/api/tmdb/sync",
+                proxyAuthToken = endpoint.proxyAuthToken,
+                tmdbSessionId = sessionId,
+                method = "POST",
+                jsonBody = payload
+            )
+
+            httpClient.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                val json = if (body.trimStart().startsWith("{")) {
+                    try { JSONObject(body) } catch (_: Exception) { null }
+                } else null
+
+                if (response.code == 404 || response.code == 501) {
+                    return@withContext TmdbTwoWaySyncResult(
+                        ok = false,
+                        endpointNotDeployed = true,
+                        userMessage = "The TMDb Account Sync endpoints are not yet deployed on your backend service."
+                    )
+                }
+
+                if (response.isSuccessful && json != null && json.optBoolean("ok", true)) {
+                    val favList = parseSyncItemsArray(json.optJSONArray("favorites"))
+                    val watchList = parseSyncItemsArray(json.optJSONArray("watchlist"))
+                    val rateList = parseSyncItemsArray(json.optJSONArray("ratings"))
+                    return@withContext TmdbTwoWaySyncResult(
+                        ok = true,
+                        favorites = favList,
+                        watchlist = watchList,
+                        ratings = rateList,
+                        pushedFavorites = json.optInt("pushedFavorites", 0),
+                        pushedWatchlist = json.optInt("pushedWatchlist", 0),
+                        pushedRatings = json.optInt("pushedRatings", 0),
+                        userMessage = "Favorites, Watchlist, and Ratings synchronized with TMDb."
+                    )
+                }
+
+                return@withContext TmdbTwoWaySyncResult(
+                    ok = false,
+                    userMessage = "Could not synchronize with TMDb right now. Please try again shortly."
+                )
+            }
+        } catch (_: Exception) {
+            TmdbTwoWaySyncResult(
+                ok = false,
+                userMessage = "Network unavailable during TMDb synchronization."
+            )
+        }
+    }
+
+    suspend fun pushFavoriteChange(
+        rawProxyUrl: String,
+        sessionId: String,
+        accountId: Int,
+        mediaType: String,
+        tmdbId: Int,
+        favorite: Boolean
+    ): Boolean = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty() || sessionId.isBlank() || tmdbId <= 0) return@withContext false
+
+        try {
+            val payload = JSONObject().apply {
+                put("accountId", accountId)
+                put("mediaType", if (mediaType.equals("SERIES", true) || mediaType.equals("tv", true)) "tv" else "movie")
+                put("mediaId", tmdbId)
+                put("favorite", favorite)
+            }
+            val request = buildAuthenticatedRequest(
+                url = "${endpoint.baseUrl}/api/tmdb/account/favorite",
+                proxyAuthToken = endpoint.proxyAuthToken,
+                tmdbSessionId = sessionId,
+                method = "POST",
+                jsonBody = payload
+            )
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    suspend fun pushWatchlistChange(
+        rawProxyUrl: String,
+        sessionId: String,
+        accountId: Int,
+        mediaType: String,
+        tmdbId: Int,
+        watchlist: Boolean
+    ): Boolean = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty() || sessionId.isBlank() || tmdbId <= 0) return@withContext false
+
+        try {
+            val payload = JSONObject().apply {
+                put("accountId", accountId)
+                put("mediaType", if (mediaType.equals("SERIES", true) || mediaType.equals("tv", true)) "tv" else "movie")
+                put("mediaId", tmdbId)
+                put("watchlist", watchlist)
+            }
+            val request = buildAuthenticatedRequest(
+                url = "${endpoint.baseUrl}/api/tmdb/account/watchlist",
+                proxyAuthToken = endpoint.proxyAuthToken,
+                tmdbSessionId = sessionId,
+                method = "POST",
+                jsonBody = payload
+            )
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    suspend fun pushRatingChange(
+        rawProxyUrl: String,
+        sessionId: String,
+        accountId: Int,
+        mediaType: String,
+        tmdbId: Int,
+        rating: Double
+    ): Boolean = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty() || sessionId.isBlank() || tmdbId <= 0) return@withContext false
+
+        try {
+            val payload = JSONObject().apply {
+                put("accountId", accountId)
+                put("mediaType", if (mediaType.equals("SERIES", true) || mediaType.equals("tv", true)) "tv" else "movie")
+                put("mediaId", tmdbId)
+                put("rating", rating)
+            }
+            val request = buildAuthenticatedRequest(
+                url = "${endpoint.baseUrl}/api/tmdb/account/rating",
+                proxyAuthToken = endpoint.proxyAuthToken,
+                tmdbSessionId = sessionId,
+                method = "POST",
+                jsonBody = payload
+            )
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    suspend fun disconnectSession(
+        rawProxyUrl: String,
+        sessionId: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty() || sessionId.isBlank()) return@withContext true
+
+        try {
+            val request = buildAuthenticatedRequest(
+                url = "${endpoint.baseUrl}/api/tmdb/auth/logout",
+                proxyAuthToken = endpoint.proxyAuthToken,
+                tmdbSessionId = sessionId,
+                method = "POST",
+                jsonBody = JSONObject()
+            )
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // =========================================================================
+    // 2. Automatic Movie, TV Series, Season, and Episode Metadata Enrichment
+    // =========================================================================
+
     suspend fun verifyConnection(rawProxyUrl: String): TmdbHealthResult = withContext(Dispatchers.IO) {
         val endpoint = parseProxyEndpoint(rawProxyUrl)
         if (endpoint.baseUrl.isEmpty()) {
             return@withContext TmdbHealthResult(
                 state = TmdbConnectionState.NOT_CONFIGURED,
                 isConnected = false,
-                message = "Backend proxy URL is not configured. Deploy /backend-tmdb-proxy with TMDB_API_KEY and enter its URL."
+                message = "Backend proxy URL is not configured."
             )
         }
 
@@ -217,7 +609,7 @@ class TmdbProxyClient(
                     return@withContext TmdbHealthResult(
                         state = TmdbConnectionState.SERVER_KEY_MISSING,
                         isConnected = false,
-                        message = serverMessage.ifBlank { "Backend proxy is reachable, but TMDB_API_KEY is not set on the server." }
+                        message = "TMDb service is currently unconfigured."
                     )
                 }
 
@@ -225,21 +617,21 @@ class TmdbProxyClient(
                     return@withContext TmdbHealthResult(
                         state = TmdbConnectionState.TMDB_REJECTED,
                         isConnected = false,
-                        message = serverMessage.ifBlank { "Authentication failed (HTTP ${response.code}). Check PROXY_AUTH_TOKEN or server TMDB_API_KEY." }
+                        message = "TMDb authentication failed."
                     )
                 }
 
                 return@withContext TmdbHealthResult(
                     state = TmdbConnectionState.PROXY_UNREACHABLE,
                     isConnected = false,
-                    message = serverMessage.ifBlank { "Proxy returned HTTP ${response.code}. TMDb is not connected." }
+                    message = "TMDb metadata service is currently unreachable."
                 )
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             TmdbHealthResult(
                 state = TmdbConnectionState.PROXY_UNREACHABLE,
                 isConnected = false,
-                message = "Cannot reach TMDb proxy (${e.javaClass.simpleName}: ${e.message ?: "network error"})."
+                message = "TMDb metadata service is currently unreachable."
             )
         }
     }
@@ -460,6 +852,8 @@ class TmdbProxyClient(
     }
 
     companion object {
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
         private val LEADING_COUNTRY_PREFIX_REGEX =
             Regex("""^(?:[A-Z]{2,4}\s*\|\s*|[A-Z]{2,3}\s+-\s+|(?:EN|US|UK|AR|FR|DE|ES|IT|TR|RU|NL|PT|BR|IN|CA|AU|VIP|VOD)\s*:\s*|[\u2600-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF]+\s*[\|\-:]?\s*)+""", RegexOption.IGNORE_CASE)
         private val BRACKETED_YEAR_REGEX = Regex("""[\(\[](19\d{2}|20[0-3]\d)[\)\]]""")
@@ -471,18 +865,53 @@ class TmdbProxyClient(
         private val BRACKET_NOISE_REGEX = Regex("""\[[^\]]*\]|\([^\)]*\)""")
         private val MULTI_SPACE_REGEX = Regex("""\s{2,}""")
 
-        /**
-         * Returns the cleaned movie or TV series title suitable for TMDb search.
-         */
+        fun serializeSyncItemsArray(items: List<TmdbSyncItem>): JSONArray {
+            val arr = JSONArray()
+            for (item in items) {
+                if (item.tmdbId <= 0 && item.title.isBlank()) continue
+                arr.put(
+                    JSONObject().apply {
+                        put("tmdbId", item.tmdbId)
+                        put("mediaType", item.mediaType)
+                        put("title", item.title)
+                        put("posterUrl", item.posterUrl)
+                        put("releaseYear", item.releaseYear)
+                        put("rating", item.rating)
+                        put("userRating", item.userRating)
+                    }
+                )
+            }
+            return arr
+        }
+
+        fun parseSyncItemsArray(arr: JSONArray?): List<TmdbSyncItem> {
+            if (arr == null) return emptyList()
+            val list = mutableListOf<TmdbSyncItem>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val tmdbId = obj.optInt("tmdbId", obj.optInt("id", 0))
+                val title = obj.optString("title", obj.optString("name", "")).trim()
+                if (tmdbId <= 0 && title.isEmpty()) continue
+                val rawType = obj.optString("mediaType", "movie").lowercase()
+                list.add(
+                    TmdbSyncItem(
+                        tmdbId = tmdbId,
+                        mediaType = if (rawType == "tv" || rawType == "series") "tv" else "movie",
+                        title = title,
+                        posterUrl = obj.optString("posterUrl", "").trim(),
+                        releaseYear = obj.optString("releaseYear", obj.optString("year", "")).trim(),
+                        rating = obj.optDouble("rating", 0.0).let { if (it.isNaN()) 0.0 else it },
+                        userRating = obj.optDouble("userRating", 0.0).let { if (it.isNaN()) 0.0 else it }
+                    )
+                )
+            }
+            return list
+        }
+
         fun cleanIptvTitleForTmdb(rawName: String): String {
             return extractTmdbQuery(rawName).cleanTitle
         }
 
-        /**
-         * Strips IPTV country prefixes, quality badges, codec markers, and season/episode suffixes
-         * from raw Xtream Codes or M3U item names so TMDb search receives a clean movie or series title
-         * and optional release year.
-         */
         fun extractTmdbQuery(rawName: String): CleanedTmdbQuery {
             var working = rawName.trim()
             if (working.isEmpty()) return CleanedTmdbQuery("", "")
@@ -604,10 +1033,6 @@ class TmdbProxyClient(
             return list
         }
 
-        /**
-         * Merges TMDb metadata into an existing [MediaItem] while preserving all stream URLs,
-         * IDs, categories, and detected video quality badges.
-         */
         fun enrichMediaItem(item: MediaItem, tmdb: TmdbMediaMetadata): MediaItem {
             return item.copy(
                 streamIcon = tmdb.posterUrl.ifBlank { item.streamIcon },
@@ -623,11 +1048,6 @@ class TmdbProxyClient(
             )
         }
 
-        /**
-         * Merges TMDb TV series metadata and per-season episode metadata into [SeriesDetails],
-         * enriching posters, backdrops, descriptions, ratings, cast, seasons, and episodes
-         * while strictly preserving playable IPTV stream URLs.
-         */
         fun enrichSeriesDetails(
             details: SeriesDetails,
             metadata: TmdbMediaMetadata,

@@ -166,7 +166,8 @@ class KrasRepository(context: Context) {
                         serverOrder = savedServerOrder,
                         quality = obj.optString("quality", "").ifBlank {
                             QualityDetector.detectFromNameAndCategory(title, obj.optString("categoryName", ""))
-                        }
+                        },
+                        tmdbId = obj.optInt("tmdbId", 0)
                     )
                 )
             }
@@ -208,7 +209,8 @@ class KrasRepository(context: Context) {
                     seq = if (item.groupKey.isNotBlank()) item.seq else norm.seq,
                     groupOrder = item.groupOrder,
                     serverOrder = item.serverOrder,
-                    quality = resolvedQuality
+                    quality = resolvedQuality,
+                    tmdbId = item.tmdbId
                 )
             )
             isAdded = true
@@ -252,6 +254,7 @@ class KrasRepository(context: Context) {
                     put("groupOrder", fav.groupOrder)
                     put("serverOrder", fav.serverOrder)
                     put("quality", fav.quality)
+                    put("tmdbId", fav.tmdbId)
                 }
                 array.put(obj)
             }
@@ -263,6 +266,333 @@ class KrasRepository(context: Context) {
 
     fun isFavorite(mediaId: String): Boolean {
         return getFavoritesRaw().any { it.mediaId == mediaId }
+    }
+
+    // --- Watchlist (Local + TMDb Two-Way Sync) ---
+    fun getWatchlist(): List<TmdbWatchlistItem> {
+        val jsonStr = prefs.getString("tmdb_watchlist_items", null) ?: return emptyList()
+        val list = mutableListOf<TmdbWatchlistItem>()
+        try {
+            val array = JSONArray(jsonStr)
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                list.add(
+                    TmdbWatchlistItem(
+                        id = obj.optString("id", java.util.UUID.randomUUID().toString()),
+                        mediaId = obj.optString("mediaId", ""),
+                        tmdbId = obj.optInt("tmdbId", 0),
+                        type = try { MediaType.valueOf(obj.optString("type", "MOVIE")) } catch (_: Exception) { MediaType.MOVIE },
+                        title = obj.optString("title", ""),
+                        posterUrl = obj.optString("posterUrl", ""),
+                        rating = obj.optDouble("rating", 0.0),
+                        year = obj.optString("year", ""),
+                        categoryName = obj.optString("categoryName", ""),
+                        streamUrl = obj.optString("streamUrl", ""),
+                        timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return list
+    }
+
+    private fun saveWatchlist(items: List<TmdbWatchlistItem>) {
+        try {
+            val array = JSONArray()
+            for (item in items) {
+                val obj = JSONObject().apply {
+                    put("id", item.id)
+                    put("mediaId", item.mediaId)
+                    put("tmdbId", item.tmdbId)
+                    put("type", item.type.name)
+                    put("title", item.title)
+                    put("posterUrl", item.posterUrl)
+                    put("rating", item.rating)
+                    put("year", item.year)
+                    put("categoryName", item.categoryName)
+                    put("streamUrl", item.streamUrl)
+                    put("timestamp", item.timestamp)
+                }
+                array.put(obj)
+            }
+            prefs.edit().putString("tmdb_watchlist_items", array.toString()).apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun toggleWatchlist(item: MediaItem): Boolean {
+        val list = getWatchlist().toMutableList()
+        val existing = list.find { it.mediaId == item.id || (item.tmdbId > 0 && it.tmdbId == item.tmdbId && it.type == item.type) }
+        val isAdded: Boolean
+        if (existing != null) {
+            list.remove(existing)
+            isAdded = false
+        } else {
+            list.add(
+                0,
+                TmdbWatchlistItem(
+                    id = java.util.UUID.randomUUID().toString(),
+                    mediaId = item.id,
+                    tmdbId = item.tmdbId,
+                    type = item.type,
+                    title = item.name,
+                    posterUrl = item.streamIcon,
+                    rating = item.rating,
+                    year = item.year,
+                    categoryName = item.categoryName,
+                    streamUrl = item.streamUrl
+                )
+            )
+            isAdded = true
+        }
+        saveWatchlist(list)
+        return isAdded
+    }
+
+    fun isInWatchlist(mediaId: String): Boolean {
+        return getWatchlist().any { it.mediaId == mediaId }
+    }
+
+    // --- User Ratings (Local + TMDb Two-Way Sync) ---
+    fun getUserRatings(): List<TmdbUserRatingItem> {
+        val jsonStr = prefs.getString("tmdb_user_ratings", null) ?: return emptyList()
+        val list = mutableListOf<TmdbUserRatingItem>()
+        try {
+            val array = JSONArray(jsonStr)
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                list.add(
+                    TmdbUserRatingItem(
+                        mediaId = obj.optString("mediaId", ""),
+                        tmdbId = obj.optInt("tmdbId", 0),
+                        type = try { MediaType.valueOf(obj.optString("type", "MOVIE")) } catch (_: Exception) { MediaType.MOVIE },
+                        title = obj.optString("title", ""),
+                        posterUrl = obj.optString("posterUrl", ""),
+                        year = obj.optString("year", ""),
+                        userRating = obj.optDouble("userRating", 0.0),
+                        updatedAt = obj.optLong("updatedAt", System.currentTimeMillis())
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return list
+    }
+
+    private fun saveUserRatings(items: List<TmdbUserRatingItem>) {
+        try {
+            val array = JSONArray()
+            for (item in items) {
+                val obj = JSONObject().apply {
+                    put("mediaId", item.mediaId)
+                    put("tmdbId", item.tmdbId)
+                    put("type", item.type.name)
+                    put("title", item.title)
+                    put("posterUrl", item.posterUrl)
+                    put("year", item.year)
+                    put("userRating", item.userRating)
+                    put("updatedAt", item.updatedAt)
+                }
+                array.put(obj)
+            }
+            prefs.edit().putString("tmdb_user_ratings", array.toString()).apply()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun setUserRating(item: MediaItem, rating: Double) {
+        val clamped = rating.coerceIn(0.5, 10.0)
+        val list = getUserRatings().filterNot {
+            it.mediaId == item.id || (item.tmdbId > 0 && it.tmdbId == item.tmdbId && it.type == item.type)
+        }.toMutableList()
+        list.add(
+            0,
+            TmdbUserRatingItem(
+                mediaId = item.id,
+                tmdbId = item.tmdbId,
+                type = item.type,
+                title = item.name,
+                posterUrl = item.streamIcon,
+                year = item.year,
+                userRating = clamped
+            )
+        )
+        saveUserRatings(list)
+    }
+
+    fun getUserRating(mediaId: String): Double? {
+        return getUserRatings().find { it.mediaId == mediaId }?.userRating
+    }
+
+    fun getLocalTmdbSyncFavorites(): List<TmdbSyncItem> {
+        return getFavoritesRaw()
+            .filter { it.type == MediaType.MOVIE || it.type == MediaType.SERIES }
+            .map { fav ->
+                TmdbSyncItem(
+                    tmdbId = fav.tmdbId,
+                    mediaType = if (fav.type == MediaType.SERIES) "tv" else "movie",
+                    title = fav.title,
+                    posterUrl = fav.posterUrl,
+                    releaseYear = fav.year,
+                    rating = fav.rating
+                )
+            }
+    }
+
+    fun getLocalTmdbSyncWatchlist(): List<TmdbSyncItem> {
+        return getWatchlist()
+            .filter { it.type == MediaType.MOVIE || it.type == MediaType.SERIES }
+            .map { wl ->
+                TmdbSyncItem(
+                    tmdbId = wl.tmdbId,
+                    mediaType = if (wl.type == MediaType.SERIES) "tv" else "movie",
+                    title = wl.title,
+                    posterUrl = wl.posterUrl,
+                    releaseYear = wl.year,
+                    rating = wl.rating
+                )
+            }
+    }
+
+    fun getLocalTmdbSyncRatings(): List<TmdbSyncItem> {
+        return getUserRatings()
+            .filter { (it.type == MediaType.MOVIE || it.type == MediaType.SERIES) && it.userRating >= 0.5 }
+            .map { rt ->
+                TmdbSyncItem(
+                    tmdbId = rt.tmdbId,
+                    mediaType = if (rt.type == MediaType.SERIES) "tv" else "movie",
+                    title = rt.title,
+                    posterUrl = rt.posterUrl,
+                    releaseYear = rt.year,
+                    rating = rt.userRating,
+                    userRating = rt.userRating
+                )
+            }
+    }
+
+    /**
+     * Merges remote TMDb Favorites, Watchlist, and Ratings into local KRAS TV persistence
+     * without duplicating existing entries.
+     */
+    fun mergeTmdbSyncedData(
+        remoteFavorites: List<TmdbSyncItem>,
+        remoteWatchlist: List<TmdbSyncItem>,
+        remoteRatings: List<TmdbSyncItem>
+    ) {
+        // 1. Merge Favorites
+        val currentFavorites = getFavoritesRaw().toMutableList()
+        var favChanged = false
+        for (remote in remoteFavorites) {
+            val targetType = if (remote.mediaType.equals("tv", true)) MediaType.SERIES else MediaType.MOVIE
+            val existingIdx = currentFavorites.indexOfFirst { fav ->
+                fav.type == targetType && (
+                    (remote.tmdbId > 0 && fav.tmdbId == remote.tmdbId) ||
+                        fav.title.equals(remote.title, ignoreCase = true)
+                    )
+            }
+            if (existingIdx >= 0) {
+                val existing = currentFavorites[existingIdx]
+                if (existing.tmdbId == 0 && remote.tmdbId > 0) {
+                    currentFavorites[existingIdx] = existing.copy(
+                        tmdbId = remote.tmdbId,
+                        posterUrl = existing.posterUrl.ifBlank { remote.posterUrl },
+                        year = existing.year.ifBlank { remote.releaseYear }
+                    )
+                    favChanged = true
+                }
+            } else if (remote.title.isNotBlank()) {
+                val norm = ChannelNameNormalizer.normalize(remote.title)
+                currentFavorites.add(
+                    FavoriteItem(
+                        id = java.util.UUID.randomUUID().toString(),
+                        mediaId = "tmdb_${remote.mediaType}_${remote.tmdbId}",
+                        type = targetType,
+                        title = remote.title,
+                        posterUrl = remote.posterUrl,
+                        rating = remote.rating,
+                        year = remote.releaseYear,
+                        categoryName = "TMDb Synced",
+                        streamUrl = "",
+                        groupKey = norm.groupKey,
+                        seq = norm.seq,
+                        tmdbId = remote.tmdbId
+                    )
+                )
+                favChanged = true
+            }
+        }
+        if (favChanged) {
+            saveFavoritesList(currentFavorites)
+        }
+
+        // 2. Merge Watchlist
+        val currentWatchlist = getWatchlist().toMutableList()
+        var wlChanged = false
+        for (remote in remoteWatchlist) {
+            val targetType = if (remote.mediaType.equals("tv", true)) MediaType.SERIES else MediaType.MOVIE
+            val exists = currentWatchlist.any { wl ->
+                wl.type == targetType && (
+                    (remote.tmdbId > 0 && wl.tmdbId == remote.tmdbId) ||
+                        wl.title.equals(remote.title, ignoreCase = true)
+                    )
+            }
+            if (!exists && remote.title.isNotBlank()) {
+                currentWatchlist.add(
+                    TmdbWatchlistItem(
+                        id = java.util.UUID.randomUUID().toString(),
+                        mediaId = "tmdb_${remote.mediaType}_${remote.tmdbId}",
+                        tmdbId = remote.tmdbId,
+                        type = targetType,
+                        title = remote.title,
+                        posterUrl = remote.posterUrl,
+                        rating = remote.rating,
+                        year = remote.releaseYear,
+                        categoryName = "TMDb Watchlist"
+                    )
+                )
+                wlChanged = true
+            }
+        }
+        if (wlChanged) {
+            saveWatchlist(currentWatchlist)
+        }
+
+        // 3. Merge User Ratings
+        val currentRatings = getUserRatings().toMutableList()
+        var ratingsChanged = false
+        for (remote in remoteRatings) {
+            val effectiveRating = if (remote.userRating > 0.0) remote.userRating else remote.rating
+            if (effectiveRating <= 0.0) continue
+            val targetType = if (remote.mediaType.equals("tv", true)) MediaType.SERIES else MediaType.MOVIE
+            val existingIdx = currentRatings.indexOfFirst { rt ->
+                rt.type == targetType && (
+                    (remote.tmdbId > 0 && rt.tmdbId == remote.tmdbId) ||
+                        rt.title.equals(remote.title, ignoreCase = true)
+                    )
+            }
+            if (existingIdx < 0 && remote.title.isNotBlank()) {
+                currentRatings.add(
+                    TmdbUserRatingItem(
+                        mediaId = "tmdb_${remote.mediaType}_${remote.tmdbId}",
+                        tmdbId = remote.tmdbId,
+                        type = targetType,
+                        title = remote.title,
+                        posterUrl = remote.posterUrl,
+                        year = remote.releaseYear,
+                        userRating = effectiveRating
+                    )
+                )
+                ratingsChanged = true
+            }
+        }
+        if (ratingsChanged) {
+            saveUserRatings(currentRatings)
+        }
     }
 
     // --- Watch History ---
@@ -404,7 +734,8 @@ class KrasRepository(context: Context) {
             tmdbProxyUrl = prefs.getString("tmdbProxyUrl", null)
                 ?.takeIf { it.isNotBlank() }
                 ?: com.example.BuildConfig.DEFAULT_TMDB_PROXY_URL,
-            tmdbAutoEnrichEnabled = prefs.getBoolean("tmdbAutoEnrichEnabled", true)
+            tmdbAutoEnrichEnabled = true,
+            tmdbAutoSyncEnabled = prefs.getBoolean("tmdbAutoSyncEnabled", true)
         )
     }
 
@@ -425,8 +756,11 @@ class KrasRepository(context: Context) {
             putBoolean("autoCheckUpdates", settings.autoCheckUpdates)
             putBoolean("backgroundPlayback", settings.backgroundPlayback)
             putBoolean("liveSwipeGesturesEnabled", settings.liveSwipeGesturesEnabled)
-            putString("tmdbProxyUrl", settings.tmdbProxyUrl.trim())
-            putBoolean("tmdbAutoEnrichEnabled", settings.tmdbAutoEnrichEnabled)
+            if (settings.tmdbProxyUrl.isNotBlank()) {
+                putString("tmdbProxyUrl", settings.tmdbProxyUrl.trim())
+            }
+            putBoolean("tmdbAutoEnrichEnabled", true)
+            putBoolean("tmdbAutoSyncEnabled", settings.tmdbAutoSyncEnabled)
         }.apply()
     }
 

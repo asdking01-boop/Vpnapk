@@ -2,6 +2,7 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
@@ -14,6 +15,7 @@ import com.example.data.api.XtreamClient
 import com.example.data.local.ChannelNameNormalizer
 import com.example.data.local.KrasRepository
 import com.example.data.local.QualityDetector
+import com.example.data.local.TmdbSecureSessionStore
 import com.example.data.local.entity.CategoryEntity
 import com.example.data.local.entity.MediaItemEntity
 import com.example.data.model.*
@@ -44,6 +46,7 @@ import java.util.concurrent.ConcurrentHashMap
 class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = KrasRepository(application)
+    private val tmdbSessionStore = TmdbSecureSessionStore(application)
     private val apiClient = XtreamClient()
     private val tmdbProxyClient = TmdbProxyClient()
     private val appUpdater = AppUpdater()
@@ -52,17 +55,21 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     // M3U parsed series details cache (seriesId -> SeriesDetails)
     private val m3uSeriesDetailsMap = ConcurrentHashMap<Int, SeriesDetails>()
 
-    // TMDb Proxy Connection & Health State (never claims connected until real HTTP check succeeds)
+    // TMDb Proxy Connection & Health State (internal metadata enrichment health)
     private val _tmdbHealthState = MutableStateFlow(
         TmdbHealthResult(
             state = TmdbConnectionState.NOT_CONFIGURED,
-            message = "Configure your server-side TMDb proxy URL to enable metadata enrichment."
+            message = ""
         )
     )
     val tmdbHealthState = _tmdbHealthState.asStateFlow()
 
     private val _isTmdbVerifying = MutableStateFlow(false)
     val isTmdbVerifying = _isTmdbVerifying.asStateFlow()
+
+    // TMDb Account & Two-Way Sync UI State (never exposes API keys or session tokens)
+    private val _tmdbAccountState = MutableStateFlow(buildInitialTmdbAccountUiState())
+    val tmdbAccountState = _tmdbAccountState.asStateFlow()
 
     // Accounts
     private val _accounts = MutableStateFlow<List<Account>>(emptyList())
@@ -272,9 +279,12 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 // Start background content sync
                 loadContentForAccount(active, isBackgroundRefresh = true)
 
-                // Verify TMDb proxy connection if configured
+                // Verify TMDb metadata proxy connection silently & run auto-sync if account connected
                 if (_userSettings.value.tmdbProxyUrl.isNotBlank()) {
                     verifyTmdbProxyConnection(_userSettings.value.tmdbProxyUrl)
+                }
+                if (_tmdbAccountState.value.isConnected && _userSettings.value.tmdbAutoSyncEnabled) {
+                    syncTmdbAccountNow(isAuto = true)
                 }
 
                 // Clean up old downloaded APKs after update & run automatic 6-hour update check
@@ -753,16 +763,287 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun buildInitialTmdbAccountUiState(): TmdbAccountUiState {
+        val settings = repository.getUserSettings()
+        val stored = tmdbSessionStore.getSession()
+        if (stored != null) {
+            return TmdbAccountUiState(
+                authStatus = TmdbAuthStatus.CONNECTED,
+                syncStatus = TmdbSyncStatus.IDLE,
+                accountId = stored.accountId,
+                username = stored.username,
+                displayName = stored.displayName.ifBlank { stored.username },
+                avatarUrl = stored.avatarUrl,
+                autoSyncEnabled = settings.tmdbAutoSyncEnabled,
+                lastSyncTimestampMs = stored.lastSyncTimestampMs,
+                syncedFavoritesCount = stored.syncedFavoritesCount.coerceAtLeast(repository.getLocalTmdbSyncFavorites().size),
+                syncedWatchlistCount = stored.syncedWatchlistCount.coerceAtLeast(repository.getWatchlist().size),
+                syncedRatingsCount = stored.syncedRatingsCount.coerceAtLeast(repository.getUserRatings().size)
+            )
+        }
+        val pendingToken = tmdbSessionStore.getPendingRequestToken()
+        return TmdbAccountUiState(
+            authStatus = if (pendingToken != null) TmdbAuthStatus.AUTHORIZING_IN_BROWSER else TmdbAuthStatus.DISCONNECTED,
+            autoSyncEnabled = settings.tmdbAutoSyncEnabled,
+            syncedFavoritesCount = repository.getLocalTmdbSyncFavorites().size,
+            syncedWatchlistCount = repository.getWatchlist().size,
+            syncedRatingsCount = repository.getUserRatings().size
+        )
+    }
+
     /**
-     * Verifies the server-side TMDb proxy connection by making a real HTTP request to `/api/tmdb/health`.
-     * Never claims TMDb is connected unless the backend proxy responds with `ok: true` and `tmdbConnected: true`.
+     * Initiates official TMDb user account authorization via the backend proxy and opens the
+     * TMDb approval URL in the user's browser.
+     */
+    fun startTmdbAccountAuthorization(onOpenBrowserUrl: (String) -> Unit) {
+        val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+        _tmdbAccountState.value = _tmdbAccountState.value.copy(
+            authStatus = TmdbAuthStatus.VERIFYING_SESSION,
+            statusMessage = null,
+            isError = false
+        )
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = tmdbProxyClient.createAuthRequestToken(
+                rawProxyUrl = proxyUrl,
+                redirectTo = "krastv://tmdb-auth"
+            )
+            if (result.ok && result.requestToken.isNotBlank() && result.authUrl.isNotBlank()) {
+                tmdbSessionStore.savePendingRequestToken(result.requestToken)
+                _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER,
+                    statusMessage = result.userMessage,
+                    isError = false
+                )
+                withContext(Dispatchers.Main) {
+                    onOpenBrowserUrl(result.authUrl)
+                }
+            } else {
+                _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    authStatus = TmdbAuthStatus.DISCONNECTED,
+                    statusMessage = result.userMessage.ifBlank {
+                        "Unable to start TMDb sign-in right now. Please try again later."
+                    },
+                    isError = true
+                )
+            }
+        }
+    }
+
+    /**
+     * Handles the `krastv://tmdb-auth?request_token=...&approved=true` deep-link callback from the browser.
+     */
+    fun handleTmdbAuthCallback(uri: Uri?) {
+        if (uri == null) return
+        val scheme = uri.scheme?.lowercase().orEmpty()
+        val host = uri.host?.lowercase().orEmpty()
+        if (scheme != "krastv" || host != "tmdb-auth") return
+
+        val denied = uri.getQueryParameter("denied")?.equals("true", ignoreCase = true) == true ||
+            uri.getQueryParameter("approved")?.equals("false", ignoreCase = true) == true
+        if (denied) {
+            tmdbSessionStore.clearPendingRequestToken()
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                authStatus = TmdbAuthStatus.DISCONNECTED,
+                statusMessage = "TMDb account authorization was cancelled.",
+                isError = false
+            )
+            return
+        }
+
+        val tokenFromUri = uri.getQueryParameter("request_token")?.trim().orEmpty()
+        completeTmdbAuthorization(explicitToken = tokenFromUri, isAutoResumeCheck = false)
+    }
+
+    /**
+     * Completes TMDb authorization by exchanging the approved `request_token` for an encrypted session
+     * and running initial two-way synchronization.
+     */
+    fun completeTmdbAuthorization(explicitToken: String? = null, isAutoResumeCheck: Boolean = false) {
+        val token = explicitToken?.trim()?.takeIf { it.isNotEmpty() }
+            ?: tmdbSessionStore.getPendingRequestToken()
+            ?: return
+
+        val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+        if (!isAutoResumeCheck) {
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                authStatus = TmdbAuthStatus.VERIFYING_SESSION,
+                statusMessage = null,
+                isError = false
+            )
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val sessionResult = tmdbProxyClient.createAuthorizedSession(
+                rawProxyUrl = proxyUrl,
+                requestToken = token
+            )
+            if (sessionResult.ok && sessionResult.sessionId.isNotBlank() && sessionResult.username.isNotBlank()) {
+                tmdbSessionStore.saveSession(
+                    sessionId = sessionResult.sessionId,
+                    accountId = sessionResult.accountId,
+                    username = sessionResult.username,
+                    displayName = sessionResult.displayName,
+                    avatarUrl = sessionResult.avatarUrl
+                )
+                _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    authStatus = TmdbAuthStatus.CONNECTED,
+                    syncStatus = TmdbSyncStatus.IDLE,
+                    accountId = sessionResult.accountId,
+                    username = sessionResult.username,
+                    displayName = sessionResult.displayName.ifBlank { sessionResult.username },
+                    avatarUrl = sessionResult.avatarUrl,
+                    statusMessage = sessionResult.userMessage,
+                    isError = false
+                )
+                if (_userSettings.value.tmdbAutoSyncEnabled) {
+                    syncTmdbAccountNow(isAuto = true)
+                }
+            } else {
+                if (isAutoResumeCheck) {
+                    _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                        authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER
+                    )
+                } else {
+                    _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                        authStatus = TmdbAuthStatus.AUTHORIZING_IN_BROWSER,
+                        statusMessage = sessionResult.userMessage,
+                        isError = true
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelTmdbAuthorization() {
+        tmdbSessionStore.clearPendingRequestToken()
+        _tmdbAccountState.value = _tmdbAccountState.value.copy(
+            authStatus = TmdbAuthStatus.DISCONNECTED,
+            statusMessage = null,
+            isError = false
+        )
+    }
+
+    /**
+     * Performs two-way synchronization of Favorites, Watchlist, and Ratings between KRAS TV and TMDb.
+     */
+    fun syncTmdbAccountNow(isAuto: Boolean = false) {
+        val stored = tmdbSessionStore.getSession()
+        if (stored == null) {
+            if (!isAuto) {
+                _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    statusMessage = "Please connect your TMDb account first.",
+                    isError = true
+                )
+            }
+            return
+        }
+        if (_tmdbAccountState.value.syncStatus == TmdbSyncStatus.SYNCING) return
+
+        val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+        _tmdbAccountState.value = _tmdbAccountState.value.copy(
+            syncStatus = TmdbSyncStatus.SYNCING,
+            statusMessage = if (isAuto) _tmdbAccountState.value.statusMessage else null,
+            isError = false
+        )
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val localFavorites = repository.getLocalTmdbSyncFavorites()
+            val localWatchlist = repository.getLocalTmdbSyncWatchlist()
+            val localRatings = repository.getLocalTmdbSyncRatings()
+            val langCode = if (_userSettings.value.language.contains("Arabic", ignoreCase = true)) "ar-SA" else "en-US"
+
+            val syncResult = tmdbProxyClient.performTwoWaySync(
+                rawProxyUrl = proxyUrl,
+                sessionId = stored.sessionId,
+                accountId = stored.accountId,
+                localFavorites = localFavorites,
+                localWatchlist = localWatchlist,
+                localRatings = localRatings,
+                language = langCode
+            )
+
+            if (syncResult.ok) {
+                repository.mergeTmdbSyncedData(
+                    remoteFavorites = syncResult.favorites,
+                    remoteWatchlist = syncResult.watchlist,
+                    remoteRatings = syncResult.ratings
+                )
+                _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder)
+
+                val nowMs = System.currentTimeMillis()
+                val favCount = repository.getLocalTmdbSyncFavorites().size.coerceAtLeast(syncResult.favorites.size)
+                val wlCount = repository.getWatchlist().size.coerceAtLeast(syncResult.watchlist.size)
+                val rtCount = repository.getUserRatings().size.coerceAtLeast(syncResult.ratings.size)
+
+                tmdbSessionStore.updateSyncStats(
+                    lastSyncTimestampMs = nowMs,
+                    favoritesCount = favCount,
+                    watchlistCount = wlCount,
+                    ratingsCount = rtCount
+                )
+
+                _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    syncStatus = TmdbSyncStatus.SUCCESS,
+                    lastSyncTimestampMs = nowMs,
+                    syncedFavoritesCount = favCount,
+                    syncedWatchlistCount = wlCount,
+                    syncedRatingsCount = rtCount,
+                    statusMessage = if (isAuto) null else syncResult.userMessage,
+                    isError = false
+                )
+            } else {
+                _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    syncStatus = TmdbSyncStatus.ERROR,
+                    statusMessage = if (isAuto) null else syncResult.userMessage,
+                    isError = !isAuto
+                )
+            }
+        }
+    }
+
+    fun setTmdbAutoSyncEnabled(enabled: Boolean) {
+        val updatedSettings = _userSettings.value.copy(tmdbAutoSyncEnabled = enabled)
+        updateSettings(updatedSettings)
+        _tmdbAccountState.value = _tmdbAccountState.value.copy(
+            autoSyncEnabled = enabled,
+            statusMessage = null,
+            isError = false
+        )
+        if (enabled && _tmdbAccountState.value.isConnected) {
+            syncTmdbAccountNow(isAuto = true)
+        }
+    }
+
+    fun disconnectTmdbAccount() {
+        val stored = tmdbSessionStore.getSession()
+        val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+        tmdbSessionStore.clearSession()
+        _tmdbAccountState.value = TmdbAccountUiState(
+            authStatus = TmdbAuthStatus.DISCONNECTED,
+            syncStatus = TmdbSyncStatus.IDLE,
+            autoSyncEnabled = _userSettings.value.tmdbAutoSyncEnabled,
+            syncedFavoritesCount = repository.getLocalTmdbSyncFavorites().size,
+            syncedWatchlistCount = repository.getWatchlist().size,
+            syncedRatingsCount = repository.getUserRatings().size,
+            statusMessage = "TMDb account disconnected.",
+            isError = false
+        )
+        if (stored != null && stored.sessionId.isNotBlank()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                tmdbProxyClient.disconnectSession(proxyUrl, stored.sessionId)
+            }
+        }
+    }
+
+    /**
+     * Verifies the server-side TMDb metadata service silently in the background.
      */
     fun verifyTmdbProxyConnection(proxyUrl: String = _userSettings.value.tmdbProxyUrl) {
         val trimmed = proxyUrl.trim()
         if (trimmed.isBlank()) {
             _tmdbHealthState.value = TmdbHealthResult(
                 state = TmdbConnectionState.NOT_CONFIGURED,
-                message = "Configure your server-side TMDb proxy URL to enable metadata enrichment."
+                message = ""
             )
             return
         }
@@ -776,10 +1057,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         enrichCatalogWithTmdb(active)
                     }
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 _tmdbHealthState.value = TmdbHealthResult(
                     state = TmdbConnectionState.PROXY_UNREACHABLE,
-                    message = e.message ?: "Unable to reach TMDb proxy server."
+                    message = ""
                 )
             } finally {
                 _isTmdbVerifying.value = false
@@ -1744,39 +2025,170 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         _isLiveFullscreen.value = false
     }
 
-    // --- Favorites ---
+    // --- Favorites, Watchlist & Ratings (with Automatic Two-Way TMDb Sync) ---
     fun toggleFavorite(item: MediaItem) {
         val order = _userSettings.value.liveChannelOrder
         viewModelScope.launch(Dispatchers.IO) {
-            repository.toggleFavorite(item)
+            val isAdded = repository.toggleFavorite(item)
             _favorites.value = repository.getFavorites(order)
             if (liveCatFilter == "favorites") {
-                val account = _activeAccount.value ?: return@launch
-                val limitToFetch = (livePage + 1) * pageSize
-                _liveStreams.value = repository.queryMediaPaged(
-                    accountId = account.id,
-                    type = "LIVE",
-                    categoryId = "favorites",
-                    query = liveQueryFilter,
-                    minRating = 0.0,
-                    year = "All",
-                    limit = limitToFetch,
-                    offset = 0,
-                    liveChannelOrder = order,
-                    qualityFilter = liveQualityFilter,
-                    sortByQuality = liveSortByQuality
-                )
-                totalLiveCount.value = repository.countMedia(
-                    accountId = account.id,
-                    type = "LIVE",
-                    categoryId = "favorites",
-                    query = liveQueryFilter,
-                    minRating = 0.0,
-                    year = "All",
-                    qualityFilter = liveQualityFilter
-                )
+                val account = _activeAccount.value
+                if (account != null) {
+                    val limitToFetch = (livePage + 1) * pageSize
+                    _liveStreams.value = repository.queryMediaPaged(
+                        accountId = account.id,
+                        type = "LIVE",
+                        categoryId = "favorites",
+                        query = liveQueryFilter,
+                        minRating = 0.0,
+                        year = "All",
+                        limit = limitToFetch,
+                        offset = 0,
+                        liveChannelOrder = order,
+                        qualityFilter = liveQualityFilter,
+                        sortByQuality = liveSortByQuality
+                    )
+                    totalLiveCount.value = repository.countMedia(
+                        accountId = account.id,
+                        type = "LIVE",
+                        categoryId = "favorites",
+                        query = liveQueryFilter,
+                        minRating = 0.0,
+                        year = "All",
+                        qualityFilter = liveQualityFilter
+                    )
+                }
+            }
+
+            // Automatic two-way TMDb sync for Movie and Series favorites when connected & Auto Sync enabled
+            if ((item.type == MediaType.MOVIE || item.type == MediaType.SERIES) && _userSettings.value.tmdbAutoSyncEnabled) {
+                val stored = tmdbSessionStore.getSession()
+                val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+                if (stored != null && proxyUrl.isNotBlank()) {
+                    val resolvedTmdbId = resolveTmdbIdForItem(item, proxyUrl)
+                    if (resolvedTmdbId > 0) {
+                        val pushed = tmdbProxyClient.pushFavoriteChange(
+                            rawProxyUrl = proxyUrl,
+                            sessionId = stored.sessionId,
+                            accountId = stored.accountId,
+                            mediaType = item.type.name,
+                            tmdbId = resolvedTmdbId,
+                            favorite = isAdded
+                        )
+                        if (pushed) {
+                            val nowMs = System.currentTimeMillis()
+                            val favCount = repository.getLocalTmdbSyncFavorites().size
+                            tmdbSessionStore.updateSyncStats(
+                                lastSyncTimestampMs = nowMs,
+                                favoritesCount = favCount,
+                                watchlistCount = _tmdbAccountState.value.syncedWatchlistCount,
+                                ratingsCount = _tmdbAccountState.value.syncedRatingsCount
+                            )
+                            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                                lastSyncTimestampMs = nowMs,
+                                syncedFavoritesCount = favCount
+                            )
+                        }
+                    }
+                }
             }
         }
+    }
+
+    fun toggleWatchlist(item: MediaItem) {
+        if (item.type != MediaType.MOVIE && item.type != MediaType.SERIES) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val isAdded = repository.toggleWatchlist(item)
+            val wlCount = repository.getWatchlist().size
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(syncedWatchlistCount = wlCount)
+
+            if (_userSettings.value.tmdbAutoSyncEnabled) {
+                val stored = tmdbSessionStore.getSession()
+                val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+                if (stored != null && proxyUrl.isNotBlank()) {
+                    val resolvedTmdbId = resolveTmdbIdForItem(item, proxyUrl)
+                    if (resolvedTmdbId > 0) {
+                        val pushed = tmdbProxyClient.pushWatchlistChange(
+                            rawProxyUrl = proxyUrl,
+                            sessionId = stored.sessionId,
+                            accountId = stored.accountId,
+                            mediaType = item.type.name,
+                            tmdbId = resolvedTmdbId,
+                            watchlist = isAdded
+                        )
+                        if (pushed) {
+                            val nowMs = System.currentTimeMillis()
+                            tmdbSessionStore.updateSyncStats(
+                                lastSyncTimestampMs = nowMs,
+                                favoritesCount = _tmdbAccountState.value.syncedFavoritesCount,
+                                watchlistCount = wlCount,
+                                ratingsCount = _tmdbAccountState.value.syncedRatingsCount
+                            )
+                            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                                lastSyncTimestampMs = nowMs,
+                                syncedWatchlistCount = wlCount
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun rateMediaItem(item: MediaItem, rating: Double) {
+        if (item.type != MediaType.MOVIE && item.type != MediaType.SERIES) return
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.setUserRating(item, rating)
+            val rtCount = repository.getUserRatings().size
+            _tmdbAccountState.value = _tmdbAccountState.value.copy(syncedRatingsCount = rtCount)
+
+            if (_userSettings.value.tmdbAutoSyncEnabled) {
+                val stored = tmdbSessionStore.getSession()
+                val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+                if (stored != null && proxyUrl.isNotBlank()) {
+                    val resolvedTmdbId = resolveTmdbIdForItem(item, proxyUrl)
+                    if (resolvedTmdbId > 0) {
+                        val pushed = tmdbProxyClient.pushRatingChange(
+                            rawProxyUrl = proxyUrl,
+                            sessionId = stored.sessionId,
+                            accountId = stored.accountId,
+                            mediaType = item.type.name,
+                            tmdbId = resolvedTmdbId,
+                            rating = rating
+                        )
+                        if (pushed) {
+                            val nowMs = System.currentTimeMillis()
+                            tmdbSessionStore.updateSyncStats(
+                                lastSyncTimestampMs = nowMs,
+                                favoritesCount = _tmdbAccountState.value.syncedFavoritesCount,
+                                watchlistCount = _tmdbAccountState.value.syncedWatchlistCount,
+                                ratingsCount = rtCount
+                            )
+                            _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                                lastSyncTimestampMs = nowMs,
+                                syncedRatingsCount = rtCount
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun resolveTmdbIdForItem(item: MediaItem, proxyUrl: String): Int {
+        if (item.tmdbId > 0) return item.tmdbId
+        val meta = if (item.type == MediaType.SERIES) {
+            tmdbProxyClient.fetchTvMetadata(proxyUrl, item.name, item.year, 0)
+        } else {
+            tmdbProxyClient.fetchMovieMetadata(proxyUrl, item.name, item.year, 0)
+        }
+        if (meta != null && meta.tmdbId > 0) {
+            val enriched = TmdbProxyClient.enrichMediaItem(item, meta)
+            repository.updateTmdbMetadata(enriched)
+            applyEnrichedTmdbItemToState(enriched)
+            return meta.tmdbId
+        }
+        return 0
     }
 
     fun isFavorite(mediaId: String): Boolean {

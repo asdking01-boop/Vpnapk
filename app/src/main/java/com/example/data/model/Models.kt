@@ -164,7 +164,8 @@ data class FavoriteItem(
     val seq: Int = 0,
     val groupOrder: Int = 0,
     val serverOrder: Int = 0,
-    val quality: String = ""
+    val quality: String = "",
+    val tmdbId: Int = 0
 )
 
 data class DownloadItem(
@@ -197,7 +198,8 @@ data class UserSettings(
     val backgroundPlayback: Boolean = true,
     val liveSwipeGesturesEnabled: Boolean = true,
     val tmdbProxyUrl: String = "",
-    val tmdbAutoEnrichEnabled: Boolean = true
+    val tmdbAutoEnrichEnabled: Boolean = true,
+    val tmdbAutoSyncEnabled: Boolean = true
 )
 
 // Xtream Codes API DTOs

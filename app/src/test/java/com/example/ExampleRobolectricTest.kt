@@ -1202,5 +1202,108 @@ class ExampleRobolectricTest {
       assertEquals("https://image.tmdb.org/t/p/w500/dune2_poster.jpg", loaded.streamIcon)
     }
   }
+
+  @Test
+  fun `tmdb account secure session store and two-way sync merge favorites watchlist and ratings`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+    val sessionStore = com.example.data.local.TmdbSecureSessionStore(context)
+
+    // 1. Clean initial state
+    sessionStore.clearSession()
+    assertNull(sessionStore.getSession())
+
+    // 2. Pending request token lifecycle
+    sessionStore.savePendingRequestToken("req_tok_abc123")
+    assertEquals("req_tok_abc123", sessionStore.getPendingRequestToken())
+
+    // 3. Save connected TMDb session & profile (encrypted at rest)
+    sessionStore.saveSession(
+      sessionId = "sess_secret_xyz987",
+      accountId = 445566,
+      username = "kras_member",
+      displayName = "KRAS Member",
+      avatarUrl = "https://image.tmdb.org/t/p/w185/avatar.jpg"
+    )
+    val stored = sessionStore.getSession()
+    assertNotNull(stored)
+    assertEquals("sess_secret_xyz987", stored!!.sessionId)
+    assertEquals(445566, stored.accountId)
+    assertEquals("kras_member", stored.username)
+    assertEquals("KRAS Member", stored.displayName)
+    assertEquals("https://image.tmdb.org/t/p/w185/avatar.jpg", stored.avatarUrl)
+    assertNull(sessionStore.getPendingRequestToken())
+
+    // 4. Merge remote TMDb Favorites, Watchlist, and Ratings into local repository
+    val remoteFavorites = listOf(
+      com.example.data.model.TmdbSyncItem(
+        tmdbId = 693134,
+        mediaType = "movie",
+        title = "Dune: Part Two",
+        posterUrl = "https://image.tmdb.org/t/p/w500/dune2.jpg",
+        rating = 8.4,
+        releaseYear = "2024"
+      )
+    )
+    val remoteWatchlist = listOf(
+      com.example.data.model.TmdbSyncItem(
+        tmdbId = 1396,
+        mediaType = "tv",
+        title = "Breaking Bad",
+        posterUrl = "https://image.tmdb.org/t/p/w500/bb.jpg",
+        rating = 8.9,
+        releaseYear = "2008"
+      )
+    )
+    val remoteRatings = listOf(
+      com.example.data.model.TmdbSyncItem(
+        tmdbId = 27205,
+        mediaType = "movie",
+        title = "Inception",
+        userRating = 9.5,
+        posterUrl = "https://image.tmdb.org/t/p/w500/inception.jpg",
+        releaseYear = "2010"
+      )
+    )
+
+    repo.mergeTmdbSyncedData(
+      remoteFavorites = remoteFavorites,
+      remoteWatchlist = remoteWatchlist,
+      remoteRatings = remoteRatings
+    )
+
+    assertTrue(repo.getFavorites().any { it.tmdbId == 693134 && it.title == "Dune: Part Two" })
+    assertTrue(repo.isInWatchlist("tmdb_tv_1396"))
+    assertEquals(9.5, repo.getUserRating("tmdb_movie_27205") ?: 0.0, 0.01)
+
+    // 5. Update sync stats & verify UI state formatting
+    val syncTime = 1_762_000_000_000L
+    sessionStore.updateSyncStats(
+      lastSyncTimestampMs = syncTime,
+      favoritesCount = repo.getLocalTmdbSyncFavorites().size,
+      watchlistCount = repo.getWatchlist().size,
+      ratingsCount = repo.getUserRatings().size
+    )
+    val updatedStored = sessionStore.getSession()!!
+    assertEquals(syncTime, updatedStored.lastSyncTimestampMs)
+
+    val uiState = com.example.data.model.TmdbAccountUiState(
+      authStatus = com.example.data.model.TmdbAuthStatus.CONNECTED,
+      accountId = updatedStored.accountId,
+      username = updatedStored.username,
+      displayName = updatedStored.displayName,
+      avatarUrl = updatedStored.avatarUrl,
+      lastSyncTimestampMs = updatedStored.lastSyncTimestampMs
+    )
+    assertTrue(uiState.isConnected)
+    assertEquals("Connected", uiState.statusBadgeLabel(isArabic = false))
+    assertEquals("متصل", uiState.statusBadgeLabel(isArabic = true))
+    assertNotEquals("Never synced", uiState.lastSyncFormatted(isArabic = false))
+
+    // 6. Disconnect clears session cleanly
+    sessionStore.clearSession()
+    assertNull(sessionStore.getSession())
+  }
 }
+
 

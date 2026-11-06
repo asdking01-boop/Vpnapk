@@ -129,12 +129,13 @@ app.use(
       err.statusCode = 403;
       return callback(err);
     },
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "Accept",
       "Content-Type",
       "Authorization",
       "X-KRAS-Proxy-Token",
+      "X-TMDb-Session-Id",
       "X-Client-App"
     ],
     maxAge: 86400
@@ -414,7 +415,7 @@ function selectBestTmdbMatch(results, queryTitle, targetYear, isTv = false) {
 // ============================================================================
 // 7. Upstream TMDb API v3 Fetch Helper
 // ============================================================================
-async function tmdbFetch(path, queryParams = {}) {
+async function tmdbRequest(path, { method = "GET", queryParams = {}, body = null } = {}) {
   const apiKey = getTmdbKey();
   if (!apiKey) {
     const err = new Error("TMDB_API_KEY is not configured on the backend server.");
@@ -428,6 +429,10 @@ async function tmdbFetch(path, queryParams = {}) {
     Accept: "application/json",
     "User-Agent": "KRAS-TV-TMDb-Proxy/1.0"
   };
+
+  if (body !== null && body !== undefined) {
+    headers["Content-Type"] = "application/json;charset=utf-8";
+  }
 
   // Supports both TMDb v3 API Key (32-char hex) and v4 JWT Read Access Token
   if (apiKey.startsWith("eyJ")) {
@@ -443,29 +448,38 @@ async function tmdbFetch(path, queryParams = {}) {
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 12000);
+  const timeoutId = setTimeout(() => controller.abort(), 14000);
 
   try {
     const response = await fetch(url.toString(), {
-      method: "GET",
+      method,
       headers,
+      body: body !== null && body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal
     });
 
+    const data = await response.json().catch(() => ({}));
+
     if (!response.ok) {
+      const upstreamMsg = data && data.status_message ? data.status_message : "";
       const err = new Error(
         response.status === 401 || response.status === 403
-          ? `TMDb rejected the server API key (HTTP ${response.status}).`
-          : `TMDb upstream returned HTTP ${response.status}.`
+          ? upstreamMsg || `TMDb authorization rejected (HTTP ${response.status}).`
+          : upstreamMsg || `TMDb upstream returned HTTP ${response.status}.`
       );
       err.statusCode = response.status;
+      err.tmdbStatusCode = data && data.status_code ? data.status_code : 0;
       throw err;
     }
 
-    return await response.json();
+    return data;
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+async function tmdbFetch(path, queryParams = {}) {
+  return tmdbRequest(path, { method: "GET", queryParams });
 }
 
 function buildPosterUrl(path) {
@@ -1306,6 +1320,536 @@ async function handleMetadataMatch(req, res) {
 
 app.get("/api/tmdb/match", requireProxyAuth, handleMetadataMatch);
 app.post("/api/tmdb/match", requireProxyAuth, handleMetadataMatch);
+
+// ============================================================================
+// 13. Official TMDb User Authentication & Two-Way Synchronization Endpoints
+// ============================================================================
+
+function extractTmdbSessionId(req) {
+  const headerSession = req.headers["x-tmdb-session-id"];
+  if (typeof headerSession === "string" && headerSession.trim()) {
+    return headerSession.trim();
+  }
+  if (req.body && typeof req.body.sessionId === "string" && req.body.sessionId.trim()) {
+    return req.body.sessionId.trim();
+  }
+  if (req.query && typeof req.query.sessionId === "string" && req.query.sessionId.trim()) {
+    return req.query.sessionId.trim();
+  }
+  return "";
+}
+
+function buildAccountAvatarUrl(accountData) {
+  const tmdbAvatarPath =
+    accountData &&
+    accountData.avatar &&
+    accountData.avatar.tmdb &&
+    accountData.avatar.tmdb.avatar_path;
+  if (tmdbAvatarPath) {
+    return `${TMDB_IMAGE_BASE_W185}${tmdbAvatarPath}`;
+  }
+  const gravatarHash =
+    accountData &&
+    accountData.avatar &&
+    accountData.avatar.gravatar &&
+    accountData.avatar.gravatar.hash;
+  if (gravatarHash) {
+    return `https://secure.gravatar.com/avatar/${gravatarHash}.jpg?s=185&d=identicon`;
+  }
+  return "";
+}
+
+function formatSyncMediaEntry(raw, mediaType) {
+  const isTv = mediaType === "tv";
+  const releaseDate = (isTv ? raw.first_air_date : raw.release_date) || "";
+  return {
+    tmdbId: raw.id || 0,
+    mediaType: isTv ? "tv" : "movie",
+    title: (isTv ? raw.name || raw.original_name : raw.title || raw.original_title) || "",
+    posterUrl: buildPosterUrl(raw.poster_path),
+    backdropUrl: buildBackdropUrl(raw.backdrop_path),
+    overview: raw.overview || "",
+    rating: typeof raw.vote_average === "number" ? Number(raw.vote_average.toFixed(1)) : 0.0,
+    releaseYear: releaseDate.slice(0, 4),
+    userRating: typeof raw.rating === "number" ? Number(raw.rating.toFixed(1)) : 0.0
+  };
+}
+
+/**
+ * POST /api/tmdb/auth/request-token
+ * Body: { "redirectTo": "krastv://tmdb-auth" }
+ */
+app.post("/api/tmdb/auth/request-token", requireProxyAuth, async (req, res) => {
+  const redirectTo =
+    req.body && typeof req.body.redirectTo === "string" && req.body.redirectTo.trim()
+      ? req.body.redirectTo.trim()
+      : "krastv://tmdb-auth";
+
+  try {
+    const tokenRes = await tmdbRequest("/authentication/token/new", { method: "GET" });
+    const requestToken = (tokenRes && tokenRes.request_token) || "";
+    if (!requestToken) {
+      return res.status(502).json({
+        ok: false,
+        error: "Unable to create TMDb authorization token."
+      });
+    }
+
+    const encodedRedirect = encodeURIComponent(redirectTo);
+    const authUrl = `https://www.themoviedb.org/authenticate/${requestToken}?redirect_to=${encodedRedirect}`;
+
+    return res.status(200).json({
+      ok: true,
+      requestToken,
+      expiresAt: tokenRes.expires_at || "",
+      authUrl
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 502).json({
+      ok: false,
+      error: "Unable to start TMDb authorization right now. Please try again."
+    });
+  }
+});
+
+/**
+ * POST /api/tmdb/auth/session
+ * Body: { "requestToken": "<approved_request_token>" }
+ */
+app.post("/api/tmdb/auth/session", requireProxyAuth, async (req, res) => {
+  const requestToken =
+    req.body && typeof req.body.requestToken === "string" ? req.body.requestToken.trim() : "";
+
+  if (!requestToken || requestToken.length < 8) {
+    return res.status(400).json({
+      ok: false,
+      error: "A valid approved TMDb requestToken is required."
+    });
+  }
+
+  try {
+    const sessionRes = await tmdbRequest("/authentication/session/new", {
+      method: "POST",
+      body: { request_token: requestToken }
+    });
+
+    const sessionId = (sessionRes && sessionRes.session_id) || "";
+    if (!sessionId) {
+      return res.status(401).json({
+        ok: false,
+        error: "Please approve the authorization request in your browser first, then try again."
+      });
+    }
+
+    const accountData = await tmdbRequest("/account", {
+      method: "GET",
+      queryParams: { session_id: sessionId }
+    });
+
+    return res.status(200).json({
+      ok: true,
+      sessionId,
+      account: {
+        id: accountData.id || 0,
+        username: accountData.username || "",
+        name: accountData.name || accountData.username || "",
+        avatarUrl: buildAccountAvatarUrl(accountData),
+        includeAdult: Boolean(accountData.include_adult),
+        iso639_1: accountData.iso_639_1 || "en",
+        iso3166_1: accountData.iso_3166_1 || "US"
+      }
+    });
+  } catch (err) {
+    const status = err.statusCode === 401 || err.statusCode === 403 ? 401 : err.statusCode || 502;
+    return res.status(status).json({
+      ok: false,
+      error:
+        status === 401
+          ? "Please approve the TMDb sign-in request in your browser first, then tap Complete Sign-In."
+          : "Unable to verify TMDb account authorization. Please try again."
+    });
+  }
+});
+
+/**
+ * POST /api/tmdb/auth/logout
+ * Header: X-TMDb-Session-Id or Body: { "sessionId": "..." }
+ */
+app.post("/api/tmdb/auth/logout", requireProxyAuth, async (req, res) => {
+  const sessionId = extractTmdbSessionId(req);
+  if (!sessionId) {
+    return res.status(200).json({ ok: true });
+  }
+
+  try {
+    await tmdbRequest("/authentication/session", {
+      method: "DELETE",
+      body: { session_id: sessionId }
+    });
+  } catch (_) {
+    // Ignore upstream error during session revocation
+  }
+
+  return res.status(200).json({ ok: true });
+});
+
+/**
+ * GET /api/tmdb/account
+ * Header: X-TMDb-Session-Id
+ */
+app.get("/api/tmdb/account", requireProxyAuth, async (req, res) => {
+  const sessionId = extractTmdbSessionId(req);
+  if (!sessionId) {
+    return res.status(401).json({
+      ok: false,
+      error: "TMDb session is required. Please connect your TMDb account."
+    });
+  }
+
+  try {
+    const accountData = await tmdbRequest("/account", {
+      method: "GET",
+      queryParams: { session_id: sessionId }
+    });
+
+    return res.status(200).json({
+      ok: true,
+      account: {
+        id: accountData.id || 0,
+        username: accountData.username || "",
+        name: accountData.name || accountData.username || "",
+        avatarUrl: buildAccountAvatarUrl(accountData)
+      }
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 502).json({
+      ok: false,
+      error: "Unable to load TMDb account profile."
+    });
+  }
+});
+
+/**
+ * POST /api/tmdb/sync
+ * Performs two-way synchronization for Favorites, Watchlist, and Ratings.
+ */
+app.post("/api/tmdb/sync", requireProxyAuth, async (req, res) => {
+  const sessionId = extractTmdbSessionId(req);
+  if (!sessionId) {
+    return res.status(401).json({
+      ok: false,
+      error: "Your TMDb session has expired. Please reconnect your TMDb account."
+    });
+  }
+
+  const body = req.body || {};
+  const language = validateLanguage(body.language).valid ? body.language : "en-US";
+  let accountId = typeof body.accountId === "number" && body.accountId > 0 ? body.accountId : 0;
+
+  try {
+    if (!accountId) {
+      const accountData = await tmdbRequest("/account", {
+        method: "GET",
+        queryParams: { session_id: sessionId }
+      });
+      accountId = accountData.id || 0;
+    }
+
+    if (!accountId) {
+      return res.status(401).json({
+        ok: false,
+        error: "Unable to verify TMDb account session."
+      });
+    }
+
+    let pushedCount = 0;
+
+    // 1. Push local Favorites -> TMDb
+    const localFavorites = Array.isArray(body.favorites) ? body.favorites.slice(0, 60) : [];
+    for (const fav of localFavorites) {
+      const tmdbId = parseInt(fav && fav.tmdbId, 10);
+      const mediaType = fav && fav.mediaType === "tv" ? "tv" : "movie";
+      if (tmdbId > 0) {
+        try {
+          await tmdbRequest(`/account/${accountId}/favorite`, {
+            method: "POST",
+            queryParams: { session_id: sessionId },
+            body: {
+              media_type: mediaType,
+              media_id: tmdbId,
+              favorite: fav.favorite !== false
+            }
+          });
+          pushedCount += 1;
+        } catch (_) {
+          // Continue syncing remaining items
+        }
+      }
+    }
+
+    // 2. Push local Watchlist -> TMDb
+    const localWatchlist = Array.isArray(body.watchlist) ? body.watchlist.slice(0, 60) : [];
+    for (const wl of localWatchlist) {
+      const tmdbId = parseInt(wl && wl.tmdbId, 10);
+      const mediaType = wl && wl.mediaType === "tv" ? "tv" : "movie";
+      if (tmdbId > 0) {
+        try {
+          await tmdbRequest(`/account/${accountId}/watchlist`, {
+            method: "POST",
+            queryParams: { session_id: sessionId },
+            body: {
+              media_type: mediaType,
+              media_id: tmdbId,
+              watchlist: wl.watchlist !== false
+            }
+          });
+          pushedCount += 1;
+        } catch (_) {
+          // Continue syncing remaining items
+        }
+      }
+    }
+
+    // 3. Push local Ratings -> TMDb
+    const localRatings = Array.isArray(body.ratings) ? body.ratings.slice(0, 60) : [];
+    for (const rt of localRatings) {
+      const tmdbId = parseInt(rt && rt.tmdbId, 10);
+      const mediaType = rt && rt.mediaType === "tv" ? "tv" : "movie";
+      const rawScore = Number(rt && rt.rating);
+      if (tmdbId > 0 && !Number.isNaN(rawScore) && rawScore >= 0.5 && rawScore <= 10.0) {
+        const roundedHalfStep = Math.round(rawScore * 2) / 2;
+        try {
+          await tmdbRequest(`/${mediaType}/${tmdbId}/rating`, {
+            method: "POST",
+            queryParams: { session_id: sessionId },
+            body: { value: roundedHalfStep }
+          });
+          pushedCount += 1;
+        } catch (_) {
+          // Continue syncing remaining items
+        }
+      }
+    }
+
+    // 4. Pull remote Favorites, Watchlist, and Ratings from TMDb
+    const [
+      favMoviesRes,
+      favTvRes,
+      watchMoviesRes,
+      watchTvRes,
+      ratedMoviesRes,
+      ratedTvRes
+    ] = await Promise.all([
+      tmdbRequest(`/account/${accountId}/favorite/movies`, {
+        method: "GET",
+        queryParams: { session_id: sessionId, language, sort_by: "created_at.desc", page: 1 }
+      }).catch(() => ({ results: [] })),
+      tmdbRequest(`/account/${accountId}/favorite/tv`, {
+        method: "GET",
+        queryParams: { session_id: sessionId, language, sort_by: "created_at.desc", page: 1 }
+      }).catch(() => ({ results: [] })),
+      tmdbRequest(`/account/${accountId}/watchlist/movies`, {
+        method: "GET",
+        queryParams: { session_id: sessionId, language, sort_by: "created_at.desc", page: 1 }
+      }).catch(() => ({ results: [] })),
+      tmdbRequest(`/account/${accountId}/watchlist/tv`, {
+        method: "GET",
+        queryParams: { session_id: sessionId, language, sort_by: "created_at.desc", page: 1 }
+      }).catch(() => ({ results: [] })),
+      tmdbRequest(`/account/${accountId}/rated/movies`, {
+        method: "GET",
+        queryParams: { session_id: sessionId, language, sort_by: "created_at.desc", page: 1 }
+      }).catch(() => ({ results: [] })),
+      tmdbRequest(`/account/${accountId}/rated/tv`, {
+        method: "GET",
+        queryParams: { session_id: sessionId, language, sort_by: "created_at.desc", page: 1 }
+      }).catch(() => ({ results: [] }))
+    ]);
+
+    const favorites = [
+      ...(Array.isArray(favMoviesRes.results)
+        ? favMoviesRes.results.map((m) => formatSyncMediaEntry(m, "movie"))
+        : []),
+      ...(Array.isArray(favTvRes.results)
+        ? favTvRes.results.map((t) => formatSyncMediaEntry(t, "tv"))
+        : [])
+    ];
+
+    const watchlist = [
+      ...(Array.isArray(watchMoviesRes.results)
+        ? watchMoviesRes.results.map((m) => formatSyncMediaEntry(m, "movie"))
+        : []),
+      ...(Array.isArray(watchTvRes.results)
+        ? watchTvRes.results.map((t) => formatSyncMediaEntry(t, "tv"))
+        : [])
+    ];
+
+    const ratings = [
+      ...(Array.isArray(ratedMoviesRes.results)
+        ? ratedMoviesRes.results.map((m) => formatSyncMediaEntry(m, "movie"))
+        : []),
+      ...(Array.isArray(ratedTvRes.results)
+        ? ratedTvRes.results.map((t) => formatSyncMediaEntry(t, "tv"))
+        : [])
+    ];
+
+    return res.status(200).json({
+      ok: true,
+      accountId,
+      favorites,
+      watchlist,
+      ratings,
+      pushedCount,
+      syncedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    const status = err.statusCode || 502;
+    return res.status(status).json({
+      ok: false,
+      error:
+        status === 401
+          ? "Your TMDb session has expired. Please reconnect your TMDb account."
+          : "Unable to complete TMDb synchronization right now. Please try again."
+    });
+  }
+});
+
+/**
+ * POST /api/tmdb/account/favorite
+ */
+app.post("/api/tmdb/account/favorite", requireProxyAuth, async (req, res) => {
+  const sessionId = extractTmdbSessionId(req);
+  if (!sessionId) {
+    return res.status(401).json({ ok: false, error: "TMDb session required." });
+  }
+
+  const body = req.body || {};
+  const tmdbId = parseInt(body.tmdbId, 10);
+  const mediaType = body.mediaType === "tv" || body.mediaType === "series" ? "tv" : "movie";
+  const isFavorite = body.favorite !== false;
+  let accountId = parseInt(body.accountId, 10) || 0;
+
+  if (!(tmdbId > 0)) {
+    return res.status(400).json({ ok: false, error: "Valid tmdbId is required." });
+  }
+
+  try {
+    if (!accountId) {
+      const acc = await tmdbRequest("/account", {
+        method: "GET",
+        queryParams: { session_id: sessionId }
+      });
+      accountId = acc.id || 0;
+    }
+
+    await tmdbRequest(`/account/${accountId}/favorite`, {
+      method: "POST",
+      queryParams: { session_id: sessionId },
+      body: {
+        media_type: mediaType,
+        media_id: tmdbId,
+        favorite: isFavorite
+      }
+    });
+
+    return res.status(200).json({ ok: true, tmdbId, mediaType, favorite: isFavorite });
+  } catch (err) {
+    return res.status(err.statusCode || 502).json({
+      ok: false,
+      error: "Unable to update TMDb favorite status."
+    });
+  }
+});
+
+/**
+ * POST /api/tmdb/account/watchlist
+ */
+app.post("/api/tmdb/account/watchlist", requireProxyAuth, async (req, res) => {
+  const sessionId = extractTmdbSessionId(req);
+  if (!sessionId) {
+    return res.status(401).json({ ok: false, error: "TMDb session required." });
+  }
+
+  const body = req.body || {};
+  const tmdbId = parseInt(body.tmdbId, 10);
+  const mediaType = body.mediaType === "tv" || body.mediaType === "series" ? "tv" : "movie";
+  const inWatchlist = body.watchlist !== false;
+  let accountId = parseInt(body.accountId, 10) || 0;
+
+  if (!(tmdbId > 0)) {
+    return res.status(400).json({ ok: false, error: "Valid tmdbId is required." });
+  }
+
+  try {
+    if (!accountId) {
+      const acc = await tmdbRequest("/account", {
+        method: "GET",
+        queryParams: { session_id: sessionId }
+      });
+      accountId = acc.id || 0;
+    }
+
+    await tmdbRequest(`/account/${accountId}/watchlist`, {
+      method: "POST",
+      queryParams: { session_id: sessionId },
+      body: {
+        media_type: mediaType,
+        media_id: tmdbId,
+        watchlist: inWatchlist
+      }
+    });
+
+    return res.status(200).json({ ok: true, tmdbId, mediaType, watchlist: inWatchlist });
+  } catch (err) {
+    return res.status(err.statusCode || 502).json({
+      ok: false,
+      error: "Unable to update TMDb watchlist status."
+    });
+  }
+});
+
+/**
+ * POST /api/tmdb/account/rating
+ */
+app.post("/api/tmdb/account/rating", requireProxyAuth, async (req, res) => {
+  const sessionId = extractTmdbSessionId(req);
+  if (!sessionId) {
+    return res.status(401).json({ ok: false, error: "TMDb session required." });
+  }
+
+  const body = req.body || {};
+  const tmdbId = parseInt(body.tmdbId, 10);
+  const mediaType = body.mediaType === "tv" || body.mediaType === "series" ? "tv" : "movie";
+  const ratingVal = Number(body.rating);
+
+  if (!(tmdbId > 0) || Number.isNaN(ratingVal)) {
+    return res.status(400).json({ ok: false, error: "Valid tmdbId and rating are required." });
+  }
+
+  try {
+    if (ratingVal <= 0) {
+      await tmdbRequest(`/${mediaType}/${tmdbId}/rating`, {
+        method: "DELETE",
+        queryParams: { session_id: sessionId }
+      });
+      return res.status(200).json({ ok: true, tmdbId, mediaType, rating: 0 });
+    }
+
+    const clamped = Math.min(10.0, Math.max(0.5, Math.round(ratingVal * 2) / 2));
+    await tmdbRequest(`/${mediaType}/${tmdbId}/rating`, {
+      method: "POST",
+      queryParams: { session_id: sessionId },
+      body: { value: clamped }
+    });
+
+    return res.status(200).json({ ok: true, tmdbId, mediaType, rating: clamped });
+  } catch (err) {
+    return res.status(err.statusCode || 502).json({
+      ok: false,
+      error: "Unable to update TMDb rating."
+    });
+  }
+});
 
 // 404 Handler for unknown routes
 app.use((req, res) => {
