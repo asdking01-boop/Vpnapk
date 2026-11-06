@@ -55,6 +55,38 @@ class XtreamClient {
     ): Result<Account> = withContext(Dispatchers.IO) {
         try {
             val base = normalizeUrl(serverUrl)
+
+            // Support direct M3U playlist URLs in addition to Xtream Codes servers
+            if (M3uPlaylistParser.isM3uPlaylistUrl(base)) {
+                val m3uRequest = Request.Builder().url(base).get().build()
+                val m3uBody = httpClient.newCall(m3uRequest).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        return@withContext Result.failure(
+                            Exception("M3U server returned HTTP error ${response.code}. Please verify the playlist URL.")
+                        )
+                    }
+                    response.body?.string().orEmpty()
+                }
+                if (!m3uBody.contains("#EXTINF", ignoreCase = true) && !m3uBody.contains("#EXTM3U", ignoreCase = true)) {
+                    return@withContext Result.failure(
+                        Exception("The provided URL is not a valid M3U playlist.")
+                    )
+                }
+                val account = Account(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = user.ifBlank { "M3U Playlist" },
+                    serverUrl = base,
+                    username = user,
+                    password = pass,
+                    isActive = true,
+                    status = "Active",
+                    expDate = "",
+                    maxConnections = "1",
+                    activationDate = (System.currentTimeMillis() / 1000L).toString()
+                )
+                return@withContext Result.success(account)
+            }
+
             val apiUrl = "$base/player_api.php?username=$user&password=$pass"
             val request = Request.Builder().url(apiUrl).get().build()
 
@@ -137,12 +169,31 @@ class XtreamClient {
     }
 
     /**
+     * Downloads and parses an M3U playlist into Live TV, Movies, and Series categories and entities.
+     */
+    suspend fun fetchM3uPlaylist(account: Account): M3uImportResult? = withContext(Dispatchers.IO) {
+        try {
+            val url = normalizeUrl(account.serverUrl)
+            val request = Request.Builder().url(url).get().build()
+            val body = httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                response.body?.string().orEmpty()
+            }
+            if (body.isBlank()) return@withContext null
+            M3uPlaylistParser.parse(body, account.id)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    /**
      * Refreshes authenticated subscription information (`user_info.exp_date`, `user_info.created_at`,
      * `user_info.status`, and `user_info.max_connections`) for an existing Xtream Codes account.
      * Preserves the existing account ID, name, and active flag.
      */
     suspend fun fetchSubscriptionInfo(account: Account): Result<Account> = withContext(Dispatchers.IO) {
-        if (account.isDemo || account.serverUrl.isBlank() || account.username.isBlank()) {
+        if (account.isDemo || account.serverUrl.isBlank() || account.username.isBlank() || M3uPlaylistParser.isM3uPlaylistUrl(account.serverUrl)) {
             return@withContext Result.success(account)
         }
         try {
@@ -497,6 +548,11 @@ class XtreamClient {
                             var rating = 7.0
                             var rawYear = ""
                             var serverAddedMs = 0L
+                            var tmdbId = 0
+                            var plot = ""
+                            var genre = ""
+                            var cast = ""
+                            var director = ""
 
                             while (reader.hasNext()) {
                                 val field = reader.nextName()
@@ -553,6 +609,17 @@ class XtreamClient {
                                             serverAddedMs = parsed
                                         }
                                     }
+                                    "tmdb", "tmdb_id" -> {
+                                        tmdbId = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt()
+                                        } else {
+                                            reader.nextString().trim().toIntOrNull() ?: 0
+                                        }
+                                    }
+                                    "plot" -> plot = reader.nextString()
+                                    "genre" -> genre = reader.nextString()
+                                    "cast" -> cast = reader.nextString()
+                                    "director" -> director = reader.nextString()
                                     else -> reader.skipValue()
                                 }
                             }
@@ -587,7 +654,12 @@ class XtreamClient {
                                         groupKey = orderInfo.groupKey,
                                         seq = orderInfo.seq,
                                         groupOrder = orderInfo.groupOrder,
-                                        serverOrder = orderInfo.serverOrder
+                                        serverOrder = orderInfo.serverOrder,
+                                        plot = plot,
+                                        genre = genre,
+                                        cast = cast,
+                                        director = director,
+                                        tmdbId = tmdbId
                                     )
                                 )
                                 totalCount++
@@ -646,6 +718,11 @@ class XtreamClient {
                             var rating = 8.0
                             var rawYear = ""
                             var serverAddedMs = 0L
+                            var tmdbId = 0
+                            var plot = ""
+                            var genre = ""
+                            var cast = ""
+                            var director = ""
 
                             while (reader.hasNext()) {
                                 val field = reader.nextName()
@@ -698,6 +775,17 @@ class XtreamClient {
                                             serverAddedMs = parsed
                                         }
                                     }
+                                    "tmdb", "tmdb_id" -> {
+                                        tmdbId = if (reader.peek() == JsonToken.NUMBER) {
+                                            reader.nextInt()
+                                        } else {
+                                            reader.nextString().trim().toIntOrNull() ?: 0
+                                        }
+                                    }
+                                    "plot" -> plot = reader.nextString()
+                                    "genre" -> genre = reader.nextString()
+                                    "cast" -> cast = reader.nextString()
+                                    "director" -> director = reader.nextString()
                                     else -> reader.skipValue()
                                 }
                             }
@@ -731,7 +819,12 @@ class XtreamClient {
                                         groupKey = orderInfo.groupKey,
                                         seq = orderInfo.seq,
                                         groupOrder = orderInfo.groupOrder,
-                                        serverOrder = orderInfo.serverOrder
+                                        serverOrder = orderInfo.serverOrder,
+                                        plot = plot,
+                                        genre = genre,
+                                        cast = cast,
+                                        director = director,
+                                        tmdbId = tmdbId
                                     )
                                 )
                                 totalCount++

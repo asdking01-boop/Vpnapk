@@ -1096,5 +1096,106 @@ class ExampleRobolectricTest {
     assertEquals((soonExpMs / 1000L).toString(), saved.expDate)
     assertEquals(createdSec, saved.activationDate)
   }
+
+  @Test
+  fun `tmdb proxy client cleans iptv titles enriches movies and series and never claims connected without real proxy response`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+    val tmdbClient = com.example.data.api.TmdbProxyClient()
+
+    // 1. Clean IPTV titles for TMDb search
+    assertEquals(
+      "Dune Part Two",
+      com.example.data.api.TmdbProxyClient.cleanIptvTitleForTmdb("EN | Dune Part Two (2024) 4K UHD HEVC")
+    )
+    assertEquals(
+      "The Last of Us",
+      com.example.data.api.TmdbProxyClient.cleanIptvTitleForTmdb("US: The Last of Us S01E03 [1080p] [MULTI-SUB]")
+    )
+
+    // 2. Parse proxy metadata JSON and enrich movie + series + seasons + episodes
+    val proxyMovieJson = org.json.JSONObject(
+      """
+      {
+        "tmdbId": 693134,
+        "title": "Dune: Part Two",
+        "overview": "Paul Atreides unites with Chani and the Fremen while on a warpath of revenge.",
+        "posterUrl": "https://image.tmdb.org/t/p/w500/dune2_poster.jpg",
+        "backdropUrl": "https://image.tmdb.org/t/p/w1280/dune2_backdrop.jpg",
+        "rating": 8.4,
+        "releaseDate": "2024-02-27",
+        "year": "2024",
+        "genres": ["Science Fiction", "Adventure"],
+        "cast": ["Timothée Chalamet", "Zendaya", "Rebecca Ferguson"],
+        "director": "Denis Villeneuve",
+        "runtimeMinutes": 167,
+        "seasons": []
+      }
+      """.trimIndent()
+    )
+    val parsedMovieMeta = com.example.data.api.TmdbProxyClient.parseMediaMetadataJson(proxyMovieJson)
+    assertNotNull(parsedMovieMeta)
+    assertEquals(693134, parsedMovieMeta!!.tmdbId)
+    assertEquals("Denis Villeneuve", parsedMovieMeta.director)
+    assertTrue(parsedMovieMeta.cast.contains("Zendaya"))
+
+    val rawMovie = com.example.data.model.MediaItem(
+      id = "vod_693134",
+      streamId = 693134,
+      name = "EN | Dune Part Two (2024) 4K",
+      type = MediaType.MOVIE,
+      categoryId = "cat_scifi",
+      categoryName = "Sci-Fi"
+    )
+    val enrichedMovie = com.example.data.api.TmdbProxyClient.enrichMediaItem(rawMovie, parsedMovieMeta)
+    assertEquals("https://image.tmdb.org/t/p/w500/dune2_poster.jpg", enrichedMovie.streamIcon)
+    assertEquals("https://image.tmdb.org/t/p/w1280/dune2_backdrop.jpg", enrichedMovie.backdrop)
+    assertTrue(enrichedMovie.plot.contains("Paul Atreides"))
+    assertEquals(8.4, enrichedMovie.rating, 0.01)
+    assertEquals("2024", enrichedMovie.year)
+    assertEquals("Denis Villeneuve", enrichedMovie.director)
+    assertEquals(693134, enrichedMovie.tmdbId)
+
+    // 3. Parse M3U playlist with Live TV, Movie, and Series episodes and enrich with TMDb
+    val sampleM3u = """
+      #EXTM3U
+      #EXTINF:-1 tvg-id="bein1" tvg-logo="http://img/bein.png" group-title="Live Sports",Bein Sports 4K 1
+      http://iptv.example.com/live/user/pass/101.m3u8
+      #EXTINF:-1 tvg-logo="" group-title="VOD Sci-Fi",EN | Dune Part Two (2024) 4K
+      http://iptv.example.com/movie/user/pass/5001.mp4
+      #EXTINF:-1 tvg-logo="" group-title="Series Drama",Breaking Bad S01E01 1080p
+      http://iptv.example.com/series/user/pass/7001.mp4
+      #EXTINF:-1 tvg-logo="" group-title="Series Drama",Breaking Bad S01E02 1080p
+      http://iptv.example.com/series/user/pass/7002.mp4
+    """.trimIndent()
+
+    val m3uParsed = com.example.data.api.M3uPlaylistParser.parse(sampleM3u, "acc_m3u_test")
+    assertEquals(1, m3uParsed.liveStreams.size)
+    assertEquals(1, m3uParsed.movies.size)
+    assertEquals(1, m3uParsed.series.size)
+    val seriesEntity = m3uParsed.series.first()
+    val m3uSeriesDetails = m3uParsed.seriesDetailsBySeriesId[seriesEntity.streamId]
+    assertNotNull(m3uSeriesDetails)
+    assertEquals(1, m3uSeriesDetails!!.seasons.size)
+    assertEquals(2, m3uSeriesDetails.seasons.first().episodes.size)
+
+    // 4. Verify connection never claims connected when proxy URL is blank
+    kotlinx.coroutines.runBlocking {
+      val unconfigured = tmdbClient.verifyConnection("")
+      assertEquals(com.example.data.api.TmdbConnectionState.NOT_CONFIGURED, unconfigured.state)
+
+      // Persist enriched movie in Room and verify fields survive round-trip
+      repo.insertMediaBatch(
+        com.example.data.local.entity.MediaItemEntity.fromMediaItemList(listOf(rawMovie), "acc_tmdb_room")
+      )
+      repo.updateTmdbMetadata(enrichedMovie)
+      val loaded = repo.mediaDao.getItemById("vod_693134")?.toMediaItem()
+      assertNotNull(loaded)
+      assertEquals(693134, loaded!!.tmdbId)
+      assertEquals("Denis Villeneuve", loaded.director)
+      assertTrue(loaded.cast.contains("Timothée Chalamet"))
+      assertEquals("https://image.tmdb.org/t/p/w500/dune2_poster.jpg", loaded.streamIcon)
+    }
+  }
 }
 

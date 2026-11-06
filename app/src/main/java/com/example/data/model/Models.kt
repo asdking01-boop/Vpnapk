@@ -82,7 +82,10 @@ data class MediaItem(
     val groupKey: String = "",
     val seq: Int = 0,
     val groupOrder: Int = 0,
-    val serverOrder: Int = 0
+    val serverOrder: Int = 0,
+    val cast: String = "",
+    val director: String = "",
+    val tmdbId: Int = 0
 )
 
 data class Category(
@@ -192,7 +195,9 @@ data class UserSettings(
     val liveChannelOrder: LiveChannelOrder = LiveChannelOrder.SMART,
     val autoCheckUpdates: Boolean = true,
     val backgroundPlayback: Boolean = true,
-    val liveSwipeGesturesEnabled: Boolean = true
+    val liveSwipeGesturesEnabled: Boolean = true,
+    val tmdbProxyUrl: String = "",
+    val tmdbAutoEnrichEnabled: Boolean = true
 )
 
 // Xtream Codes API DTOs

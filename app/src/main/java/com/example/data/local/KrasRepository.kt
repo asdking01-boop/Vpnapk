@@ -400,7 +400,9 @@ class KrasRepository(context: Context) {
             liveChannelOrder = liveOrder,
             autoCheckUpdates = prefs.getBoolean("autoCheckUpdates", true),
             backgroundPlayback = prefs.getBoolean("backgroundPlayback", true),
-            liveSwipeGesturesEnabled = prefs.getBoolean("liveSwipeGesturesEnabled", true)
+            liveSwipeGesturesEnabled = prefs.getBoolean("liveSwipeGesturesEnabled", true),
+            tmdbProxyUrl = prefs.getString("tmdbProxyUrl", "") ?: "",
+            tmdbAutoEnrichEnabled = prefs.getBoolean("tmdbAutoEnrichEnabled", true)
         )
     }
 
@@ -421,6 +423,8 @@ class KrasRepository(context: Context) {
             putBoolean("autoCheckUpdates", settings.autoCheckUpdates)
             putBoolean("backgroundPlayback", settings.backgroundPlayback)
             putBoolean("liveSwipeGesturesEnabled", settings.liveSwipeGesturesEnabled)
+            putString("tmdbProxyUrl", settings.tmdbProxyUrl.trim())
+            putBoolean("tmdbAutoEnrichEnabled", settings.tmdbAutoEnrichEnabled)
         }.apply()
     }
 
@@ -585,6 +589,53 @@ class KrasRepository(context: Context) {
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    suspend fun updateTmdbMetadata(item: MediaItem) = withContext(Dispatchers.IO) {
+        if (item.id.isBlank()) return@withContext
+        try {
+            mediaDao.updateTmdbMetadata(
+                id = item.id,
+                posterUrl = item.streamIcon,
+                backdropUrl = item.backdrop.ifBlank { item.streamIcon },
+                plot = item.plot,
+                genre = item.genre,
+                cast = item.cast,
+                director = item.director,
+                rating = item.rating,
+                year = item.year,
+                tmdbId = item.tmdbId
+            )
+            val favs = getFavoritesRaw()
+            if (favs.any { it.mediaId == item.id }) {
+                val updatedFavs = favs.map { fav ->
+                    if (fav.mediaId == item.id) {
+                        fav.copy(
+                            posterUrl = item.streamIcon.ifBlank { fav.posterUrl },
+                            rating = if (item.rating > 0.0) item.rating else fav.rating,
+                            year = item.year.ifBlank { fav.year }
+                        )
+                    } else {
+                        fav
+                    }
+                }
+                saveFavoritesList(updatedFavs)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    suspend fun getUnenrichedMedia(
+        accountId: String,
+        type: String,
+        limit: Int = 30
+    ): List<MediaItem> = withContext(Dispatchers.IO) {
+        try {
+            mediaDao.getUnenrichedMedia(accountId, type, limit).map { it.toMediaItem() }
+        } catch (e: Exception) {
+            emptyList()
         }
     }
 

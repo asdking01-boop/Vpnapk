@@ -158,6 +158,8 @@ class MainActivity : ComponentActivity() {
                 val totalSeriesCount by viewModel.totalSeriesCount.collectAsState()
                 val totalLiveCount by viewModel.totalLiveCount.collectAsState()
                 val updateState by viewModel.updateState.collectAsState()
+                val tmdbHealthState by viewModel.tmdbHealthState.collectAsState()
+                val isTmdbVerifying by viewModel.isTmdbVerifying.collectAsState()
 
                 // Play original cinematic intro sound on cold start launch only
                 LaunchedEffect(Unit) {
@@ -549,7 +551,10 @@ class MainActivity : ComponentActivity() {
                                         onClearCache = { viewModel.clearCache() },
                                         updateState = updateState,
                                         onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) },
-                                        onRefreshSubscriptionClick = { viewModel.refreshSubscriptionInfo() }
+                                        onRefreshSubscriptionClick = { viewModel.refreshSubscriptionInfo() },
+                                        tmdbHealthState = tmdbHealthState,
+                                        isTmdbVerifying = isTmdbVerifying,
+                                        onVerifyTmdbConnectionClick = { url -> viewModel.verifyTmdbProxyConnection(url) }
                                     )
                                 }
                             }

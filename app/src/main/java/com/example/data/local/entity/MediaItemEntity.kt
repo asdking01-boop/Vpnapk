@@ -55,7 +55,12 @@ data class MediaItemEntity(
     val groupKey: String = ChannelNameNormalizer.normalize(name).groupKey,
     val seq: Int = ChannelNameNormalizer.normalize(name).seq,
     val groupOrder: Int = 0,
-    val serverOrder: Int = 0
+    val serverOrder: Int = 0,
+    val plot: String = "",
+    val genre: String = "",
+    val cast: String = "",
+    val director: String = "",
+    val tmdbId: Int = 0
 ) {
     fun toMediaItem(): MediaItem {
         val canonicalQuality = quality.ifBlank { resolution }
@@ -73,13 +78,18 @@ data class MediaItemEntity(
             year = year,
             resolution = canonicalQuality,
             quality = canonicalQuality,
+            plot = plot,
+            genre = genre,
             streamUrl = streamUrl,
             containerExtension = containerExtension,
             addedTimestamp = addedTimestamp,
             groupKey = groupKey,
             seq = seq,
             groupOrder = groupOrder,
-            serverOrder = serverOrder
+            serverOrder = serverOrder,
+            cast = cast,
+            director = director,
+            tmdbId = tmdbId
         )
     }
 
@@ -141,7 +151,12 @@ data class MediaItemEntity(
                 groupKey = item.groupKey.ifBlank { norm.groupKey },
                 seq = if (item.groupKey.isNotBlank()) item.seq else norm.seq,
                 groupOrder = groupOrderOverride ?: item.groupOrder,
-                serverOrder = serverOrderOverride ?: item.serverOrder
+                serverOrder = serverOrderOverride ?: item.serverOrder,
+                plot = item.plot,
+                genre = item.genre,
+                cast = item.cast,
+                director = item.director,
+                tmdbId = item.tmdbId
             )
         }
 
@@ -176,7 +191,12 @@ data class MediaItemEntity(
                     groupKey = info.groupKey,
                     seq = info.seq,
                     groupOrder = info.groupOrder,
-                    serverOrder = info.serverOrder
+                    serverOrder = info.serverOrder,
+                    plot = item.plot,
+                    genre = item.genre,
+                    cast = item.cast,
+                    director = item.director,
+                    tmdbId = item.tmdbId
                 )
             }
         }

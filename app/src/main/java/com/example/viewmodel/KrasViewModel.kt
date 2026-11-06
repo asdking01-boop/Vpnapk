@@ -6,6 +6,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
 import com.example.KrasApplication
+import com.example.data.api.M3uPlaylistParser
+import com.example.data.api.TmdbConnectionState
+import com.example.data.api.TmdbHealthResult
+import com.example.data.api.TmdbProxyClient
 import com.example.data.api.XtreamClient
 import com.example.data.local.ChannelNameNormalizer
 import com.example.data.local.KrasRepository
@@ -35,13 +39,30 @@ import java.io.StringWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = KrasRepository(application)
     private val apiClient = XtreamClient()
+    private val tmdbProxyClient = TmdbProxyClient()
     private val appUpdater = AppUpdater()
     val playerWrapper = ExoPlayerWrapper(application)
+
+    // M3U parsed series details cache (seriesId -> SeriesDetails)
+    private val m3uSeriesDetailsMap = ConcurrentHashMap<Int, SeriesDetails>()
+
+    // TMDb Proxy Connection & Health State (never claims connected until real HTTP check succeeds)
+    private val _tmdbHealthState = MutableStateFlow(
+        TmdbHealthResult(
+            state = TmdbConnectionState.NOT_CONFIGURED,
+            message = "Configure your server-side TMDb proxy URL to enable metadata enrichment."
+        )
+    )
+    val tmdbHealthState = _tmdbHealthState.asStateFlow()
+
+    private val _isTmdbVerifying = MutableStateFlow(false)
+    val isTmdbVerifying = _isTmdbVerifying.asStateFlow()
 
     // Accounts
     private val _accounts = MutableStateFlow<List<Account>>(emptyList())
@@ -250,6 +271,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Start background content sync
                 loadContentForAccount(active, isBackgroundRefresh = true)
+
+                // Verify TMDb proxy connection if configured
+                if (_userSettings.value.tmdbProxyUrl.isNotBlank()) {
+                    verifyTmdbProxyConnection(_userSettings.value.tmdbProxyUrl)
+                }
 
                 // Clean up old downloaded APKs after update & run automatic 6-hour update check
                 checkForUpdatesOnLaunchIfNeeded()
@@ -557,7 +583,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         liveSortByQuality = false
     }
 
-    // --- Core Memory-Safe Batch Syncing ---
+    // --- Core Memory-Safe Batch Syncing (Xtream Codes + M3U Playlists + TMDb Enrichment) ---
     private fun loadContentForAccount(account: Account, isBackgroundRefresh: Boolean = false) {
         syncJob?.cancel()
         syncJob = viewModelScope.launch(Dispatchers.IO) {
@@ -583,6 +609,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     repository.saveCategories(account.id, MediaType.LIVE, liveCatEntities)
 
                     loadInitialPagesFromRoom(account)
+                    enrichCatalogWithTmdb(account)
                 } catch (e: Exception) {
                     e.printStackTrace()
                     loadDemoDataFallback()
@@ -594,6 +621,50 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             try {
+                // Branch A: Direct M3U Playlist Import
+                if (M3uPlaylistParser.isM3uPlaylistUrl(account.serverUrl)) {
+                    _syncProgress.value = "Importing M3U Playlist..."
+                    val m3uResult = apiClient.fetchM3uPlaylist(account)
+                    if (m3uResult != null) {
+                        repository.saveCategories(account.id, MediaType.LIVE, m3uResult.liveCategories)
+                        repository.saveCategories(account.id, MediaType.MOVIE, m3uResult.movieCategories)
+                        repository.saveCategories(account.id, MediaType.SERIES, m3uResult.seriesCategories)
+
+                        _liveCategories.value = m3uResult.liveCategories.map { it.toCategory() }
+                        _movieCategories.value = m3uResult.movieCategories.map { it.toCategory() }
+                        _seriesCategories.value = m3uResult.seriesCategories.map { it.toCategory() }
+
+                        repository.clearOldRows(account.id, "LIVE")
+                        repository.clearOldRows(account.id, "MOVIE")
+                        repository.clearOldRows(account.id, "SERIES")
+
+                        m3uResult.liveStreams.chunked(500).forEach { batch ->
+                            repository.insertMediaBatch(batch)
+                        }
+                        m3uResult.movies.chunked(500).forEach { batch ->
+                            repository.insertMediaBatch(batch)
+                        }
+                        m3uResult.series.chunked(500).forEach { batch ->
+                            repository.insertMediaBatch(batch)
+                        }
+
+                        m3uSeriesDetailsMap.clear()
+                        m3uSeriesDetailsMap.putAll(m3uResult.seriesDetailsBySeriesId)
+
+                        _syncProgress.value = "M3U Playlist imported"
+                        delay(400)
+                        _syncProgress.value = null
+
+                        loadInitialPagesFromRoom(account)
+                        enrichCatalogWithTmdb(account)
+                    } else {
+                        _errorMessage.value = "Unable to download or parse M3U playlist."
+                        loadInitialPagesFromRoom(account)
+                    }
+                    return@launch
+                }
+
+                // Branch B: Xtream Codes Server Sync
                 // Step 0: Refresh Account Subscription Info (user_info.exp_date, created_at, status)
                 apiClient.fetchSubscriptionInfo(account).onSuccess { refreshed ->
                     repository.updateAccountSubscription(refreshed)
@@ -664,6 +735,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 // Step 5: Refresh UI with updated paged content from Room
                 loadInitialPagesFromRoom(account)
 
+                // Step 6: Automatically enrich imported Movies & TV Series metadata via server-side TMDb proxy
+                enrichCatalogWithTmdb(account)
+
             } catch (oom: OutOfMemoryError) {
                 handleOom(oom, "Out of memory during Xtream catalog synchronization")
                 loadInitialPagesFromRoom(account)
@@ -676,6 +750,134 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _isRefreshing.value = false
                 _syncProgress.value = null
             }
+        }
+    }
+
+    /**
+     * Verifies the server-side TMDb proxy connection by making a real HTTP request to `/api/tmdb/health`.
+     * Never claims TMDb is connected unless the backend proxy responds with `ok: true` and `tmdbConnected: true`.
+     */
+    fun verifyTmdbProxyConnection(proxyUrl: String = _userSettings.value.tmdbProxyUrl) {
+        val trimmed = proxyUrl.trim()
+        if (trimmed.isBlank()) {
+            _tmdbHealthState.value = TmdbHealthResult(
+                state = TmdbConnectionState.NOT_CONFIGURED,
+                message = "Configure your server-side TMDb proxy URL to enable metadata enrichment."
+            )
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _isTmdbVerifying.value = true
+            try {
+                val result = tmdbProxyClient.verifyConnection(trimmed)
+                _tmdbHealthState.value = result
+                if (result.state == TmdbConnectionState.CONNECTED && _userSettings.value.tmdbAutoEnrichEnabled) {
+                    _activeAccount.value?.let { active ->
+                        enrichCatalogWithTmdb(active)
+                    }
+                }
+            } catch (e: Exception) {
+                _tmdbHealthState.value = TmdbHealthResult(
+                    state = TmdbConnectionState.PROXY_UNREACHABLE,
+                    message = e.message ?: "Unable to reach TMDb proxy server."
+                )
+            } finally {
+                _isTmdbVerifying.value = false
+            }
+        }
+    }
+
+    /**
+     * Automatically fetches posters, backdrops, descriptions, ratings, release years, genres, cast,
+     * and directors from the server-side TMDb proxy for imported Movies and TV Series.
+     */
+    private suspend fun enrichCatalogWithTmdb(account: Account) = withContext(Dispatchers.IO) {
+        val settings = _userSettings.value
+        val proxyUrl = settings.tmdbProxyUrl.trim()
+        if (!settings.tmdbAutoEnrichEnabled || proxyUrl.isBlank()) return@withContext
+
+        val health = tmdbProxyClient.verifyConnection(proxyUrl)
+        _tmdbHealthState.value = health
+        if (health.state != TmdbConnectionState.CONNECTED) return@withContext
+
+        try {
+            val moviesToEnrich = (
+                _movies.value.filter { it.tmdbId == 0 || it.plot.isBlank() || it.streamIcon.isBlank() } +
+                    repository.getUnenrichedMedia(account.id, "MOVIE", 25)
+                ).distinctBy { it.id }.take(25)
+
+            var updatedAny = false
+            for (movie in moviesToEnrich) {
+                val meta = tmdbProxyClient.fetchMovieMetadata(
+                    rawProxyUrl = proxyUrl,
+                    rawTitle = movie.name,
+                    year = movie.year,
+                    tmdbId = movie.tmdbId
+                )
+                if (meta != null) {
+                    val enriched = TmdbProxyClient.enrichMediaItem(movie, meta)
+                    repository.updateTmdbMetadata(enriched)
+                    applyEnrichedTmdbItemToState(enriched)
+                    updatedAny = true
+                }
+            }
+
+            val seriesToEnrich = (
+                _series.value.filter { it.tmdbId == 0 || it.plot.isBlank() || it.streamIcon.isBlank() } +
+                    repository.getUnenrichedMedia(account.id, "SERIES", 25)
+                ).distinctBy { it.id }.take(25)
+
+            for (seriesItem in seriesToEnrich) {
+                val meta = tmdbProxyClient.fetchTvMetadata(
+                    rawProxyUrl = proxyUrl,
+                    rawTitle = seriesItem.name,
+                    year = seriesItem.year,
+                    tmdbId = seriesItem.tmdbId
+                )
+                if (meta != null) {
+                    val enriched = TmdbProxyClient.enrichMediaItem(seriesItem, meta)
+                    repository.updateTmdbMetadata(enriched)
+                    applyEnrichedTmdbItemToState(enriched)
+                    updatedAny = true
+                }
+            }
+
+            if (updatedAny) {
+                val movieCats = _movieCategories.value
+                val seriesCats = _seriesCategories.value
+                _latestMoviesForCategory.value = repository.getLatestByCategory(account.id, "MOVIE", movieCatFilter, 20)
+                _latestSeriesForCategory.value = repository.getLatestByCategory(account.id, "SERIES", seriesCatFilter, 20)
+                _latestMoviesByCategoryMap.value = repository.getLatestForAllCategories(account.id, "MOVIE", movieCats, 20)
+                _latestSeriesByCategoryMap.value = repository.getLatestForAllCategories(account.id, "SERIES", seriesCats, 20)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun applyEnrichedTmdbItemToState(enriched: MediaItem) {
+        if (_movies.value.any { it.id == enriched.id }) {
+            _movies.value = _movies.value.map { if (it.id == enriched.id) enriched else it }
+        }
+        if (_latestMoviesForCategory.value.any { it.id == enriched.id }) {
+            _latestMoviesForCategory.value = _latestMoviesForCategory.value.map { if (it.id == enriched.id) enriched else it }
+        }
+        if (_series.value.any { it.id == enriched.id }) {
+            _series.value = _series.value.map { if (it.id == enriched.id) enriched else it }
+        }
+        if (_latestSeriesForCategory.value.any { it.id == enriched.id }) {
+            _latestSeriesForCategory.value = _latestSeriesForCategory.value.map { if (it.id == enriched.id) enriched else it }
+        }
+        if (_searchResults.value.any { it.id == enriched.id }) {
+            _searchResults.value = _searchResults.value.map { if (it.id == enriched.id) enriched else it }
+        }
+        _nowPlayingItem.value?.let { current ->
+            if (current.id == enriched.id) {
+                _nowPlayingItem.value = enriched
+            }
+        }
+        if (_favorites.value.any { it.mediaId == enriched.id }) {
+            _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder)
         }
     }
 
@@ -1091,7 +1293,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- On-Demand Series Details ---
+    // --- On-Demand Series Details (Xtream Codes + M3U + Server-Side TMDb Proxy Enrichment) ---
     fun loadSeriesDetails(seriesItem: MediaItem) {
         if (_currentSeriesDetails.value?.seriesId != seriesItem.streamId) {
             _currentSeriesDetails.value = null
@@ -1100,22 +1302,89 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             _isSeriesDetailsLoading.value = true
             try {
                 val active = _activeAccount.value
+                var baseDetails: SeriesDetails? = null
+
                 if (active != null && !active.isDemo) {
-                    val details = withContext(Dispatchers.IO) {
-                        apiClient.getSeriesDetails(active, seriesItem.streamId)
-                    }
-                    if (details != null) {
-                        _currentSeriesDetails.value = details
-                        if (details.quality.isNotBlank()) {
-                            applyDetectedQualityToItem(seriesItem.id, details.quality)
+                    baseDetails = m3uSeriesDetailsMap[seriesItem.streamId]
+                        ?: withContext(Dispatchers.IO) {
+                            if (!M3uPlaylistParser.isM3uPlaylistUrl(active.serverUrl)) {
+                                apiClient.getSeriesDetails(active, seriesItem.streamId)
+                            } else {
+                                null
+                            }
                         }
-                        return@launch
+                }
+
+                if (baseDetails == null) {
+                    baseDetails = if (active?.isDemo == true) {
+                        SampleData.getSampleSeriesDetails(seriesItem.streamId)
+                    } else {
+                        SeriesDetails(
+                            seriesId = seriesItem.streamId,
+                            name = seriesItem.name,
+                            cover = seriesItem.streamIcon,
+                            backdrop = seriesItem.backdrop.ifBlank { seriesItem.streamIcon },
+                            plot = seriesItem.plot,
+                            cast = seriesItem.cast,
+                            director = seriesItem.director,
+                            genre = seriesItem.genre.ifBlank { seriesItem.categoryName },
+                            releaseDate = seriesItem.year,
+                            rating = seriesItem.rating,
+                            seasons = emptyList(),
+                            quality = seriesItem.quality.ifBlank { seriesItem.resolution }
+                        )
                     }
                 }
-                _currentSeriesDetails.value = SampleData.getSampleSeriesDetails(seriesItem.streamId)
+
+                _currentSeriesDetails.value = baseDetails
+                if (baseDetails.quality.isNotBlank()) {
+                    applyDetectedQualityToItem(seriesItem.id, baseDetails.quality)
+                }
+
+                // Enrich Series, Cast, Seasons, and Episodes via Server-Side TMDb Proxy if configured
+                val settings = _userSettings.value
+                val proxyUrl = settings.tmdbProxyUrl.trim()
+                if (settings.tmdbAutoEnrichEnabled && proxyUrl.isNotBlank()) {
+                    withContext(Dispatchers.IO) {
+                        val tvMeta = tmdbProxyClient.fetchTvMetadata(
+                            rawProxyUrl = proxyUrl,
+                            rawTitle = seriesItem.name,
+                            year = seriesItem.year.ifBlank { baseDetails.releaseDate.take(4) },
+                            tmdbId = seriesItem.tmdbId
+                        )
+                        if (tvMeta != null) {
+                            val seasonNumsToFetch = if (baseDetails.seasons.isNotEmpty()) {
+                                baseDetails.seasons.map { it.seasonNumber }.distinct()
+                            } else {
+                                tvMeta.seasons.map { it.seasonNumber }.distinct().take(5)
+                            }
+                            val seasonEpMap = LinkedHashMap<Int, List<com.example.data.api.TmdbEpisodeMetadata>>()
+                            for (sNum in seasonNumsToFetch) {
+                                val eps = tmdbProxyClient.fetchTvSeasonEpisodes(proxyUrl, tvMeta.tmdbId, sNum)
+                                if (eps.isNotEmpty()) {
+                                    seasonEpMap[sNum] = eps
+                                }
+                            }
+                            val enrichedDetails = TmdbProxyClient.enrichSeriesDetails(
+                                details = baseDetails,
+                                metadata = tvMeta,
+                                seasonEpisodesMap = seasonEpMap
+                            )
+                            _currentSeriesDetails.value = enrichedDetails
+                            if (m3uSeriesDetailsMap.containsKey(seriesItem.streamId)) {
+                                m3uSeriesDetailsMap[seriesItem.streamId] = enrichedDetails
+                            }
+                            val enrichedItem = TmdbProxyClient.enrichMediaItem(seriesItem, tvMeta)
+                            repository.updateTmdbMetadata(enrichedItem)
+                            applyEnrichedTmdbItemToState(enrichedItem)
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _currentSeriesDetails.value = SampleData.getSampleSeriesDetails(seriesItem.streamId)
+                if (_currentSeriesDetails.value == null) {
+                    _currentSeriesDetails.value = SampleData.getSampleSeriesDetails(seriesItem.streamId)
+                }
             } finally {
                 _isSeriesDetailsLoading.value = false
             }
@@ -1254,8 +1523,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 try {
                     val active = _activeAccount.value
                     val details = _currentSeriesDetails.value?.takeIf { it.seriesId == mediaItem.streamId }
+                        ?: m3uSeriesDetailsMap[mediaItem.streamId]
                         ?: withContext(Dispatchers.IO) {
-                            if (active != null && !active.isDemo) {
+                            if (active != null && !active.isDemo && !M3uPlaylistParser.isM3uPlaylistUrl(active.serverUrl)) {
                                 apiClient.getSeriesDetails(active, mediaItem.streamId)
                             } else {
                                 SampleData.getSampleSeriesDetails(mediaItem.streamId)
@@ -1293,17 +1563,35 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         // Step 2b: For movies, also check get_vod_info in background for video width/height/codec/framerate
+        // and enrich movie metadata from server-side TMDb proxy if configured
         val active = _activeAccount.value
-        if (mediaItem.type == MediaType.MOVIE && active != null && !active.isDemo) {
+        if (mediaItem.type == MediaType.MOVIE) {
             viewModelScope.launch(Dispatchers.IO) {
                 try {
-                    val vodQuality = apiClient.getVodVideoInfo(
-                        account = active,
-                        vodId = mediaItem.streamId,
-                        fallbackQuality = mediaItem.quality.ifBlank { mediaItem.resolution }
-                    )
-                    if (!vodQuality.isNullOrBlank() && playerWrapper.detectedQualityBadge.value.isBlank()) {
-                        applyDetectedQualityToItem(mediaItem.id, vodQuality)
+                    if (active != null && !active.isDemo && !M3uPlaylistParser.isM3uPlaylistUrl(active.serverUrl)) {
+                        val vodQuality = apiClient.getVodVideoInfo(
+                            account = active,
+                            vodId = mediaItem.streamId,
+                            fallbackQuality = mediaItem.quality.ifBlank { mediaItem.resolution }
+                        )
+                        if (!vodQuality.isNullOrBlank() && playerWrapper.detectedQualityBadge.value.isBlank()) {
+                            applyDetectedQualityToItem(mediaItem.id, vodQuality)
+                        }
+                    }
+                    val settings = _userSettings.value
+                    val proxyUrl = settings.tmdbProxyUrl.trim()
+                    if (settings.tmdbAutoEnrichEnabled && proxyUrl.isNotBlank() && (mediaItem.plot.isBlank() || mediaItem.tmdbId == 0)) {
+                        val movieMeta = tmdbProxyClient.fetchMovieMetadata(
+                            rawProxyUrl = proxyUrl,
+                            rawTitle = mediaItem.name,
+                            year = mediaItem.year,
+                            tmdbId = mediaItem.tmdbId
+                        )
+                        if (movieMeta != null) {
+                            val enriched = TmdbProxyClient.enrichMediaItem(mediaItem, movieMeta)
+                            repository.updateTmdbMetadata(enriched)
+                            applyEnrichedTmdbItemToState(enriched)
+                        }
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -1549,6 +1837,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     fun updateSettings(newSettings: UserSettings) {
         val orderChanged = _userSettings.value.liveChannelOrder != newSettings.liveChannelOrder
         val bufferChanged = _userSettings.value.bufferSize != newSettings.bufferSize
+        val tmdbProxyChanged = _userSettings.value.tmdbProxyUrl != newSettings.tmdbProxyUrl ||
+                _userSettings.value.tmdbAutoEnrichEnabled != newSettings.tmdbAutoEnrichEnabled
         KrasMediaPlaybackService.backgroundPlaybackEnabled = newSettings.backgroundPlayback
         _userSettings.value = newSettings
         viewModelScope.launch(Dispatchers.IO) {
@@ -1559,6 +1849,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (orderChanged) {
             refreshLiveChannelsOrder()
+        }
+        if (tmdbProxyChanged) {
+            verifyTmdbProxyConnection(newSettings.tmdbProxyUrl)
         }
     }
 

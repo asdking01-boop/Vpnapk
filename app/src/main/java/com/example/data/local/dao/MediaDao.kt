@@ -57,6 +57,47 @@ interface MediaDao {
     @Query("UPDATE media_items SET quality = :quality, resolution = :quality WHERE id = :id")
     suspend fun updateMediaQuality(id: String, quality: String)
 
+    // --- TMDb Metadata Update & Unenriched Lookup ---
+    @Query("""
+        UPDATE media_items 
+        SET posterUrl = :posterUrl,
+            backdropUrl = :backdropUrl,
+            plot = :plot,
+            genre = :genre,
+            cast = :cast,
+            director = :director,
+            rating = :rating,
+            year = :year,
+            tmdbId = :tmdbId
+        WHERE id = :id
+    """)
+    suspend fun updateTmdbMetadata(
+        id: String,
+        posterUrl: String,
+        backdropUrl: String,
+        plot: String,
+        genre: String,
+        cast: String,
+        director: String,
+        rating: Double,
+        year: String,
+        tmdbId: Int
+    )
+
+    @Query("""
+        SELECT * FROM media_items 
+        WHERE accountId = :accountId 
+          AND type = :type 
+          AND (tmdbId = 0 OR plot = '' OR posterUrl = '')
+        ORDER BY addedTimestamp DESC, streamId DESC
+        LIMIT :limit
+    """)
+    suspend fun getUnenrichedMedia(
+        accountId: String,
+        type: String,
+        limit: Int = 30
+    ): List<MediaItemEntity>
+
     // --- Live TV Paged Queries (Sorted in Room SQLite via Indexes) ---
 
     @Query("""

@@ -29,6 +29,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.BuildConfig
+import com.example.data.api.TmdbConnectionState
+import com.example.data.api.TmdbHealthResult
 import com.example.data.model.Account
 import com.example.data.model.AspectRatioMode
 import com.example.data.model.CardStyle
@@ -58,7 +60,13 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
     updateState: AppUpdateUiState = AppUpdateUiState(),
     onCheckForUpdatesClick: () -> Unit = {},
-    onRefreshSubscriptionClick: () -> Unit = {}
+    onRefreshSubscriptionClick: () -> Unit = {},
+    tmdbHealthState: TmdbHealthResult = TmdbHealthResult(
+        state = TmdbConnectionState.NOT_CONFIGURED,
+        message = "Configure your server-side TMDb proxy URL to enable metadata enrichment."
+    ),
+    isTmdbVerifying: Boolean = false,
+    onVerifyTmdbConnectionClick: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -240,6 +248,27 @@ fun SettingsScreen(
                 onRefreshClick = {
                     currentTimeMs = System.currentTimeMillis()
                     onRefreshSubscriptionClick()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+            )
+        }
+
+        // 1c. Server-Side TMDb Metadata Proxy Card (Never exposes TMDB_API_KEY in APK)
+        item {
+            TmdbBackendProxyCard(
+                userSettings = userSettings,
+                tmdbHealthState = tmdbHealthState,
+                isTmdbVerifying = isTmdbVerifying,
+                onSaveAndVerifyProxy = { proxyUrl, autoEnrich ->
+                    onUpdateSettings(
+                        userSettings.copy(
+                            tmdbProxyUrl = proxyUrl.trim(),
+                            tmdbAutoEnrichEnabled = autoEnrich
+                        )
+                    )
+                    onVerifyTmdbConnectionClick(proxyUrl.trim())
                 },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1395,5 +1424,215 @@ private fun CountdownUnitBox(
             fontWeight = FontWeight.Bold,
             letterSpacing = 0.6.sp
         )
+    }
+}
+
+@Composable
+private fun TmdbBackendProxyCard(
+    userSettings: UserSettings,
+    tmdbHealthState: TmdbHealthResult,
+    isTmdbVerifying: Boolean,
+    onSaveAndVerifyProxy: (String, Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var proxyUrlInput by remember(userSettings.tmdbProxyUrl) {
+        mutableStateOf(userSettings.tmdbProxyUrl)
+    }
+    var autoEnrichEnabled by remember(userSettings.tmdbAutoEnrichEnabled) {
+        mutableStateOf(userSettings.tmdbAutoEnrichEnabled)
+    }
+
+    val statusColor = when (tmdbHealthState.state) {
+        TmdbConnectionState.CONNECTED -> AccentEmerald
+        TmdbConnectionState.NOT_CONFIGURED,
+        TmdbConnectionState.CHECKING -> TextSecondary
+        TmdbConnectionState.SERVER_KEY_MISSING,
+        TmdbConnectionState.PROXY_UNREACHABLE,
+        TmdbConnectionState.TMDB_REJECTED -> KrasRedBright
+    }
+
+    val statusBadgeText = when (tmdbHealthState.state) {
+        TmdbConnectionState.CONNECTED -> "Connected"
+        TmdbConnectionState.NOT_CONFIGURED -> "Not Configured"
+        TmdbConnectionState.CHECKING -> "Verifying..."
+        TmdbConnectionState.SERVER_KEY_MISSING -> "Key Missing"
+        TmdbConnectionState.PROXY_UNREACHABLE -> "Unreachable"
+        TmdbConnectionState.TMDB_REJECTED -> "Auth Error"
+    }
+
+    Box(
+        modifier = modifier
+            .liquidGlassPanel(cornerRadius = 20.dp)
+            .testTag("settings_tmdb_proxy_card")
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(KrasRed.copy(alpha = 0.18f))
+                            .border(1.dp, KrasRedBright.copy(alpha = 0.45f), RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MovieFilter,
+                            contentDescription = "TMDb Metadata Proxy",
+                            tint = KrasRedBright,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "TMDb Metadata Proxy",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontFamily = OutfitFontFamily,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Server-side TMDB_API_KEY enrichment for Xtream & M3U",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                // Live Connection Status Badge (only shows Connected after real /api/tmdb/health check succeeds)
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(statusColor.copy(alpha = 0.16f))
+                        .border(1.dp, statusColor.copy(alpha = 0.55f), RoundedCornerShape(50))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                        .testTag("tmdb_proxy_status_badge"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(statusColor)
+                    )
+                    Text(
+                        text = statusBadgeText,
+                        color = statusColor,
+                        fontSize = 11.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+            }
+
+            // Auto-enrich toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text(
+                        text = "Automatic TMDb Metadata Enrichment",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "Automatically fetch posters, descriptions, ratings, cast, seasons, and episodes when importing Xtream Codes or M3U playlists",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+                }
+                Switch(
+                    checked = autoEnrichEnabled,
+                    onCheckedChange = { enabled ->
+                        autoEnrichEnabled = enabled
+                        onSaveAndVerifyProxy(proxyUrlInput, enabled)
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = KrasRed,
+                        checkedTrackColor = KrasRedDark
+                    ),
+                    modifier = Modifier.testTag("tmdb_auto_enrich_switch")
+                )
+            }
+
+            // Backend Proxy URL Input
+            OutlinedTextField(
+                value = proxyUrlInput,
+                onValueChange = { proxyUrlInput = it },
+                label = {
+                    Text("Backend Proxy URL (e.g. https://your-proxy.example.com)", fontSize = 12.sp)
+                },
+                placeholder = {
+                    Text("https://your-tmdb-proxy.run.app", color = TextSecondary, fontSize = 12.sp)
+                },
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = KrasRed,
+                    unfocusedBorderColor = GlassBorder,
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedLabelColor = KrasRedBright,
+                    unfocusedLabelColor = TextSecondary
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("tmdb_proxy_url_input")
+            )
+
+            // Save & Test Real Connection Button + Status Message
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = tmdbHealthState.message,
+                    color = if (tmdbHealthState.state == TmdbConnectionState.CONNECTED) AccentEmerald else TextSecondary,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 10.dp)
+                        .testTag("tmdb_proxy_status_message")
+                )
+
+                Button(
+                    onClick = {
+                        onSaveAndVerifyProxy(proxyUrlInput, autoEnrichEnabled)
+                    },
+                    enabled = !isTmdbVerifying,
+                    colors = ButtonDefaults.buttonColors(containerColor = KrasRed),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier.testTag("tmdb_verify_connection_button")
+                ) {
+                    if (isTmdbVerifying) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Testing...", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    } else {
+                        Text("Save & Test", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
     }
 }
