@@ -68,7 +68,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     val isTmdbVerifying = _isTmdbVerifying.asStateFlow()
 
     // TMDb Account & Two-Way Sync UI State (never exposes API keys or session tokens)
-    private val _tmdbAccountState = MutableStateFlow(buildInitialTmdbAccountUiState())
+    private val _tmdbAccountState = MutableStateFlow(TmdbAccountUiState())
     val tmdbAccountState = _tmdbAccountState.asStateFlow()
 
     // Accounts
@@ -143,7 +143,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     val downloads = _downloads.asStateFlow()
 
     // Settings
-    private val _userSettings = MutableStateFlow(repository.getUserSettings())
+    private val _userSettings = MutableStateFlow(UserSettings())
     val userSettings = _userSettings.asStateFlow()
 
     // UI States
@@ -180,10 +180,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLiveMiniPlayerActive = MutableStateFlow(false)
     val isLiveMiniPlayerActive = _isLiveMiniPlayerActive.asStateFlow()
 
-    private val _recentLiveChannels = MutableStateFlow<List<MediaItem>>(repository.getRecentLiveChannels())
+    private val _recentLiveChannels = MutableStateFlow<List<MediaItem>>(emptyList())
     val recentLiveChannels = _recentLiveChannels.asStateFlow()
 
-    private val _lastWatchedLiveChannel = MutableStateFlow<MediaItem?>(repository.getLastWatchedLiveChannel())
+    private val _lastWatchedLiveChannel = MutableStateFlow<MediaItem?>(null)
     val lastWatchedLiveChannel = _lastWatchedLiveChannel.asStateFlow()
 
     // In-App Updater State
@@ -226,7 +226,6 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val pageSize = 40
 
     init {
-        KrasMediaPlaybackService.backgroundPlaybackEnabled = _userSettings.value.backgroundPlayback
         playerWrapper.onRealQualityDetected = { realQuality ->
             onRealPlaybackQualityDetected(realQuality)
         }
@@ -270,14 +269,21 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadInitialData() {
         viewModelScope.launch {
             try {
-                val currentOrder = _userSettings.value.liveChannelOrder
-                val (loadedAccounts, active, favs, history, dlList) = withContext(Dispatchers.IO) {
+                val (settings, loadedAccounts, active) = withContext(Dispatchers.IO) {
+                    val s = repository.getUserSettings()
                     val accs = repository.getAccounts()
                     val act = repository.getActiveAccount()
-                    val f = repository.getFavorites(currentOrder, act.id)
+                    Triple(s, accs, act)
+                }
+                _userSettings.value = settings
+                KrasMediaPlaybackService.backgroundPlaybackEnabled = settings.backgroundPlayback
+                val currentOrder = settings.liveChannelOrder
+
+                val (favs, history, dlList) = withContext(Dispatchers.IO) {
+                    val f = repository.getFavorites(currentOrder, active.id)
                     val h = repository.getWatchHistory()
                     val d = repository.getDownloads()
-                    Tuple5(accs, act, f, h, d)
+                    Triple(f, h, d)
                 }
 
                 _accounts.value = loadedAccounts
@@ -292,7 +298,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _lastWatchedLiveChannel.value = withContext(Dispatchers.IO) { repository.getLastWatchedLiveChannel() }
 
                 // Initialize player with buffer setting
-                playerWrapper.initPlayer(_userSettings.value.bufferSize)
+                playerWrapper.initPlayer(settings.bufferSize)
 
                 // Load cached categories and initial pages from Room instantly
                 loadInitialPagesFromRoom(active)

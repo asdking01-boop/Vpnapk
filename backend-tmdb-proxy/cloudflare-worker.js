@@ -5,12 +5,10 @@
  * Required Cloudflare Worker Secret:
  *   - TMDB_API_KEY       : Your TMDb v3 API Key (or v4 Read Access Token)
  *
- * Optional Cloudflare Bindings / Variables:
- *   - DB                 : Cloudflare D1 Database for persistent pending authorizations,
- *                          one-time auth codes, multi-user sessions, and sync items
- *                          (Automatically initializes all tables on first request if bound;
- *                           also includes AES-GCM server-sealed token fallback if D1 is not bound)
- *   - ANDROID_APP_SHA256 : Optional comma-separated SHA-256 signing certificate fingerprints
+ * Optional Storage Bindings (Works automatically with D1, KV, or zero-config AES-256-GCM sealed tokens):
+ *   - DB                 : (Optional) Cloudflare D1 Database binding for persistent sessions & sync cache
+ *   - TMDB_AUTH_KV       : (Optional) Cloudflare KV Namespace binding for pending auth & sessions
+ *   - ANDROID_APP_SHA256 : (Optional) Comma-separated SHA-256 signing certificate fingerprints
  *                          for custom release keys in /.well-known/assetlinks.json
  */
 
@@ -23,6 +21,7 @@ const DEFAULT_ANDROID_SHA256 =
 
 const PENDING_AUTH_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const ONE_TIME_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const SESSION_KV_TTL_SECONDS = 60 * 60 * 24 * 90; // 90 days
 
 // Per-isolate rate limiter & short-lived isolate cache for instant callback->exchange handoff
 const rateLimitBuckets = new Map();
@@ -78,6 +77,14 @@ function getD1(env) {
   if (!env) return null;
   const candidate = env.DB || env.KRAS_TMDB_DB || null;
   return candidate && typeof candidate.prepare === "function" ? candidate : null;
+}
+
+function getKV(env) {
+  if (!env) return null;
+  const candidate = env.TMDB_AUTH_KV || env.KV || env.KRAS_TMDB_KV || null;
+  return candidate && typeof candidate.get === "function" && typeof candidate.put === "function"
+    ? candidate
+    : null;
 }
 
 async function ensureD1Schema(env) {
@@ -289,7 +296,7 @@ async function tmdbFetch(path, params, env, options = {}) {
   if (!apiKey) {
     return {
       ok: false,
-      status: 500,
+      status: 503,
       error: "TMDB_API_KEY is not configured in Cloudflare Worker secrets."
     };
   }
@@ -320,7 +327,7 @@ async function tmdbFetch(path, params, env, options = {}) {
   };
 }
 
-function extractClientToken(request, body = {}) {
+function extractClientToken(request, body = {}, url = null) {
   const headerToken =
     request.headers.get("X-TMDb-Session-Id") ||
     request.headers.get("X-TMDb-Session") ||
@@ -331,6 +338,15 @@ function extractClientToken(request, body = {}) {
   if (authHeader.toLowerCase().startsWith("bearer ")) {
     const token = authHeader.slice(7).trim();
     if (token) return token;
+  }
+
+  if (url && url.searchParams) {
+    const queryToken =
+      url.searchParams.get("clientToken") ||
+      url.searchParams.get("sessionId") ||
+      url.searchParams.get("session_id") ||
+      "";
+    if (queryToken.trim()) return queryToken.trim();
   }
 
   return String(
@@ -417,9 +433,10 @@ function handleAssetLinks(env) {
 // ============================================================================
 
 /**
- * Step 1: POST /api/tmdb/auth/request-token (and /api/tmdb/auth/session/start)
- * Creates a fresh TMDb `request_token`, associates it with `(installationId, krasUserId, stateNonce)`,
- * persists it in D1 `tmdb_auth_requests`, and returns the official TMDb authorization URL.
+ * Step 1: POST / GET /api/tmdb/auth/request-token (and /api/tmdb/auth/session/start)
+ * Creates a fresh TMDb v3 `request_token` via `GET /3/authentication/token/new`,
+ * associates it with `(installationId, krasUserId, stateNonce)`, persists it in D1/KV/cache,
+ * and returns the official TMDb authorization URL (`https://www.themoviedb.org/authenticate/{request_token}?redirect_to=...`).
  */
 async function handleCreateRequestToken(request, url, env) {
   let body = {};
@@ -428,7 +445,10 @@ async function handleCreateRequestToken(request, url, env) {
   }
 
   const appLinkUrl = String(
-    body.appLinkUrl || body.app_link_url || `${url.origin}/app/tmdb-auth`
+    body.appLinkUrl ||
+      body.app_link_url ||
+      url.searchParams.get("appLinkUrl") ||
+      `${url.origin}/app/tmdb-auth`
   ).trim();
   const krasUserId = extractKrasUserId(request, body, url);
   const installationId = extractInstallationId(request, body, url);
@@ -469,6 +489,15 @@ async function handleCreateRequestToken(request, url, env) {
   };
   pendingAuthIsolateCache.set(requestToken, pendingRecord);
 
+  const kv = getKV(env);
+  if (kv) {
+    try {
+      await kv.put(`auth_req:${requestToken}`, JSON.stringify(pendingRecord), {
+        expirationTtl: 900
+      });
+    } catch (_) {}
+  }
+
   const db = await ensureD1Schema(env);
   if (db) {
     try {
@@ -507,18 +536,21 @@ async function handleCreateRequestToken(request, url, env) {
     status: "ok",
     ok: true,
     authSessionId,
+    auth_session_id: authSessionId,
     requestToken,
     request_token: requestToken,
     state: stateNonce,
     authUrl,
     auth_url: authUrl,
+    authenticateUrl: authUrl,
     expiresAt,
     expires_at: expiresAt
   });
 }
 
 /**
- * Helper to create the official TMDb session on the server, persist it in D1,
+ * Helper to create the official TMDb session on the server (`POST /3/authentication/session/new`),
+ * fetch the user's TMDb profile (`GET /3/account`), persist in D1/KV/cache,
  * and issue an opaque `clientToken` + single-use `authCode`.
  */
 async function createAndPersistServerTmdbSession(
@@ -604,13 +636,27 @@ async function createAndPersistServerTmdbSession(
     createdAt: nowMs
   };
 
-  sessionIsolateCache.set(clientToken, sessionRecord);
-  authCodeIsolateCache.set(authCode, {
+  const codeRecord = {
     ...sessionRecord,
     stateNonce,
     consumed: false,
     expiresAtMs: nowMs + ONE_TIME_CODE_TTL_MS
-  });
+  };
+
+  sessionIsolateCache.set(clientToken, sessionRecord);
+  authCodeIsolateCache.set(authCode, codeRecord);
+
+  const kv = getKV(env);
+  if (kv) {
+    try {
+      await Promise.all([
+        kv.put(`auth_code:${authCode}`, JSON.stringify(codeRecord), { expirationTtl: 300 }),
+        kv.put(`session:${clientToken}`, JSON.stringify(sessionRecord), {
+          expirationTtl: SESSION_KV_TTL_SECONDS
+        })
+      ]);
+    } catch (_) {}
+  }
 
   const db = await ensureD1Schema(env);
   if (db) {
@@ -811,7 +857,7 @@ function renderAppReturnPage({ appLinkUrl, customSchemeUrl, androidIntentUrl, is
  * Step 2: GET /api/tmdb/auth/callback
  * Invoked by TMDb after the user signs in on themoviedb.org and approves (or denies) access.
  * Validates the pending authorization, creates the official TMDb session on the server,
- * generates a one-time authorization code (`code`), and redirects to KRAS TV via the
+ * generates a one-time authorization code (`code`), and returns the user to KRAS TV via the
  * verified Android App Link (`https://kras-tmdb-proxy.asdking01.workers.dev/app/tmdb-auth`).
  */
 async function handleAuthCallback(url, env) {
@@ -823,7 +869,16 @@ async function handleAuthCallback(url, env) {
   let installationId = (url.searchParams.get("iid") || "").trim();
 
   const db = await ensureD1Schema(env);
+  const kv = getKV(env);
   let storedReq = pendingAuthIsolateCache.get(requestToken) || null;
+
+  if (!storedReq && kv && requestToken) {
+    try {
+      const kvVal = await kv.get(`auth_req:${requestToken}`, "json");
+      if (kvVal) storedReq = kvVal;
+    } catch (_) {}
+  }
+
   if (db && requestToken) {
     try {
       const row = await db
@@ -990,10 +1045,18 @@ async function handleCreateSession(request, env) {
   const clientStateNonce = String(body.state || "").trim();
 
   const db = await ensureD1Schema(env);
+  const kv = getKV(env);
 
   // Branch A: One-Time Authorization Code Exchange (Primary Flow from Verified Android App Link)
   if (authCode) {
     let codeData = authCodeIsolateCache.get(authCode) || null;
+
+    if (!codeData && kv) {
+      try {
+        const kvCode = await kv.get(`auth_code:${authCode}`, "json");
+        if (kvCode) codeData = kvCode;
+      } catch (_) {}
+    }
 
     if (db) {
       try {
@@ -1113,6 +1176,11 @@ async function handleCreateSession(request, env) {
     // Mark one-time authorization code as consumed immediately
     codeData.consumed = true;
     authCodeIsolateCache.set(authCode, codeData);
+    if (kv) {
+      try {
+        await kv.delete(`auth_code:${authCode}`);
+      } catch (_) {}
+    }
     if (db) {
       try {
         await db
@@ -1127,8 +1195,13 @@ async function handleCreateSession(request, env) {
       ok: true,
       verified: true,
       clientToken: codeData.clientToken,
+      client_token: codeData.clientToken,
       sessionId: codeData.clientToken,
       session_id: codeData.clientToken,
+      accountId: codeData.accountId,
+      username: codeData.username,
+      name: codeData.displayName,
+      avatarUrl: codeData.avatarUrl,
       account: {
         id: codeData.accountId,
         accountId: codeData.accountId,
@@ -1216,20 +1289,30 @@ async function handleCreateSession(request, env) {
             .bind(existingCodeRow.auth_code)
             .run();
 
+          const accId = Number(existingCodeRow.tmdb_account_id || 0);
+          const uname = existingCodeRow.username || "";
+          const dname = existingCodeRow.display_name || uname;
+          const avUrl = existingCodeRow.avatar_url || "";
+
           return jsonResponse({
             status: "ok",
             ok: true,
             verified: true,
             clientToken: existingCodeRow.client_token,
+            client_token: existingCodeRow.client_token,
             sessionId: existingCodeRow.client_token,
             session_id: existingCodeRow.client_token,
+            accountId: accId,
+            username: uname,
+            name: dname,
+            avatarUrl: avUrl,
             account: {
-              id: Number(existingCodeRow.tmdb_account_id || 0),
-              accountId: Number(existingCodeRow.tmdb_account_id || 0),
-              username: existingCodeRow.username || "",
-              name: existingCodeRow.display_name || existingCodeRow.username || "",
-              avatarUrl: existingCodeRow.avatar_url || "",
-              avatar_url: existingCodeRow.avatar_url || ""
+              id: accId,
+              accountId: accId,
+              username: uname,
+              name: dname,
+              avatarUrl: avUrl,
+              avatar_url: avUrl
             }
           });
         }
@@ -1262,8 +1345,13 @@ async function handleCreateSession(request, env) {
     ok: true,
     verified: true,
     clientToken: created.clientToken,
+    client_token: created.clientToken,
     sessionId: created.clientToken,
     session_id: created.clientToken,
+    accountId: created.account.accountId,
+    username: created.account.username,
+    name: created.account.name,
+    avatarUrl: created.account.avatarUrl,
     account: created.account
   });
 }
@@ -1309,17 +1397,57 @@ async function validateSessionAndOwnership(
       ok: true,
       tmdbSessionId: cached.tmdbSessionId,
       accountId: cached.accountId,
-      username: cached.username
+      username: cached.username,
+      displayName: cached.displayName || cached.username,
+      avatarUrl: cached.avatarUrl || ""
     };
   }
 
-  // 2. Check Cloudflare D1 `tmdb_user_sessions`
+  // 2. Check Cloudflare KV if bound
+  const kv = getKV(env);
+  if (kv) {
+    try {
+      const kvSession = await kv.get(`session:${clientToken}`, "json");
+      if (kvSession && kvSession.tmdbSessionId) {
+        if (krasUserId && kvSession.krasUserId && kvSession.krasUserId !== krasUserId) {
+          return {
+            ok: false,
+            status: 403,
+            error: "Cross-user session access is forbidden."
+          };
+        }
+        const boundAccountId = Number(kvSession.accountId || 0);
+        if (
+          requestedAccountId > 0 &&
+          boundAccountId > 0 &&
+          boundAccountId !== requestedAccountId
+        ) {
+          return {
+            ok: false,
+            status: 403,
+            error: "Session does not belong to the requested TMDb accountId."
+          };
+        }
+        sessionIsolateCache.set(clientToken, kvSession);
+        return {
+          ok: true,
+          tmdbSessionId: kvSession.tmdbSessionId,
+          accountId: boundAccountId,
+          username: kvSession.username || "",
+          displayName: kvSession.displayName || kvSession.username || "",
+          avatarUrl: kvSession.avatarUrl || ""
+        };
+      }
+    } catch (_) {}
+  }
+
+  // 3. Check Cloudflare D1 `tmdb_user_sessions`
   const db = await ensureD1Schema(env);
   if (db) {
     try {
       const row = await db
         .prepare(
-          `SELECT tmdb_session_id, installation_id, kras_user_id, tmdb_account_id, username
+          `SELECT tmdb_session_id, installation_id, kras_user_id, tmdb_account_id, username, display_name, avatar_url
            FROM tmdb_user_sessions
            WHERE session_id = ?`
         )
@@ -1352,20 +1480,24 @@ async function validateSessionAndOwnership(
             tmdbSessionId: realTmdbSessionId,
             accountId: boundAccountId,
             username: row.username || "",
+            displayName: row.display_name || row.username || "",
+            avatarUrl: row.avatar_url || "",
             krasUserId: row.kras_user_id || krasUserId
           });
           return {
             ok: true,
             tmdbSessionId: realTmdbSessionId,
             accountId: boundAccountId,
-            username: row.username || ""
+            username: row.username || "",
+            displayName: row.display_name || row.username || "",
+            avatarUrl: row.avatar_url || ""
           };
         }
       }
     } catch (_) {}
   }
 
-  // 3. Unseal AES-GCM server-sealed `kras_tok_...` token if D1 wasn't bound
+  // 4. Unseal AES-GCM server-sealed `kras_tok_...` token if neither D1 nor KV is bound
   const unsealed = await unsealOpaqueClientToken(env, clientToken);
   if (unsealed && unsealed.tmdbSessionId) {
     if (krasUserId && unsealed.krasUserId && unsealed.krasUserId !== krasUserId) {
@@ -1391,11 +1523,13 @@ async function validateSessionAndOwnership(
       ok: true,
       tmdbSessionId: unsealed.tmdbSessionId,
       accountId: boundAccountId,
-      username: unsealed.username || ""
+      username: unsealed.username || "",
+      displayName: unsealed.displayName || unsealed.username || "",
+      avatarUrl: unsealed.avatarUrl || ""
     };
   }
 
-  // 4. Legacy fallback: verify directly against TMDb `/account`
+  // 5. Legacy fallback: verify directly against TMDb `/account`
   const accRes = await tmdbFetch("/account", { session_id: clientToken }, env);
   if (!accRes.ok || !accRes.data || !accRes.data.id) {
     return {
@@ -1417,8 +1551,52 @@ async function validateSessionAndOwnership(
     ok: true,
     tmdbSessionId: clientToken,
     accountId: verifiedAccountId,
-    username: accRes.data.username || ""
+    username: accRes.data.username || "",
+    displayName: accRes.data.name || accRes.data.username || "",
+    avatarUrl: extractAvatarUrl(accRes.data)
   };
+}
+
+/**
+ * GET /api/tmdb/account (or GET /api/tmdb/auth/session)
+ * Verifies an existing user session token and returns the authenticated TMDb profile.
+ */
+async function handleGetAccountProfile(request, url, env) {
+  const clientToken = extractClientToken(request, {}, url);
+  const krasUserId = extractKrasUserId(request, {}, url);
+  const installationId = extractInstallationId(request, {}, url);
+
+  const ownership = await validateSessionAndOwnership(
+    env,
+    clientToken,
+    0,
+    krasUserId,
+    installationId
+  );
+  if (!ownership.ok) {
+    return jsonResponse(
+      { status: "error", ok: false, error: ownership.error },
+      ownership.status || 401
+    );
+  }
+
+  return jsonResponse({
+    status: "ok",
+    ok: true,
+    verified: true,
+    accountId: ownership.accountId,
+    username: ownership.username,
+    name: ownership.displayName || ownership.username,
+    avatarUrl: ownership.avatarUrl || "",
+    account: {
+      id: ownership.accountId,
+      accountId: ownership.accountId,
+      username: ownership.username,
+      name: ownership.displayName || ownership.username,
+      avatarUrl: ownership.avatarUrl || "",
+      avatar_url: ownership.avatarUrl || ""
+    }
+  });
 }
 
 /**
@@ -1437,6 +1615,17 @@ async function handleLogout(request, env) {
     tmdbSessionId = cached.tmdbSessionId;
   }
   sessionIsolateCache.delete(clientToken);
+
+  const kv = getKV(env);
+  if (kv) {
+    try {
+      const kvSession = await kv.get(`session:${clientToken}`, "json");
+      if (kvSession && kvSession.tmdbSessionId) {
+        tmdbSessionId = kvSession.tmdbSessionId;
+      }
+      await kv.delete(`session:${clientToken}`);
+    } catch (_) {}
+  }
 
   const db = await ensureD1Schema(env);
   if (db) {
@@ -1662,7 +1851,7 @@ async function handleTwoWaySync(request, env) {
       );
       if (res.ok) pushedWatchlist++;
     } else if (category === "RATING") {
-      const userRating = Number(mut.user_rating || mut.userRating || 0);
+      const userRating = Number(mut.user_rating || mut.userRating || mut.rating || 0);
       if (action === "REMOVE" || userRating <= 0) {
         await tmdbFetch(
           `/${tmdbType}/${tmdbId}/rating`,
@@ -1836,7 +2025,7 @@ async function handleTwoWaySync(request, env) {
   }
 
   for (const item of localRatings.slice(0, 35)) {
-    const userRating = Number(item.user_rating || item.userRating || 0);
+    const userRating = Number(item.user_rating || item.userRating || item.rating || 0);
     if (userRating < 0.5 || userRating > 10.0) continue;
     const tmdbId = await resolveTmdbIdForLocalItem(item, env);
     if (tmdbId <= 0) continue;
@@ -1905,7 +2094,8 @@ async function handleTwoWaySync(request, env) {
     ratings: mergedRatings,
     pushedFavorites,
     pushedWatchlist,
-    pushedRatings
+    pushedRatings,
+    pushedCount: pushedFavorites + pushedWatchlist + pushedRatings
   });
 }
 
@@ -2033,7 +2223,7 @@ async function handlePushRating(request, env) {
 }
 
 // ============================================================================
-// 3. Existing Movie & TV Series Metadata Enrichment Endpoints (Preserved)
+// 3. Existing Movie, TV Series, Search, Season & Match Metadata Endpoints
 // ============================================================================
 
 function formatMediaResponse(details, mediaType) {
@@ -2093,8 +2283,43 @@ function formatMediaResponse(details, mediaType) {
   };
 }
 
-async function handleMetadataLookup(url, mediaType, env) {
-  const idParam = url.searchParams.get("id") || url.searchParams.get("tmdbId");
+/**
+ * Preserves existing `/api/tmdb/search/movie` and `/api/tmdb/search/tv` endpoints
+ */
+async function handleDirectSearch(url, mediaType, env) {
+  const query = (url.searchParams.get("query") || url.searchParams.get("title") || "").trim();
+  const year = (url.searchParams.get("year") || "").trim();
+  const language = (url.searchParams.get("language") || "en-US").trim();
+  const page = (url.searchParams.get("page") || "1").trim();
+
+  if (!query) {
+    return jsonResponse({ ok: false, error: "Missing query parameter" }, 400);
+  }
+
+  const searchPath = mediaType === "tv" ? "/search/tv" : "/search/movie";
+  const searchParams = { query, language, page };
+  if (year) {
+    if (mediaType === "tv") searchParams.first_air_date_year = year;
+    else searchParams.primary_release_year = year;
+  }
+
+  const res = await tmdbFetch(searchPath, searchParams, env);
+  if (!res.ok) {
+    return jsonResponse(
+      { ok: false, error: res.error || "TMDb search failed" },
+      res.status || 502
+    );
+  }
+  return jsonResponse({
+    ok: true,
+    status: "ok",
+    data: res.data,
+    results: (res.data && res.data.results) || []
+  });
+}
+
+async function handleMetadataLookup(url, mediaType, env, explicitId = 0) {
+  const idParam = explicitId || url.searchParams.get("id") || url.searchParams.get("tmdbId");
   const query = (url.searchParams.get("query") || url.searchParams.get("title") || "").trim();
   const year = (url.searchParams.get("year") || "").trim();
   const language = (url.searchParams.get("language") || "en-US").trim();
@@ -2120,7 +2345,7 @@ async function handleMetadataLookup(url, mediaType, env) {
   }
 
   if (!targetId) {
-    return jsonResponse({ error: "No matching TMDb title found" }, 404);
+    return jsonResponse({ ok: false, error: "No matching TMDb title found" }, 404);
   }
 
   const detailPath = mediaType === "tv" ? `/tv/${targetId}` : `/movie/${targetId}`;
@@ -2131,12 +2356,15 @@ async function handleMetadataLookup(url, mediaType, env) {
   );
 
   if (!detailRes.ok || !detailRes.data) {
-    return jsonResponse({ error: "Failed to fetch TMDb details" }, detailRes.status || 404);
+    return jsonResponse({ ok: false, error: "Failed to fetch TMDb details" }, detailRes.status || 404);
   }
 
+  const formatted = formatMediaResponse(detailRes.data, mediaType);
   return jsonResponse({
+    ok: true,
     status: "ok",
-    data: formatMediaResponse(detailRes.data, mediaType)
+    ...formatted,
+    data: formatted
   });
 }
 
@@ -2144,7 +2372,7 @@ async function handleSeasonEpisodes(tvId, seasonNumber, url, env) {
   const language = (url.searchParams.get("language") || "en-US").trim();
   const res = await tmdbFetch(`/tv/${tvId}/season/${seasonNumber}`, { language }, env);
   if (!res.ok || !res.data) {
-    return jsonResponse({ error: "Season not found" }, res.status || 404);
+    return jsonResponse({ ok: false, error: "Season not found" }, res.status || 404);
   }
 
   const episodes = Array.isArray(res.data.episodes)
@@ -2161,6 +2389,7 @@ async function handleSeasonEpisodes(tvId, seasonNumber, url, env) {
     : [];
 
   return jsonResponse({
+    ok: true,
     status: "ok",
     tvId: Number(tvId),
     seasonNumber: Number(seasonNumber),
@@ -2194,15 +2423,24 @@ export default {
     }
 
     // 1. Health & Connectivity Test (/api/tmdb/test, /api/tmdb/health, /health)
+    if (path === "/health") {
+      return jsonResponse({
+        ok: true,
+        status: "ok",
+        service: "KRAS TMDb Proxy",
+        accountAuthSupported: true
+      });
+    }
+
     if (
       path === "/api/tmdb/test" ||
       path === "/api/tmdb/health" ||
       path === "/api/tmdb/connectivity-test" ||
-      path === "/health" ||
       path === "/test"
     ) {
       const testRes = await tmdbFetch("/configuration", {}, env);
       const db = await ensureD1Schema(env);
+      const kv = getKV(env);
       if (testRes.ok) {
         return jsonResponse({
           status: "ok",
@@ -2213,8 +2451,10 @@ export default {
           oneTimeCodeAuth: true,
           multiUserIsolated: true,
           d1Bound: Boolean(db),
-          service: "kras-tv-tmdb-proxy",
-          message: "Connected to TMDb API v3 with Browser Auth & Multi-User Account Sync"
+          kvBound: Boolean(kv),
+          service: "KRAS TMDb Proxy",
+          message: "Connected to TMDb API v3 with Browser Auth & Multi-User Account Sync",
+          data: testRes.data
         });
       }
       return jsonResponse(
@@ -2252,6 +2492,13 @@ export default {
     }
 
     if (
+      (path === "/api/tmdb/account" || path === "/api/tmdb/auth/session") &&
+      request.method === "GET"
+    ) {
+      return handleGetAccountProfile(request, url, env);
+    }
+
+    if (
       (path === "/api/tmdb/auth/logout" && request.method === "POST") ||
       (path === "/api/tmdb/auth/session" && request.method === "DELETE")
     ) {
@@ -2284,13 +2531,31 @@ export default {
       return handlePushRating(request, env);
     }
 
-    // 4. TMDb Movie, TV Series, Season, and Match Metadata Enrichment Routes
+    // 4. TMDb Direct Search & Metadata Enrichment Routes
+    if (path === "/api/tmdb/search/movie" && request.method === "GET") {
+      return handleDirectSearch(url, "movie", env);
+    }
+
+    if (path === "/api/tmdb/search/tv" && request.method === "GET") {
+      return handleDirectSearch(url, "tv", env);
+    }
+
     if (path === "/api/tmdb/movie" && request.method === "GET") {
       return handleMetadataLookup(url, "movie", env);
     }
 
+    const movieDetailMatch = path.match(/^\/api\/tmdb\/movie\/(\d+)$/);
+    if (movieDetailMatch && request.method === "GET") {
+      return handleMetadataLookup(url, "movie", env, Number(movieDetailMatch[1]));
+    }
+
     if (path === "/api/tmdb/tv" && request.method === "GET") {
       return handleMetadataLookup(url, "tv", env);
+    }
+
+    const tvDetailMatch = path.match(/^\/api\/tmdb\/tv\/(\d+)$/);
+    if (tvDetailMatch && request.method === "GET") {
+      return handleMetadataLookup(url, "tv", env, Number(tvDetailMatch[1]));
     }
 
     if (path === "/api/tmdb/match" && request.method === "GET") {
@@ -2304,6 +2569,6 @@ export default {
       return handleSeasonEpisodes(seasonMatch[1], seasonMatch[2], url, env);
     }
 
-    return jsonResponse({ error: `Route not found: ${request.method} ${path}` }, 404);
+    return jsonResponse({ ok: false, error: "Not found" }, 404);
   }
 };

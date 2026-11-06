@@ -42,6 +42,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -69,16 +72,13 @@ class MainActivity : ComponentActivity() {
     private val viewModel: KrasViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-            splashScreen.setOnExitAnimationListener { splashScreenView ->
-                splashScreenView.remove()
-            }
-        }
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Restore any interrupted Do Not Disturb state from a previous session
-        PlayerImmersiveHelper.restoreDnd(this, KrasRepository(this))
+        // Restore any interrupted Do Not Disturb state from a previous session on IO dispatcher
+        lifecycleScope.launch(Dispatchers.IO) {
+            PlayerImmersiveHelper.restoreDnd(this@MainActivity, KrasRepository(this@MainActivity))
+        }
 
         val isColdStart = (savedInstanceState == null && !hasColdStarted)
         hasColdStarted = true
