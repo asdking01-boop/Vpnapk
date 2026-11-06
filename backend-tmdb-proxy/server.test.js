@@ -149,6 +149,18 @@ test("TMDb account auth & two-way sync endpoints validate inputs and execute ful
     const parsed = new URL(urlStr);
     const path = parsed.pathname;
 
+    if (path === "/3/configuration") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          images: {
+            secure_base_url: "https://image.tmdb.org/t/p/"
+          }
+        })
+      };
+    }
+
     if (path === "/3/authentication/token/new") {
       return {
         ok: true,
@@ -282,6 +294,11 @@ test("TMDb account auth & two-way sync endpoints validate inputs and execute ful
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   try {
+    // 0. Existing /api/tmdb/test connectivity endpoint preserved
+    const testEndpointRes = await requestJson(server, "/api/tmdb/test");
+    assert.equal(testEndpointRes.status, 200);
+    assert.equal(testEndpointRes.body.ok, true);
+
     // 1. Request Token creation
     const tokenRes = await requestJson(server, "/api/tmdb/auth/request-token", {
       method: "POST",
@@ -292,7 +309,7 @@ test("TMDb account auth & two-way sync endpoints validate inputs and execute ful
     assert.equal(tokenRes.body.requestToken, "req_token_kras_1234567890");
     assert.ok(tokenRes.body.authUrl.includes("https://www.themoviedb.org/authenticate/req_token_kras_1234567890"));
 
-    // 2. Session creation & profile retrieval
+    // 2. Session creation & profile retrieval (verifies both top-level and nested account fields)
     const sessionRes = await requestJson(server, "/api/tmdb/auth/session", {
       method: "POST",
       body: { requestToken: "req_token_kras_1234567890" }
@@ -300,6 +317,8 @@ test("TMDb account auth & two-way sync endpoints validate inputs and execute ful
     assert.equal(sessionRes.status, 200);
     assert.equal(sessionRes.body.ok, true);
     assert.equal(sessionRes.body.sessionId, "sess_kras_verified_987654321");
+    assert.equal(sessionRes.body.username, "kras_cinema_user");
+    assert.equal(sessionRes.body.accountId, 778899);
     assert.equal(sessionRes.body.account.username, "kras_cinema_user");
     assert.equal(sessionRes.body.account.avatarUrl, "https://image.tmdb.org/t/p/w185/kras_avatar.jpg");
 

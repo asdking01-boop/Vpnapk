@@ -1,0 +1,13 @@
+name = "kras-tmdb-proxy"
+main = "cloudflare-worker.js"
+compatibility_date = "2025-01-01"
+
+# Required Secret (already configured on your Worker, or set via CLI):
+#   npx wrangler secret put TMDB_API_KEY
+#
+# Optional Cloudflare D1 Database Binding (only needed if you want Worker-side SQLite audit tables;
+# two-way sync of Favorites, Watchlist, and Ratings already persists directly in the user's TMDb account):
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "kras-tmdb-db"
+# database_id = "<your-d1-database-id>"

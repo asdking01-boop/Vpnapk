@@ -683,8 +683,10 @@ async function handleHealthAndConnectivityCheck(req, res) {
   }
 }
 
-// Cloud Run root /health endpoint & authenticated /api/tmdb/health + /api/tmdb/connectivity-test
+// Cloud Run root /health endpoint & authenticated /api/tmdb/health + /api/tmdb/test + /api/tmdb/connectivity-test
 app.get("/health", handleHealthAndConnectivityCheck);
+app.get("/test", handleHealthAndConnectivityCheck);
+app.get("/api/tmdb/test", requireProxyAuth, handleHealthAndConnectivityCheck);
 app.get("/api/tmdb/health", requireProxyAuth, handleHealthAndConnectivityCheck);
 app.get("/api/tmdb/connectivity-test", requireProxyAuth, handleHealthAndConnectivityCheck);
 
@@ -1376,14 +1378,14 @@ function formatSyncMediaEntry(raw, mediaType) {
 }
 
 /**
- * POST /api/tmdb/auth/request-token
+ * POST (or GET) /api/tmdb/auth/request-token
  * Body: { "redirectTo": "krastv://tmdb-auth" }
  */
-app.post("/api/tmdb/auth/request-token", requireProxyAuth, async (req, res) => {
+async function handleCreateRequestToken(req, res) {
   const redirectTo =
-    req.body && typeof req.body.redirectTo === "string" && req.body.redirectTo.trim()
-      ? req.body.redirectTo.trim()
-      : "krastv://tmdb-auth";
+    (req.body && typeof req.body.redirectTo === "string" && req.body.redirectTo.trim()) ||
+    (req.query && typeof req.query.redirectTo === "string" && req.query.redirectTo.trim()) ||
+    "krastv://tmdb-auth";
 
   try {
     const tokenRes = await tmdbRequest("/authentication/token/new", { method: "GET" });
@@ -1401,6 +1403,7 @@ app.post("/api/tmdb/auth/request-token", requireProxyAuth, async (req, res) => {
     return res.status(200).json({
       ok: true,
       requestToken,
+      request_token: requestToken,
       expiresAt: tokenRes.expires_at || "",
       authUrl
     });
@@ -1410,15 +1413,19 @@ app.post("/api/tmdb/auth/request-token", requireProxyAuth, async (req, res) => {
       error: "Unable to start TMDb authorization right now. Please try again."
     });
   }
-});
+}
+
+app.post("/api/tmdb/auth/request-token", requireProxyAuth, handleCreateRequestToken);
+app.get("/api/tmdb/auth/request-token", requireProxyAuth, handleCreateRequestToken);
 
 /**
  * POST /api/tmdb/auth/session
  * Body: { "requestToken": "<approved_request_token>" }
  */
 app.post("/api/tmdb/auth/session", requireProxyAuth, async (req, res) => {
-  const requestToken =
-    req.body && typeof req.body.requestToken === "string" ? req.body.requestToken.trim() : "";
+  const rawToken =
+    (req.body && (req.body.requestToken || req.body.request_token)) || "";
+  const requestToken = typeof rawToken === "string" ? rawToken.trim() : "";
 
   if (!requestToken || requestToken.length < 8) {
     return res.status(400).json({
@@ -1446,14 +1453,23 @@ app.post("/api/tmdb/auth/session", requireProxyAuth, async (req, res) => {
       queryParams: { session_id: sessionId }
     });
 
+    const accountId = accountData.id || 0;
+    const username = accountData.username || "";
+    const displayName = accountData.name || accountData.username || "";
+    const avatarUrl = buildAccountAvatarUrl(accountData);
+
     return res.status(200).json({
       ok: true,
       sessionId,
+      accountId,
+      username,
+      name: displayName,
+      avatarUrl,
       account: {
-        id: accountData.id || 0,
-        username: accountData.username || "",
-        name: accountData.name || accountData.username || "",
-        avatarUrl: buildAccountAvatarUrl(accountData),
+        id: accountId,
+        username,
+        name: displayName,
+        avatarUrl,
         includeAdult: Boolean(accountData.include_adult),
         iso639_1: accountData.iso_639_1 || "en",
         iso3166_1: accountData.iso_3166_1 || "US"
@@ -1724,7 +1740,7 @@ app.post("/api/tmdb/account/favorite", requireProxyAuth, async (req, res) => {
   }
 
   const body = req.body || {};
-  const tmdbId = parseInt(body.tmdbId, 10);
+  const tmdbId = parseInt(body.tmdbId || body.mediaId, 10);
   const mediaType = body.mediaType === "tv" || body.mediaType === "series" ? "tv" : "movie";
   const isFavorite = body.favorite !== false;
   let accountId = parseInt(body.accountId, 10) || 0;
@@ -1771,7 +1787,7 @@ app.post("/api/tmdb/account/watchlist", requireProxyAuth, async (req, res) => {
   }
 
   const body = req.body || {};
-  const tmdbId = parseInt(body.tmdbId, 10);
+  const tmdbId = parseInt(body.tmdbId || body.mediaId, 10);
   const mediaType = body.mediaType === "tv" || body.mediaType === "series" ? "tv" : "movie";
   const inWatchlist = body.watchlist !== false;
   let accountId = parseInt(body.accountId, 10) || 0;
@@ -1818,7 +1834,7 @@ app.post("/api/tmdb/account/rating", requireProxyAuth, async (req, res) => {
   }
 
   const body = req.body || {};
-  const tmdbId = parseInt(body.tmdbId, 10);
+  const tmdbId = parseInt(body.tmdbId || body.mediaId, 10);
   const mediaType = body.mediaType === "tv" || body.mediaType === "series" ? "tv" : "movie";
   const ratingVal = Number(body.rating);
 

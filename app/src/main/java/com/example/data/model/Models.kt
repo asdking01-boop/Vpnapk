@@ -197,7 +197,7 @@ data class UserSettings(
     val autoCheckUpdates: Boolean = true,
     val backgroundPlayback: Boolean = true,
     val liveSwipeGesturesEnabled: Boolean = true,
-    val tmdbProxyUrl: String = "",
+    val tmdbProxyUrl: String = "https://kras-tmdb-proxy.asdking01.workers.dev",
     val tmdbAutoEnrichEnabled: Boolean = true,
     val tmdbAutoSyncEnabled: Boolean = true
 )

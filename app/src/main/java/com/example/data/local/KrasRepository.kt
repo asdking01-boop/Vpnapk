@@ -732,8 +732,11 @@ class KrasRepository(context: Context) {
             backgroundPlayback = prefs.getBoolean("backgroundPlayback", true),
             liveSwipeGesturesEnabled = prefs.getBoolean("liveSwipeGesturesEnabled", true),
             tmdbProxyUrl = prefs.getString("tmdbProxyUrl", null)
+                ?.trim()
                 ?.takeIf { it.isNotBlank() }
-                ?: com.example.BuildConfig.DEFAULT_TMDB_PROXY_URL,
+                ?: com.example.BuildConfig.DEFAULT_TMDB_PROXY_URL.ifBlank {
+                    "https://kras-tmdb-proxy.asdking01.workers.dev"
+                },
             tmdbAutoEnrichEnabled = true,
             tmdbAutoSyncEnabled = prefs.getBoolean("tmdbAutoSyncEnabled", true)
         )

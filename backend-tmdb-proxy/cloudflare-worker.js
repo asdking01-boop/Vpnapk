@@ -1,22 +1,30 @@
 /**
- * KRAS TV — Cloudflare Worker Backend for TMDb Metadata Enrichment + Account & Two-Way Sync
+ * KRAS TV — Production Cloudflare Worker Backend
+ * URL: https://kras-tmdb-proxy.asdking01.workers.dev
  *
- * Required Cloudflare Worker Secret (set via `wrangler secret put TMDB_API_KEY` or Cloudflare Dashboard):
- *   - TMDB_API_KEY : Your TMDb v3 API Key (32-char hex) or v4 Read Access Token (eyJ...)
- *
- * Supported Endpoints:
- *   - GET  /health, /api/tmdb/health, /api/tmdb/connectivity-test
- *   - GET  /api/tmdb/movie?title=...&year=...&tmdbId=...&language=...
- *   - GET  /api/tmdb/tv?title=...&year=...&tmdbId=...&language=...
- *   - GET  /api/tmdb/tv/:tvId/season/:seasonNumber?language=...
- *   - POST /api/tmdb/auth/request-token
- *   - POST /api/tmdb/auth/session
- *   - POST /api/tmdb/auth/logout
- *   - GET  /api/tmdb/account
- *   - POST /api/tmdb/sync
- *   - POST /api/tmdb/account/favorite
- *   - POST /api/tmdb/account/watchlist
- *   - POST /api/tmdb/account/rating
+ * Features:
+ * 1. Preserves existing working TMDb connectivity test endpoint:
+ *    - GET  /api/tmdb/test (and /health, /api/tmdb/health, /api/tmdb/connectivity-test)
+ * 2. Automatic Movie, TV Series, Season, and Episode Metadata Enrichment:
+ *    - GET  /api/tmdb/movie?title=...&year=...&tmdbId=...&language=...
+ *    - GET  /api/tmdb/tv?title=...&year=...&tmdbId=...&language=...
+ *    - GET  /api/tmdb/tv/:tvId/season/:seasonNumber?language=...
+ *    - GET  /api/tmdb/match & POST /api/tmdb/match
+ *    - GET  /api/tmdb/search/movie & GET /api/tmdb/search/tv
+ * 3. Official TMDb User Account Authorization & Two-Way Synchronization:
+ *    - POST /api/tmdb/auth/request-token (also supports GET)
+ *    - POST /api/tmdb/auth/session
+ *    - POST /api/tmdb/auth/logout
+ *    - GET  /api/tmdb/account
+ *    - POST /api/tmdb/sync
+ *    - POST /api/tmdb/account/favorite
+ *    - POST /api/tmdb/account/watchlist
+ *    - POST /api/tmdb/account/rating
+ * 4. Optional Cloudflare D1 Database Persistence (`env.DB`):
+ *    - Works immediately with zero database bindings (using encrypted client X-TMDb-Session-Id header
+ *      and live TMDb Account API v3 storage).
+ *    - If a Cloudflare D1 binding named `DB` is attached, also persists connected account metadata
+ *      and sync audit state in D1 (see migrations/0001_tmdb_account_sync.sql).
  */
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
@@ -27,7 +35,8 @@ const IMG_W185 = "https://image.tmdb.org/t/p/w185";
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Accept, Content-Type, Authorization, X-KRAS-Proxy-Token, X-TMDb-Session-Id, X-Client-App",
+  "Access-Control-Allow-Headers":
+    "Accept, Content-Type, Authorization, X-KRAS-Proxy-Token, X-TMDb-Session-Id, X-Client-App",
   "X-Content-Type-Options": "nosniff"
 };
 
@@ -50,10 +59,16 @@ function cleanIptvTitle(rawTitle = "") {
   if (bracketYear) extractedYear = bracketYear[1];
 
   working = working
-    .replace(/^(?:[A-Z]{2,4}\s*\|\s*|[A-Z]{2,3}\s+-\s+|(?:EN|US|UK|AR|FR|DE|ES|IT|TR|RU|NL|PT|BR|IN|CA|AU|VIP|VOD)\s*:\s*)+/i, "")
+    .replace(
+      /^(?:[A-Z]{2,4}\s*\|\s*|[A-Z]{2,3}\s+-\s+|(?:EN|US|UK|AR|FR|DE|ES|IT|TR|RU|NL|PT|BR|IN|CA|AU|VIP|VOD)\s*:\s*)+/i,
+      ""
+    )
     .replace(/\b(?:S\d{1,2}\s*E\d{1,3}|S\d{1,2}|Season\s*\d{1,2}|Episode\s*\d{1,3})\b.*$/i, "")
     .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
-    .replace(/\b(?:8K|4K|UHD|2160p|1080p|FHD|Full\s*HD|720p|HD|480p|SD|HEVC|H\.?265|H\.?264|x264|x265|HDR10\+?|HDR|DV|Dolby\s*Vision|Atmos|50\s*FPS|60\s*FPS|BluRay|WEB-?DL|WEBRip|BRRip|CAM|MULTI|SUB|DUB|VOSTFR)\b/gi, " ");
+    .replace(
+      /\b(?:8K|4K|UHD|2160p|1080p|FHD|Full\s*HD|720p|HD|480p|SD|HEVC|H\.?265|H\.?264|x264|x265|HDR10\+?|HDR|DV|Dolby\s*Vision|Atmos|50\s*FPS|60\s*FPS|BluRay|WEB-?DL|WEBRip|BRRip|CAM|MULTI|SUB|DUB|VOSTFR)\b/gi,
+      " "
+    );
 
   const trimmed = working.trim().replace(/[-|:.]+$/, "").trim();
   if (!extractedYear) {
@@ -70,7 +85,11 @@ function cleanIptvTitle(rawTitle = "") {
     working = trimmed.slice(0, -extractedYear.length);
   }
 
-  const cleanTitle = working.replace(/\s{2,}/g, " ").trim().replace(/^[-|:._]+|[-|:._]+$/g, "").trim();
+  const cleanTitle = working
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .replace(/^[-|:._]+|[-|:._]+$/g, "")
+    .trim();
   return { cleanTitle: cleanTitle || String(rawTitle || "").trim(), extractedYear };
 }
 
@@ -85,13 +104,14 @@ async function tmdbRequest(env, path, { method = "GET", params = {}, body = null
   const url = new URL(`${TMDB_BASE}${path}`);
   const headers = {
     Accept: "application/json",
-    "User-Agent": "KRAS-TV-Cloudflare-Worker/2.0"
+    "User-Agent": "KRAS-TV-Cloudflare-Worker/2.1"
   };
 
   if (body !== null && body !== undefined) {
     headers["Content-Type"] = "application/json;charset=utf-8";
   }
 
+  // Supports both TMDb v3 API Key (32-char hex) and v4 JWT Read Access Token (eyJ...)
   if (apiKey.startsWith("eyJ")) {
     headers["Authorization"] = `Bearer ${apiKey}`;
   } else {
@@ -143,6 +163,47 @@ function formatSyncEntry(raw, mediaType) {
   };
 }
 
+/**
+ * Optional Cloudflare D1 persistence helper (runs only if `env.DB` D1 binding is configured).
+ */
+async function persistAccountSessionToD1(env, { accountId, username, displayName, avatarUrl }) {
+  if (!env || !env.DB || typeof env.DB.prepare !== "function") return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO tmdb_accounts (account_id, username, display_name, avatar_url, updated_at)
+       VALUES (?1, ?2, ?3, ?4, datetime('now'))
+       ON CONFLICT(account_id) DO UPDATE SET
+         username = excluded.username,
+         display_name = excluded.display_name,
+         avatar_url = excluded.avatar_url,
+         updated_at = datetime('now')`
+    )
+      .bind(accountId, username, displayName, avatarUrl)
+      .run();
+  } catch (_) {
+    // Non-fatal if D1 table is not migrated
+  }
+}
+
+async function persistSyncSnapshotToD1(env, { accountId, favoritesCount, watchlistCount, ratingsCount }) {
+  if (!env || !env.DB || typeof env.DB.prepare !== "function") return;
+  try {
+    await env.DB.prepare(
+      `UPDATE tmdb_accounts
+       SET favorites_count = ?2,
+           watchlist_count = ?3,
+           ratings_count = ?4,
+           last_synced_at = datetime('now'),
+           updated_at = datetime('now')
+       WHERE account_id = ?1`
+    )
+      .bind(accountId, favoritesCount, watchlistCount, ratingsCount)
+      .run();
+  } catch (_) {
+    // Non-fatal if D1 table is not migrated
+  }
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -153,10 +214,16 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
     try {
-      // 1. Health & Connectivity
+      // =========================================================================
+      // 1. Health & Existing TMDb Test Endpoint (/api/tmdb/test & /api/tmdb/health)
+      // =========================================================================
       if (
         request.method === "GET" &&
-        (path === "/health" || path === "/api/tmdb/health" || path === "/api/tmdb/connectivity-test")
+        (path === "/api/tmdb/test" ||
+          path === "/test" ||
+          path === "/health" ||
+          path === "/api/tmdb/health" ||
+          path === "/api/tmdb/connectivity-test")
       ) {
         if (!(env.TMDB_API_KEY || "").trim()) {
           return jsonResponse(
@@ -166,7 +233,7 @@ export default {
               service: "kras-tv-tmdb-proxy",
               tmdbApiVersion: "v3",
               tmdbConnected: false,
-              message: "TMDB_API_KEY secret is not configured."
+              message: "TMDB_API_KEY secret is not configured in Cloudflare Worker."
             },
             503
           );
@@ -175,16 +242,20 @@ export default {
         const ok = Boolean(cfg?.images?.secure_base_url);
         return jsonResponse({
           ok,
+          success: ok,
           status: ok ? "connected" : "degraded",
           service: "kras-tv-tmdb-proxy",
           tmdbApiVersion: "v3",
           tmdbConnected: ok,
+          accountSyncSupported: true,
           imageBaseUrl: cfg?.images?.secure_base_url || "https://image.tmdb.org/t/p/",
           message: "Connected to TMDb API v3 via secure Cloudflare Worker."
         });
       }
 
+      // =========================================================================
       // 2. Movie Metadata Enrichment: GET /api/tmdb/movie
+      // =========================================================================
       if (request.method === "GET" && path === "/api/tmdb/movie") {
         const rawTitle = (url.searchParams.get("title") || url.searchParams.get("query") || "").trim();
         const yearParam = (url.searchParams.get("year") || "").trim();
@@ -198,7 +269,12 @@ export default {
         let movieId = tmdbIdParam;
         if (!movieId) {
           const search = await tmdbRequest(env, "/search/movie", {
-            params: { query: searchTitle, year: effectiveYear || undefined, include_adult: "false", language }
+            params: {
+              query: searchTitle,
+              year: effectiveYear || undefined,
+              include_adult: "false",
+              language
+            }
           });
           const first = Array.isArray(search.results) && search.results[0];
           if (!first) return jsonResponse({ ok: false, error: "No matching movie found." }, 404);
@@ -233,6 +309,7 @@ export default {
           rating: typeof d.vote_average === "number" ? Number(d.vote_average.toFixed(1)) : 0.0,
           releaseYear,
           year: releaseYear,
+          releaseDate: d.release_date || "",
           genres: genres.join(", "),
           cast: castList.map((c) => c.name).join(", "),
           castList,
@@ -241,7 +318,9 @@ export default {
         });
       }
 
+      // =========================================================================
       // 3. TV Series Metadata Enrichment: GET /api/tmdb/tv
+      // =========================================================================
       if (request.method === "GET" && path === "/api/tmdb/tv") {
         const rawTitle = (url.searchParams.get("title") || url.searchParams.get("query") || "").trim();
         const yearParam = (url.searchParams.get("year") || "").trim();
@@ -305,6 +384,7 @@ export default {
           rating: typeof d.vote_average === "number" ? Number(d.vote_average.toFixed(1)) : 0.0,
           releaseYear,
           year: releaseYear,
+          releaseDate: d.first_air_date || "",
           genres: genres.join(", "),
           cast: castList.map((c) => c.name).join(", "),
           castList,
@@ -314,7 +394,9 @@ export default {
         });
       }
 
+      // =========================================================================
       // 4. TV Season Episodes: GET /api/tmdb/tv/:tvId/season/:seasonNumber
+      // =========================================================================
       const seasonMatch = path.match(/^\/api\/tmdb\/tv\/(\d+)\/season\/(\d+)$/);
       if (request.method === "GET" && seasonMatch) {
         const tvId = parseInt(seasonMatch[1], 10);
@@ -346,47 +428,123 @@ export default {
         });
       }
 
-      // 5. TMDb Account Auth: POST /api/tmdb/auth/request-token
-      if (request.method === "POST" && path === "/api/tmdb/auth/request-token") {
-        const body = await request.json().catch(() => ({}));
-        const redirectTo = (body.redirectTo || "krastv://tmdb-auth").trim();
+      // =========================================================================
+      // 5. TMDb Account Auth Step 1: POST (or GET) /api/tmdb/auth/request-token
+      // =========================================================================
+      if (
+        (request.method === "POST" || request.method === "GET") &&
+        path === "/api/tmdb/auth/request-token"
+      ) {
+        let redirectTo = url.searchParams.get("redirectTo") || "krastv://tmdb-auth";
+        if (request.method === "POST") {
+          const body = await request.json().catch(() => ({}));
+          if (body && typeof body.redirectTo === "string" && body.redirectTo.trim()) {
+            redirectTo = body.redirectTo.trim();
+          }
+        }
         const tokenRes = await tmdbRequest(env, "/authentication/token/new");
         const requestToken = tokenRes.request_token || "";
-        const authUrl = `https://www.themoviedb.org/authenticate/${requestToken}?redirect_to=${encodeURIComponent(redirectTo)}`;
+        if (!requestToken) {
+          return jsonResponse({ ok: false, error: "Failed to obtain TMDb request_token." }, 502);
+        }
+        const authUrl = `https://www.themoviedb.org/authenticate/${requestToken}?redirect_to=${encodeURIComponent(
+          redirectTo
+        )}`;
         return jsonResponse({
           ok: true,
           requestToken,
+          request_token: requestToken,
           expiresAt: tokenRes.expires_at || "",
           authUrl
         });
       }
 
-      // 6. TMDb Account Auth: POST /api/tmdb/auth/session
+      // =========================================================================
+      // 6. TMDb Account Auth Step 2: POST /api/tmdb/auth/session
+      // =========================================================================
       if (request.method === "POST" && path === "/api/tmdb/auth/session") {
         const body = await request.json().catch(() => ({}));
-        const requestToken = (body.requestToken || "").trim();
+        const requestToken = (body.requestToken || body.request_token || "").trim();
         if (!requestToken) {
-          return jsonResponse({ ok: false, error: "requestToken is required." }, 400);
+          return jsonResponse(
+            { ok: false, error: "A valid approved TMDb requestToken is required." },
+            400
+          );
         }
         const sessionRes = await tmdbRequest(env, "/authentication/session/new", {
           method: "POST",
           body: { request_token: requestToken }
         });
         const sessionId = sessionRes.session_id || "";
+        if (!sessionId) {
+          return jsonResponse(
+            {
+              ok: false,
+              error: "Please approve the TMDb authorization request in your browser first, then try again."
+            },
+            401
+          );
+        }
+
         const acc = await tmdbRequest(env, "/account", { params: { session_id: sessionId } });
+        const accountId = acc.id || 0;
+        const username = acc.username || "";
+        const displayName = acc.name || acc.username || "";
+        const avatarUrl = buildAvatarUrl(acc);
+
+        await persistAccountSessionToD1(env, { accountId, username, displayName, avatarUrl });
+
         return jsonResponse({
           ok: true,
           sessionId,
+          accountId,
+          username,
+          name: displayName,
+          avatarUrl,
           account: {
-            id: acc.id || 0,
-            username: acc.username || "",
-            name: acc.name || acc.username || "",
-            avatarUrl: buildAvatarUrl(acc)
+            id: accountId,
+            username,
+            name: displayName,
+            avatarUrl
           }
         });
       }
 
-      // 7. TMDb Account Logout: POST /api/tmdb/auth/logout
+      // =========================================================================
+      // 7. TMDb Account Profile: GET /api/tmdb/account
+      // =========================================================================
+      if (request.method === "GET" && path === "/api/tmdb/account") {
+        const sessionId = (
+          request.headers.get("X-TMDb-Session-Id") ||
+          url.searchParams.get("sessionId") ||
+          ""
+        ).trim();
+        if (!sessionId) {
+          return jsonResponse({ ok: false, error: "TMDb session required." }, 401);
+        }
+        const acc = await tmdbRequest(env, "/account", { params: { session_id: sessionId } });
+        const accountId = acc.id || 0;
+        const username = acc.username || "";
+        const displayName = acc.name || acc.username || "";
+        const avatarUrl = buildAvatarUrl(acc);
+        return jsonResponse({
+          ok: true,
+          accountId,
+          username,
+          name: displayName,
+          avatarUrl,
+          account: {
+            id: accountId,
+            username,
+            name: displayName,
+            avatarUrl
+          }
+        });
+      }
+
+      // =========================================================================
+      // 8. TMDb Account Logout: POST /api/tmdb/auth/logout
+      // =========================================================================
       if (request.method === "POST" && path === "/api/tmdb/auth/logout") {
         const body = await request.json().catch(() => ({}));
         const sessionId = (request.headers.get("X-TMDb-Session-Id") || body.sessionId || "").trim();
@@ -399,12 +557,17 @@ export default {
         return jsonResponse({ ok: true });
       }
 
-      // 8. TMDb Two-Way Sync: POST /api/tmdb/sync
+      // =========================================================================
+      // 9. TMDb Two-Way Sync: POST /api/tmdb/sync
+      // =========================================================================
       if (request.method === "POST" && path === "/api/tmdb/sync") {
         const body = await request.json().catch(() => ({}));
         const sessionId = (request.headers.get("X-TMDb-Session-Id") || body.sessionId || "").trim();
         if (!sessionId) {
-          return jsonResponse({ ok: false, error: "TMDb session required." }, 401);
+          return jsonResponse(
+            { ok: false, error: "Your TMDb session has expired. Please reconnect your TMDb account." },
+            401
+          );
         }
         const language = (body.language || "en-US").trim();
         let accountId = parseInt(body.accountId, 10) || 0;
@@ -413,81 +576,122 @@ export default {
           accountId = acc.id || 0;
         }
 
-        let pushedCount = 0;
+        let pushedFavorites = 0;
+        let pushedWatchlist = 0;
+        let pushedRatings = 0;
+
         for (const fav of (body.favorites || []).slice(0, 60)) {
-          if (fav?.tmdbId > 0) {
+          const mediaId = parseInt(fav?.tmdbId || fav?.mediaId, 10) || 0;
+          if (mediaId > 0) {
             await tmdbRequest(env, `/account/${accountId}/favorite`, {
               method: "POST",
               params: { session_id: sessionId },
               body: {
-                media_type: fav.mediaType === "tv" ? "tv" : "movie",
-                media_id: fav.tmdbId,
+                media_type: fav.mediaType === "tv" || fav.mediaType === "series" ? "tv" : "movie",
+                media_id: mediaId,
                 favorite: fav.favorite !== false
               }
             }).catch(() => {});
-            pushedCount++;
+            pushedFavorites++;
           }
         }
+
         for (const wl of (body.watchlist || []).slice(0, 60)) {
-          if (wl?.tmdbId > 0) {
+          const mediaId = parseInt(wl?.tmdbId || wl?.mediaId, 10) || 0;
+          if (mediaId > 0) {
             await tmdbRequest(env, `/account/${accountId}/watchlist`, {
               method: "POST",
               params: { session_id: sessionId },
               body: {
-                media_type: wl.mediaType === "tv" ? "tv" : "movie",
-                media_id: wl.tmdbId,
+                media_type: wl.mediaType === "tv" || wl.mediaType === "series" ? "tv" : "movie",
+                media_id: mediaId,
                 watchlist: wl.watchlist !== false
               }
             }).catch(() => {});
-            pushedCount++;
+            pushedWatchlist++;
           }
         }
+
         for (const rt of (body.ratings || []).slice(0, 60)) {
-          const val = Math.round(Number(rt?.rating || 0) * 2) / 2;
-          if (rt?.tmdbId > 0 && val >= 0.5 && val <= 10.0) {
-            const mType = rt.mediaType === "tv" ? "tv" : "movie";
-            await tmdbRequest(env, `/${mType}/${rt.tmdbId}/rating`, {
+          const mediaId = parseInt(rt?.tmdbId || rt?.mediaId, 10) || 0;
+          const rawScore = Number(rt?.userRating || rt?.rating || 0);
+          const val = Math.round(rawScore * 2) / 2;
+          if (mediaId > 0 && val >= 0.5 && val <= 10.0) {
+            const mType = rt.mediaType === "tv" || rt.mediaType === "series" ? "tv" : "movie";
+            await tmdbRequest(env, `/${mType}/${mediaId}/rating`, {
               method: "POST",
               params: { session_id: sessionId },
               body: { value: val }
             }).catch(() => {});
-            pushedCount++;
+            pushedRatings++;
           }
         }
 
         const [favMovies, favTv, wlMovies, wlTv, ratedMovies, ratedTv] = await Promise.all([
-          tmdbRequest(env, `/account/${accountId}/favorite/movies`, { params: { session_id: sessionId, language } }).catch(() => ({ results: [] })),
-          tmdbRequest(env, `/account/${accountId}/favorite/tv`, { params: { session_id: sessionId, language } }).catch(() => ({ results: [] })),
-          tmdbRequest(env, `/account/${accountId}/watchlist/movies`, { params: { session_id: sessionId, language } }).catch(() => ({ results: [] })),
-          tmdbRequest(env, `/account/${accountId}/watchlist/tv`, { params: { session_id: sessionId, language } }).catch(() => ({ results: [] })),
-          tmdbRequest(env, `/account/${accountId}/rated/movies`, { params: { session_id: sessionId, language } }).catch(() => ({ results: [] })),
-          tmdbRequest(env, `/account/${accountId}/rated/tv`, { params: { session_id: sessionId, language } }).catch(() => ({ results: [] }))
+          tmdbRequest(env, `/account/${accountId}/favorite/movies`, {
+            params: { session_id: sessionId, language, sort_by: "created_at.desc" }
+          }).catch(() => ({ results: [] })),
+          tmdbRequest(env, `/account/${accountId}/favorite/tv`, {
+            params: { session_id: sessionId, language, sort_by: "created_at.desc" }
+          }).catch(() => ({ results: [] })),
+          tmdbRequest(env, `/account/${accountId}/watchlist/movies`, {
+            params: { session_id: sessionId, language, sort_by: "created_at.desc" }
+          }).catch(() => ({ results: [] })),
+          tmdbRequest(env, `/account/${accountId}/watchlist/tv`, {
+            params: { session_id: sessionId, language, sort_by: "created_at.desc" }
+          }).catch(() => ({ results: [] })),
+          tmdbRequest(env, `/account/${accountId}/rated/movies`, {
+            params: { session_id: sessionId, language, sort_by: "created_at.desc" }
+          }).catch(() => ({ results: [] })),
+          tmdbRequest(env, `/account/${accountId}/rated/tv`, {
+            params: { session_id: sessionId, language, sort_by: "created_at.desc" }
+          }).catch(() => ({ results: [] }))
         ]);
+
+        const favorites = [
+          ...(favMovies.results || []).map((m) => formatSyncEntry(m, "movie")),
+          ...(favTv.results || []).map((t) => formatSyncEntry(t, "tv"))
+        ];
+        const watchlist = [
+          ...(wlMovies.results || []).map((m) => formatSyncEntry(m, "movie")),
+          ...(wlTv.results || []).map((t) => formatSyncEntry(t, "tv"))
+        ];
+        const ratings = [
+          ...(ratedMovies.results || []).map((m) => formatSyncEntry(m, "movie")),
+          ...(ratedTv.results || []).map((t) => formatSyncEntry(t, "tv"))
+        ];
+
+        await persistSyncSnapshotToD1(env, {
+          accountId,
+          favoritesCount: favorites.length,
+          watchlistCount: watchlist.length,
+          ratingsCount: ratings.length
+        });
 
         return jsonResponse({
           ok: true,
           accountId,
-          favorites: [
-            ...(favMovies.results || []).map((m) => formatSyncEntry(m, "movie")),
-            ...(favTv.results || []).map((t) => formatSyncEntry(t, "tv"))
-          ],
-          watchlist: [
-            ...(wlMovies.results || []).map((m) => formatSyncEntry(m, "movie")),
-            ...(wlTv.results || []).map((t) => formatSyncEntry(t, "tv"))
-          ],
-          ratings: [
-            ...(ratedMovies.results || []).map((m) => formatSyncEntry(m, "movie")),
-            ...(ratedTv.results || []).map((t) => formatSyncEntry(t, "tv"))
-          ],
-          pushedCount,
+          favorites,
+          watchlist,
+          ratings,
+          pushedFavorites,
+          pushedWatchlist,
+          pushedRatings,
+          pushedCount: pushedFavorites + pushedWatchlist + pushedRatings,
           syncedAt: new Date().toISOString()
         });
       }
 
-      // 9. Single Item Push: /api/tmdb/account/favorite, /watchlist, /rating
+      // =========================================================================
+      // 10. Single Item Push: /api/tmdb/account/favorite, /watchlist, /rating
+      // =========================================================================
       if (request.method === "POST" && path === "/api/tmdb/account/favorite") {
         const body = await request.json().catch(() => ({}));
         const sessionId = (request.headers.get("X-TMDb-Session-Id") || body.sessionId || "").trim();
+        const mediaId = parseInt(body.tmdbId || body.mediaId, 10) || 0;
+        if (!sessionId || mediaId <= 0) {
+          return jsonResponse({ ok: false, error: "Valid sessionId and tmdbId are required." }, 400);
+        }
         let accountId = parseInt(body.accountId, 10) || 0;
         if (!accountId) {
           const acc = await tmdbRequest(env, "/account", { params: { session_id: sessionId } });
@@ -497,17 +701,21 @@ export default {
           method: "POST",
           params: { session_id: sessionId },
           body: {
-            media_type: body.mediaType === "tv" ? "tv" : "movie",
-            media_id: parseInt(body.tmdbId, 10),
+            media_type: body.mediaType === "tv" || body.mediaType === "series" ? "tv" : "movie",
+            media_id: mediaId,
             favorite: body.favorite !== false
           }
         });
-        return jsonResponse({ ok: true });
+        return jsonResponse({ ok: true, tmdbId: mediaId, favorite: body.favorite !== false });
       }
 
       if (request.method === "POST" && path === "/api/tmdb/account/watchlist") {
         const body = await request.json().catch(() => ({}));
         const sessionId = (request.headers.get("X-TMDb-Session-Id") || body.sessionId || "").trim();
+        const mediaId = parseInt(body.tmdbId || body.mediaId, 10) || 0;
+        if (!sessionId || mediaId <= 0) {
+          return jsonResponse({ ok: false, error: "Valid sessionId and tmdbId are required." }, 400);
+        }
         let accountId = parseInt(body.accountId, 10) || 0;
         if (!accountId) {
           const acc = await tmdbRequest(env, "/account", { params: { session_id: sessionId } });
@@ -517,33 +725,36 @@ export default {
           method: "POST",
           params: { session_id: sessionId },
           body: {
-            media_type: body.mediaType === "tv" ? "tv" : "movie",
-            media_id: parseInt(body.tmdbId, 10),
+            media_type: body.mediaType === "tv" || body.mediaType === "series" ? "tv" : "movie",
+            media_id: mediaId,
             watchlist: body.watchlist !== false
           }
         });
-        return jsonResponse({ ok: true });
+        return jsonResponse({ ok: true, tmdbId: mediaId, watchlist: body.watchlist !== false });
       }
 
       if (request.method === "POST" && path === "/api/tmdb/account/rating") {
         const body = await request.json().catch(() => ({}));
         const sessionId = (request.headers.get("X-TMDb-Session-Id") || body.sessionId || "").trim();
-        const mediaType = body.mediaType === "tv" ? "tv" : "movie";
-        const tmdbId = parseInt(body.tmdbId, 10);
+        const mediaType = body.mediaType === "tv" || body.mediaType === "series" ? "tv" : "movie";
+        const mediaId = parseInt(body.tmdbId || body.mediaId, 10) || 0;
         const rating = Number(body.rating);
+        if (!sessionId || mediaId <= 0 || Number.isNaN(rating)) {
+          return jsonResponse({ ok: false, error: "Valid sessionId, tmdbId, and rating are required." }, 400);
+        }
         if (rating <= 0) {
-          await tmdbRequest(env, `/${mediaType}/${tmdbId}/rating`, {
+          await tmdbRequest(env, `/${mediaType}/${mediaId}/rating`, {
             method: "DELETE",
             params: { session_id: sessionId }
           });
         } else {
-          await tmdbRequest(env, `/${mediaType}/${tmdbId}/rating`, {
+          await tmdbRequest(env, `/${mediaType}/${mediaId}/rating`, {
             method: "POST",
             params: { session_id: sessionId },
             body: { value: Math.min(10.0, Math.max(0.5, Math.round(rating * 2) / 2)) }
           });
         }
-        return jsonResponse({ ok: true });
+        return jsonResponse({ ok: true, tmdbId: mediaId, rating });
       }
 
       return jsonResponse({ ok: false, error: `Route ${request.method} ${path} not found.` }, 404);

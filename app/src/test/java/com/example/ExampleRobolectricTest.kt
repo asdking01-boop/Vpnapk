@@ -1179,10 +1179,14 @@ class ExampleRobolectricTest {
     assertEquals(1, m3uSeriesDetails!!.seasons.size)
     assertEquals(2, m3uSeriesDetails.seasons.first().episodes.size)
 
-    // 4. Verify Cloud Run URL and optional proxy token parsing + unconfigured state
+    // 4. Verify Cloud Run / Cloudflare Worker URL and /api/tmdb/test suffix stripping
     val parsedEndpoint = tmdbClient.parseProxyEndpoint("https://kras-tmdb-proxy-12345.europe-west3.run.app/api/tmdb?token=my_secret_token")
     assertEquals("https://kras-tmdb-proxy-12345.europe-west3.run.app", parsedEndpoint.baseUrl)
     assertEquals("my_secret_token", parsedEndpoint.proxyAuthToken)
+
+    val parsedWorkerTestEndpoint = tmdbClient.parseProxyEndpoint("https://kras-tmdb-proxy.asdking01.workers.dev/api/tmdb/test")
+    assertEquals("https://kras-tmdb-proxy.asdking01.workers.dev", parsedWorkerTestEndpoint.baseUrl)
+    assertEquals("https://kras-tmdb-proxy.asdking01.workers.dev", BuildConfig.DEFAULT_TMDB_PROXY_URL)
 
     kotlinx.coroutines.runBlocking {
       val unconfigured = tmdbClient.verifyConnection("")

@@ -21,7 +21,9 @@ android {
 
     buildConfigField("String", "GITHUB_OWNER", "\"asdking01-boop\"")
     buildConfigField("String", "GITHUB_REPO", "\"Vpnapk\"")
-    val defaultProxyUrl = (project.findProperty("tmdbProxyUrl") as String?)?.trim().orEmpty()
+    val defaultProxyUrl = (project.findProperty("tmdbProxyUrl") as String?)?.trim()
+      ?.takeIf { it.isNotEmpty() }
+      ?: "https://kras-tmdb-proxy.asdking01.workers.dev"
     buildConfigField("String", "DEFAULT_TMDB_PROXY_URL", "\"$defaultProxyUrl\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
