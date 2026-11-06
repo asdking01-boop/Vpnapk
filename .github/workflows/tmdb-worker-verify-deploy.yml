@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: '22'
       - name: Check JavaScript syntax
-        run: node --check backend-tmdb-proxy/worker.js
+        run: node --input-type=module --check < backend-tmdb-proxy/worker.js
       - name: Run local Worker tests
         run: node --test backend-tmdb-proxy/worker.test.js
 
