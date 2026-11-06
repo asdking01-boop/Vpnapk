@@ -2,6 +2,7 @@ package com.example.data.local
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.data.api.TmdbProxyClient
 import com.example.data.local.db.KrasDatabase
 import com.example.data.local.entity.CategoryEntity
 import com.example.data.local.entity.MediaItemEntity
@@ -20,6 +21,10 @@ class KrasRepository(context: Context) {
 
     private val db = KrasDatabase.getInstance(context)
     val mediaDao = db.mediaDao()
+
+    init {
+        migrateStoredTmdbProxyUrl()
+    }
 
     // --- Accounts ---
     fun getAccounts(): List<Account> {
@@ -707,6 +712,18 @@ class KrasRepository(context: Context) {
     }
 
     // --- Settings ---
+    fun migrateStoredTmdbProxyUrl(): String {
+        val rawStored = prefs.getString("tmdbProxyUrl", null)
+        val defaultCanonical = com.example.BuildConfig.DEFAULT_TMDB_PROXY_URL.ifBlank {
+            TmdbProxyClient.CANONICAL_BACKEND_BASE_URL
+        }
+        val normalized = TmdbProxyClient.normalizeOrFallbackToCanonical(rawStored, defaultCanonical)
+        if (rawStored != normalized) {
+            prefs.edit().putString("tmdbProxyUrl", normalized).apply()
+        }
+        return normalized
+    }
+
     fun getUserSettings(): UserSettings {
         val orderName = prefs.getString("liveChannelOrder", LiveChannelOrder.SMART.name) ?: LiveChannelOrder.SMART.name
         val liveOrder = try {
@@ -714,6 +731,8 @@ class KrasRepository(context: Context) {
         } catch (e: Exception) {
             LiveChannelOrder.SMART
         }
+
+        val canonicalProxyUrl = migrateStoredTmdbProxyUrl()
 
         return UserSettings(
             accentColorIndex = prefs.getInt("accentColorIndex", 0),
@@ -731,18 +750,17 @@ class KrasRepository(context: Context) {
             autoCheckUpdates = prefs.getBoolean("autoCheckUpdates", true),
             backgroundPlayback = prefs.getBoolean("backgroundPlayback", true),
             liveSwipeGesturesEnabled = prefs.getBoolean("liveSwipeGesturesEnabled", true),
-            tmdbProxyUrl = prefs.getString("tmdbProxyUrl", null)
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: com.example.BuildConfig.DEFAULT_TMDB_PROXY_URL.ifBlank {
-                    "https://kras-tmdb-proxy.asdking01.workers.dev"
-                },
+            tmdbProxyUrl = canonicalProxyUrl,
             tmdbAutoEnrichEnabled = true,
             tmdbAutoSyncEnabled = prefs.getBoolean("tmdbAutoSyncEnabled", true)
         )
     }
 
     fun saveUserSettings(settings: UserSettings) {
+        val defaultCanonical = com.example.BuildConfig.DEFAULT_TMDB_PROXY_URL.ifBlank {
+            TmdbProxyClient.CANONICAL_BACKEND_BASE_URL
+        }
+        val normalizedProxyUrl = TmdbProxyClient.normalizeOrFallbackToCanonical(settings.tmdbProxyUrl, defaultCanonical)
         prefs.edit().apply {
             putInt("accentColorIndex", settings.accentColorIndex)
             putString("blurIntensity", settings.blurIntensity)
@@ -759,9 +777,7 @@ class KrasRepository(context: Context) {
             putBoolean("autoCheckUpdates", settings.autoCheckUpdates)
             putBoolean("backgroundPlayback", settings.backgroundPlayback)
             putBoolean("liveSwipeGesturesEnabled", settings.liveSwipeGesturesEnabled)
-            if (settings.tmdbProxyUrl.isNotBlank()) {
-                putString("tmdbProxyUrl", settings.tmdbProxyUrl.trim())
-            }
+            putString("tmdbProxyUrl", normalizedProxyUrl)
             putBoolean("tmdbAutoEnrichEnabled", true)
             putBoolean("tmdbAutoSyncEnabled", settings.tmdbAutoSyncEnabled)
         }.apply()

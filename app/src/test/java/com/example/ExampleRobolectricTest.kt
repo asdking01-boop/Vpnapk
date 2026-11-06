@@ -1308,6 +1308,150 @@ class ExampleRobolectricTest {
     sessionStore.clearSession()
     assertNull(sessionStore.getSession())
   }
+
+  @Test
+  fun `duplicated cloudflare backend url normalization preference migration and error classification`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val tmdbClient = com.example.data.api.TmdbProxyClient()
+    val canonical = "https://kras-tmdb-proxy.asdking01.workers.dev"
+
+    // 1. Exact bug reported: concatenated Cloudflare Worker base URL twice
+    val duplicatedInputs = listOf(
+      "https://kras-tmdb-proxy.asdking01.workers.devhttps://kras-tmdb-proxy.asdking01.workers.dev",
+      "https://kras-tmdb-proxy.asdking01.workers.dev/https://kras-tmdb-proxy.asdking01.workers.dev",
+      "https://https://kras-tmdb-proxy.asdking01.workers.dev",
+      "kras-tmdb-proxy.asdking01.workers.devhttps://kras-tmdb-proxy.asdking01.workers.dev/api/tmdb/test",
+      "https://kras-tmdb-proxy.asdking01.workers.devkras-tmdb-proxy.asdking01.workers.dev",
+      "https://kras-tmdb-proxy.asdking01.workers.dev/api/tmdb/auth/request-token"
+    )
+    for (malformed in duplicatedInputs) {
+      val parsed = tmdbClient.parseProxyEndpoint(malformed)
+      assertEquals("Failed to normalize: $malformed", canonical, parsed.baseUrl)
+      assertEquals(
+        "$canonical/api/tmdb/test",
+        tmdbClient.buildEndpointUrl(malformed, "/api/tmdb/test")
+      )
+      assertEquals(
+        "$canonical/api/tmdb/auth/request-token",
+        tmdbClient.buildEndpointUrl(malformed, "/api/tmdb/auth/request-token")
+      )
+    }
+
+    // 2. Migrate malformed previously saved URL in SharedPreferences via KrasRepository
+    val rawPrefs = context.getSharedPreferences("kras_tv_prefs", Context.MODE_PRIVATE)
+    rawPrefs.edit()
+      .putString(
+        "tmdbProxyUrl",
+        "https://kras-tmdb-proxy.asdking01.workers.devhttps://kras-tmdb-proxy.asdking01.workers.dev"
+      )
+      .commit()
+
+    val repo = KrasRepository(context)
+    val migratedSettings = repo.getUserSettings()
+    assertEquals(canonical, migratedSettings.tmdbProxyUrl)
+    assertEquals(canonical, rawPrefs.getString("tmdbProxyUrl", null))
+
+    // 3. Distinguish between /api/tmdb/test success, missing auth endpoint (404), HTTP error (500), and network error
+    val mockHttpClient = okhttp3.OkHttpClient.Builder()
+      .addInterceptor { chain ->
+        val req = chain.request()
+        val urlStr = req.url.toString()
+        val mediaType = "application/json; charset=utf-8".let {
+          with(okhttp3.MediaType) { it.toMediaType() }
+        }
+        when {
+          urlStr == "$canonical/api/tmdb/test" -> {
+            okhttp3.Response.Builder()
+              .request(req)
+              .protocol(okhttp3.Protocol.HTTP_1_1)
+              .code(200)
+              .message("OK")
+              .body(
+                okhttp3.ResponseBody.create(
+                  mediaType,
+                  """{"ok":true,"status":"connected","tmdbConnected":true}"""
+                )
+              )
+              .build()
+          }
+          urlStr == "$canonical/api/tmdb/auth/request-token" -> {
+            okhttp3.Response.Builder()
+              .request(req)
+              .protocol(okhttp3.Protocol.HTTP_1_1)
+              .code(404)
+              .message("Not Found")
+              .body(
+                okhttp3.ResponseBody.create(
+                  mediaType,
+                  """{"ok":false,"error":"Not Found"}"""
+                )
+              )
+              .build()
+          }
+          urlStr == "https://http-error.example.com/api/tmdb/auth/request-token" -> {
+            okhttp3.Response.Builder()
+              .request(req)
+              .protocol(okhttp3.Protocol.HTTP_1_1)
+              .code(500)
+              .message("Internal Server Error")
+              .body(
+                okhttp3.ResponseBody.create(
+                  mediaType,
+                  """{"ok":false,"error":"Internal upstream failure"}"""
+                )
+              )
+              .build()
+          }
+          urlStr.startsWith("https://http-error.example.com/") -> {
+            okhttp3.Response.Builder()
+              .request(req)
+              .protocol(okhttp3.Protocol.HTTP_1_1)
+              .code(500)
+              .message("Internal Server Error")
+              .body(okhttp3.ResponseBody.create(mediaType, """{"ok":false}"""))
+              .build()
+          }
+          else -> throw java.io.IOException("Simulated network offline for $urlStr")
+        }
+      }
+      .build()
+
+    val mockedTmdbClient = com.example.data.api.TmdbProxyClient(mockHttpClient)
+    kotlinx.coroutines.runBlocking {
+      // A: /api/tmdb/test succeeds even when passed the duplicated URL
+      val health = mockedTmdbClient.verifyConnection(
+        "https://kras-tmdb-proxy.asdking01.workers.devhttps://kras-tmdb-proxy.asdking01.workers.dev"
+      )
+      assertTrue(health.isConnected)
+      assertEquals(com.example.data.api.TmdbConnectionState.CONNECTED, health.state)
+      assertEquals(com.example.data.api.TmdbErrorCategory.NONE, health.errorCategory)
+      assertEquals("$canonical/api/tmdb/test", health.testedUrl)
+
+      // B: Missing auth endpoint (404 on /api/tmdb/auth/request-token while /api/tmdb/test is 200 OK)
+      val missingAuth = mockedTmdbClient.createAuthRequestToken(
+        "https://kras-tmdb-proxy.asdking01.workers.devhttps://kras-tmdb-proxy.asdking01.workers.dev"
+      )
+      assertFalse(missingAuth.ok)
+      assertTrue(missingAuth.endpointNotDeployed)
+      assertEquals(404, missingAuth.httpStatusCode)
+      assertEquals(com.example.data.api.TmdbErrorCategory.MISSING_AUTH_ENDPOINT, missingAuth.errorCategory)
+      assertEquals("$canonical/api/tmdb/auth/request-token", missingAuth.requestUrl)
+      assertFalse(missingAuth.userMessage.contains("${canonical}${canonical}"))
+
+      // C: HTTP 500 error
+      val httpErr = mockedTmdbClient.createAuthRequestToken("https://http-error.example.com")
+      assertFalse(httpErr.ok)
+      assertFalse(httpErr.endpointNotDeployed)
+      assertEquals(500, httpErr.httpStatusCode)
+      assertEquals(com.example.data.api.TmdbErrorCategory.HTTP_ERROR, httpErr.errorCategory)
+
+      // D: Network error (IOException)
+      val netErr = mockedTmdbClient.createAuthRequestToken("https://offline-worker.example.com")
+      assertFalse(netErr.ok)
+      assertEquals(com.example.data.api.TmdbErrorCategory.NETWORK_ERROR, netErr.errorCategory)
+    }
+  }
 }
+
 
 

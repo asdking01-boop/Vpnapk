@@ -23,14 +23,26 @@ enum class TmdbConnectionState {
     CHECKING,
     CONNECTED,
     PROXY_UNREACHABLE,
+    HTTP_ERROR,
     SERVER_KEY_MISSING,
     TMDB_REJECTED
+}
+
+enum class TmdbErrorCategory {
+    NONE,
+    UNCONFIGURED,
+    NETWORK_ERROR,
+    HTTP_ERROR,
+    MISSING_AUTH_ENDPOINT
 }
 
 data class TmdbHealthResult(
     val state: TmdbConnectionState,
     val isConnected: Boolean = state == TmdbConnectionState.CONNECTED,
-    val message: String = ""
+    val message: String = "",
+    val httpStatusCode: Int = 0,
+    val errorCategory: TmdbErrorCategory = if (state == TmdbConnectionState.CONNECTED) TmdbErrorCategory.NONE else TmdbErrorCategory.UNCONFIGURED,
+    val testedUrl: String = ""
 )
 
 data class CleanedTmdbQuery(
@@ -85,6 +97,9 @@ data class TmdbRequestTokenResult(
     val authUrl: String = "",
     val expiresAt: String = "",
     val endpointNotDeployed: Boolean = false,
+    val httpStatusCode: Int = 0,
+    val errorCategory: TmdbErrorCategory = TmdbErrorCategory.NONE,
+    val requestUrl: String = "",
     val userMessage: String = ""
 )
 
@@ -96,6 +111,9 @@ data class TmdbSessionResult(
     val displayName: String = "",
     val avatarUrl: String = "",
     val endpointNotDeployed: Boolean = false,
+    val httpStatusCode: Int = 0,
+    val errorCategory: TmdbErrorCategory = TmdbErrorCategory.NONE,
+    val requestUrl: String = "",
     val userMessage: String = ""
 )
 
@@ -108,6 +126,9 @@ data class TmdbTwoWaySyncResult(
     val pushedWatchlist: Int = 0,
     val pushedRatings: Int = 0,
     val endpointNotDeployed: Boolean = false,
+    val httpStatusCode: Int = 0,
+    val errorCategory: TmdbErrorCategory = TmdbErrorCategory.NONE,
+    val requestUrl: String = "",
     val userMessage: String = ""
 )
 
@@ -132,74 +153,95 @@ class TmdbProxyClient(
     private val tvCache = ConcurrentHashMap<String, TmdbMediaMetadata>()
     private val seasonEpisodesCache = ConcurrentHashMap<String, List<TmdbEpisodeMetadata>>()
 
+    /**
+     * Parses, deduplicates, normalizes, and validates a backend proxy URL.
+     *
+     * Specifically fixes malformed or duplicated URLs such as:
+     * `https://kras-tmdb-proxy.asdking01.workers.devhttps://kras-tmdb-proxy.asdking01.workers.dev`
+     * which `java.net.URI` would otherwise misparse as host `kras-tmdb-proxy.asdking01.workers.devhttps`
+     * with empty port `:` and path `//kras-tmdb-proxy.asdking01.workers.dev`.
+     */
     fun parseProxyEndpoint(rawUrl: String): ParsedProxyEndpoint {
-        var trimmed = rawUrl.trim()
-        if (trimmed.isEmpty()) return ParsedProxyEndpoint("", "")
-        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-            trimmed = "https://$trimmed"
+        val cleanedInput = rawUrl.trim().trim('"', '\'')
+        if (cleanedInput.isEmpty()) return ParsedProxyEndpoint("", "")
+
+        var extractedToken = extractQueryTokenFromRawString(cleanedInput)
+        val deduplicatedCandidate = deduplicateConcatenatedUrls(cleanedInput)
+        if (deduplicatedCandidate.isEmpty()) return ParsedProxyEndpoint("", "")
+
+        val withScheme = if (!deduplicatedCandidate.startsWith("http://", ignoreCase = true) &&
+            !deduplicatedCandidate.startsWith("https://", ignoreCase = true)
+        ) {
+            "https://$deduplicatedCandidate"
+        } else {
+            deduplicatedCandidate
         }
 
-        var extractedToken = ""
         try {
-            val uri = URI(trimmed)
-            val rawQuery = uri.rawQuery.orEmpty()
-            if (rawQuery.isNotEmpty()) {
-                for (pair in rawQuery.split("&")) {
-                    val parts = pair.split("=", limit = 2)
-                    if (parts.size == 2 && (parts[0] == "token" || parts[0] == "proxyToken")) {
-                        extractedToken = java.net.URLDecoder.decode(parts[1], "UTF-8").trim()
-                    }
-                }
+            val uri = URI(withScheme)
+            if (extractedToken.isEmpty()) {
+                extractedToken = extractQueryTokenFromRawString(uri.rawQuery.orEmpty(), isRawQueryOnly = true)
             }
-            val cleanSchemeHostPort = buildString {
-                append(uri.scheme ?: "https")
-                append("://")
-                append(uri.authority ?: "")
+            val scheme = (uri.scheme ?: "https").lowercase()
+            val rawHost = (uri.host ?: uri.authority?.substringBefore(':') ?: "")
+                .trim()
+                .replace(TRAILING_STUCK_SCHEME_REGEX, "")
+            val port = uri.port
+            if (isValidBackendHost(rawHost)) {
                 val cleanPath = stripKnownEndpointSuffixes(uri.path ?: "")
-                append(cleanPath)
-            }.trimEnd('/')
-            if (cleanSchemeHostPort.isNotBlank() && uri.authority != null) {
-                return ParsedProxyEndpoint(cleanSchemeHostPort, extractedToken)
+                    .replace(Regex("/{2,}"), "/")
+                    .trimEnd('/')
+                val normalizedBase = buildString {
+                    append(scheme)
+                    append("://")
+                    append(rawHost)
+                    if (port > 0 && port != 80 && port != 443) {
+                        append(":")
+                        append(port)
+                    }
+                    if (cleanPath.isNotEmpty() && cleanPath != "/") {
+                        if (!cleanPath.startsWith("/")) append("/")
+                        append(cleanPath)
+                    }
+                }.trimEnd('/')
+                return ParsedProxyEndpoint(normalizedBase, extractedToken)
             }
         } catch (_: Exception) {
-            // Fall back to string normalization below
+            // Fall back to string-level normalization below
         }
 
-        val withoutQuery = trimmed.substringBefore("?").substringBefore("#").trimEnd('/')
+        val withoutQuery = withScheme.substringBefore("?").substringBefore("#").trimEnd('/')
         val normalizedBase = stripKnownEndpointSuffixes(withoutQuery).trimEnd('/')
-
-        return ParsedProxyEndpoint(normalizedBase, extractedToken)
-    }
-
-    private fun stripKnownEndpointSuffixes(rawPathOrUrl: String): String {
-        var current = rawPathOrUrl.trim().trimEnd('/')
-        val suffixes = listOf(
-            "/api/tmdb/auth/request-token",
-            "/api/tmdb/auth/session",
-            "/api/tmdb/auth/logout",
-            "/api/tmdb/connectivity-test",
-            "/api/tmdb/health",
-            "/api/tmdb/test",
-            "/api/tmdb/sync",
-            "/api/tmdb",
-            "/health",
-            "/test"
-        )
-        var changed = true
-        while (changed) {
-            changed = false
-            for (suffix in suffixes) {
-                if (current.endsWith(suffix, ignoreCase = true)) {
-                    current = current.dropLast(suffix.length).trimEnd('/')
-                    changed = true
-                }
-            }
+        val hostPart = normalizedBase.substringAfter("://", "").substringBefore("/").substringBefore(":")
+            .replace(TRAILING_STUCK_SCHEME_REGEX, "")
+        if (!isValidBackendHost(hostPart)) {
+            return ParsedProxyEndpoint("", extractedToken)
         }
-        return current
+        val schemePart = normalizedBase.substringBefore("://", "https").lowercase()
+        val rebuilt = "$schemePart://$hostPart"
+        return ParsedProxyEndpoint(rebuilt, extractedToken)
     }
 
     fun normalizeProxyBaseUrl(rawUrl: String): String {
         return parseProxyEndpoint(rawUrl).baseUrl
+    }
+
+    /**
+     * Safely combines a normalized backend base URL with an API path without ever duplicating
+     * the host or `/api/tmdb` prefix.
+     */
+    fun buildEndpointUrl(rawBaseUrl: String, apiPath: String): String {
+        val base = parseProxyEndpoint(rawBaseUrl).baseUrl.trimEnd('/')
+        if (base.isEmpty()) return ""
+        var cleanPath = apiPath.trim()
+        if (cleanPath.startsWith(base, ignoreCase = true)) {
+            cleanPath = cleanPath.substring(base.length)
+        }
+        cleanPath = deduplicateConcatenatedUrls(cleanPath)
+        if (!cleanPath.startsWith("/")) {
+            cleanPath = "/$cleanPath"
+        }
+        return "$base$cleanPath"
     }
 
     private fun buildAuthenticatedRequest(
@@ -247,22 +289,25 @@ class TmdbProxyClient(
         rawProxyUrl: String,
         redirectTo: String = "krastv://tmdb-auth"
     ): TmdbRequestTokenResult = withContext(Dispatchers.IO) {
-        val effectiveRawUrl = rawProxyUrl.trim().ifBlank { DEFAULT_CLOUDFLARE_WORKER_URL }
+        val effectiveRawUrl = rawProxyUrl.trim().ifBlank { CANONICAL_BACKEND_BASE_URL }
         val endpoint = parseProxyEndpoint(effectiveRawUrl)
         if (endpoint.baseUrl.isEmpty()) {
             return@withContext TmdbRequestTokenResult(
                 ok = false,
-                endpointNotDeployed = true,
+                endpointNotDeployed = false,
+                errorCategory = TmdbErrorCategory.UNCONFIGURED,
                 userMessage = "TMDb Account Sync service URL is not configured."
             )
         }
+
+        val requestUrl = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/auth/request-token")
 
         try {
             val payload = JSONObject().apply {
                 put("redirectTo", redirectTo)
             }
             val request = buildAuthenticatedRequest(
-                url = "${endpoint.baseUrl}/api/tmdb/auth/request-token",
+                url = requestUrl,
                 proxyAuthToken = endpoint.proxyAuthToken,
                 method = "POST",
                 jsonBody = payload
@@ -289,26 +334,35 @@ class TmdbProxyClient(
                         requestToken = token,
                         authUrl = authUrl,
                         expiresAt = json?.optString("expiresAt", json.optString("expires_at", "")).orEmpty(),
+                        httpStatusCode = response.code,
+                        errorCategory = TmdbErrorCategory.NONE,
+                        requestUrl = requestUrl,
                         userMessage = "Approve access in your browser to finish connecting your TMDb account."
                     )
                 }
 
-                // Check if the Worker itself is online at /api/tmdb/test or /api/tmdb/health
-                // so we accurately report missing auth endpoints rather than a generic connection error.
+                // Distinguish between a missing authentication endpoint on an otherwise live Worker
+                // (verified via /api/tmdb/test) vs. general HTTP errors.
                 if (response.code == 404 || response.code == 405 || response.code == 501 || response.code == 400) {
                     val healthCheck = verifyConnection(endpoint.baseUrl)
                     if (healthCheck.isConnected) {
                         return@withContext TmdbRequestTokenResult(
                             ok = false,
                             endpointNotDeployed = true,
-                            userMessage = "Your Cloudflare Worker (${endpoint.baseUrl}) is online, but the TMDb Account & Sync endpoints (/api/tmdb/auth/request-token) are not deployed yet. Please deploy the updated Worker script."
+                            httpStatusCode = response.code,
+                            errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
+                            requestUrl = requestUrl,
+                            userMessage = "Backend connected at ${endpoint.baseUrl}/api/tmdb/test, but the TMDb account authentication endpoint (/api/tmdb/auth/request-token) is not deployed on your Cloudflare Worker yet (HTTP ${response.code})."
                         )
                     }
                     if (response.code == 404 || response.code == 405 || response.code == 501) {
                         return@withContext TmdbRequestTokenResult(
                             ok = false,
                             endpointNotDeployed = true,
-                            userMessage = "The TMDb Account & Sync endpoints (/api/tmdb/auth/request-token) are not deployed on ${endpoint.baseUrl} yet."
+                            httpStatusCode = response.code,
+                            errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
+                            requestUrl = requestUrl,
+                            userMessage = "The TMDb Account & Sync endpoint (/api/tmdb/auth/request-token) returned HTTP ${response.code} on ${endpoint.baseUrl}. Deploy the updated Cloudflare Worker to enable account sign-in."
                         )
                     }
                 }
@@ -319,15 +373,22 @@ class TmdbProxyClient(
 
                 return@withContext TmdbRequestTokenResult(
                     ok = false,
-                    userMessage = serverError.ifBlank {
-                        "TMDb authorization service returned HTTP ${response.code}. Please verify your Cloudflare Worker deployment."
+                    httpStatusCode = response.code,
+                    errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                    requestUrl = requestUrl,
+                    userMessage = if (serverError.isNotBlank()) {
+                        "HTTP ${response.code} from ${endpoint.baseUrl}: $serverError"
+                    } else {
+                        "TMDb authorization service at ${endpoint.baseUrl} returned HTTP ${response.code}."
                     }
                 )
             }
         } catch (_: Exception) {
             TmdbRequestTokenResult(
                 ok = false,
-                userMessage = "Unable to reach ${endpoint.baseUrl}. Please check your internet connection or Cloudflare Worker status."
+                errorCategory = TmdbErrorCategory.NETWORK_ERROR,
+                requestUrl = requestUrl,
+                userMessage = "Network error: Unable to reach ${endpoint.baseUrl}. Please check your internet connection."
             )
         }
     }
@@ -341,15 +402,18 @@ class TmdbProxyClient(
         rawProxyUrl: String,
         requestToken: String
     ): TmdbSessionResult = withContext(Dispatchers.IO) {
-        val effectiveRawUrl = rawProxyUrl.trim().ifBlank { DEFAULT_CLOUDFLARE_WORKER_URL }
+        val effectiveRawUrl = rawProxyUrl.trim().ifBlank { CANONICAL_BACKEND_BASE_URL }
         val endpoint = parseProxyEndpoint(effectiveRawUrl)
         val cleanToken = requestToken.trim()
         if (endpoint.baseUrl.isEmpty() || cleanToken.isEmpty()) {
             return@withContext TmdbSessionResult(
                 ok = false,
+                errorCategory = TmdbErrorCategory.UNCONFIGURED,
                 userMessage = "Authorization session could not be verified."
             )
         }
+
+        val requestUrl = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/auth/session")
 
         try {
             val payload = JSONObject().apply {
@@ -357,7 +421,7 @@ class TmdbProxyClient(
                 put("request_token", cleanToken)
             }
             val request = buildAuthenticatedRequest(
-                url = "${endpoint.baseUrl}/api/tmdb/auth/session",
+                url = requestUrl,
                 proxyAuthToken = endpoint.proxyAuthToken,
                 method = "POST",
                 jsonBody = payload
@@ -373,7 +437,10 @@ class TmdbProxyClient(
                     return@withContext TmdbSessionResult(
                         ok = false,
                         endpointNotDeployed = true,
-                        userMessage = "The TMDb Account Sync endpoint (/api/tmdb/auth/session) is not deployed on your Cloudflare Worker yet."
+                        httpStatusCode = response.code,
+                        errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
+                        requestUrl = requestUrl,
+                        userMessage = "The TMDb Account Sync endpoint (/api/tmdb/auth/session) is not deployed on ${endpoint.baseUrl} yet (HTTP ${response.code})."
                     )
                 }
 
@@ -402,6 +469,9 @@ class TmdbProxyClient(
                         username = username,
                         displayName = displayName.ifBlank { username },
                         avatarUrl = avatarUrl,
+                        httpStatusCode = response.code,
+                        errorCategory = TmdbErrorCategory.NONE,
+                        requestUrl = requestUrl,
                         userMessage = "TMDb account @$username connected."
                     )
                 }
@@ -412,15 +482,20 @@ class TmdbProxyClient(
 
                 return@withContext TmdbSessionResult(
                     ok = false,
+                    httpStatusCode = response.code,
+                    errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                    requestUrl = requestUrl,
                     userMessage = serverError.ifBlank {
-                        "Please approve the TMDb authorization request in your browser first, then tap Complete Sign-In."
+                        "Please approve the TMDb authorization request in your browser first, then tap Complete Sign-In (HTTP ${response.code})."
                     }
                 )
             }
         } catch (_: Exception) {
             TmdbSessionResult(
                 ok = false,
-                userMessage = "Unable to complete TMDb sign-in right now. Please check your connection."
+                errorCategory = TmdbErrorCategory.NETWORK_ERROR,
+                requestUrl = requestUrl,
+                userMessage = "Network error: Unable to reach ${endpoint.baseUrl} to complete TMDb sign-in."
             )
         }
     }
@@ -438,14 +513,17 @@ class TmdbProxyClient(
         localRatings: List<TmdbSyncItem>,
         language: String = "en-US"
     ): TmdbTwoWaySyncResult = withContext(Dispatchers.IO) {
-        val effectiveRawUrl = rawProxyUrl.trim().ifBlank { DEFAULT_CLOUDFLARE_WORKER_URL }
+        val effectiveRawUrl = rawProxyUrl.trim().ifBlank { CANONICAL_BACKEND_BASE_URL }
         val endpoint = parseProxyEndpoint(effectiveRawUrl)
         if (endpoint.baseUrl.isEmpty() || sessionId.isBlank()) {
             return@withContext TmdbTwoWaySyncResult(
                 ok = false,
+                errorCategory = TmdbErrorCategory.UNCONFIGURED,
                 userMessage = "Connect your TMDb account first to synchronize."
             )
         }
+
+        val requestUrl = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/sync")
 
         try {
             val payload = JSONObject().apply {
@@ -457,7 +535,7 @@ class TmdbProxyClient(
             }
 
             val request = buildAuthenticatedRequest(
-                url = "${endpoint.baseUrl}/api/tmdb/sync",
+                url = requestUrl,
                 proxyAuthToken = endpoint.proxyAuthToken,
                 tmdbSessionId = sessionId,
                 method = "POST",
@@ -474,7 +552,10 @@ class TmdbProxyClient(
                     return@withContext TmdbTwoWaySyncResult(
                         ok = false,
                         endpointNotDeployed = true,
-                        userMessage = "The TMDb Account Sync endpoint (/api/tmdb/sync) is not deployed on your Cloudflare Worker yet."
+                        httpStatusCode = response.code,
+                        errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
+                        requestUrl = requestUrl,
+                        userMessage = "The TMDb Account Sync endpoint (/api/tmdb/sync) is not deployed on ${endpoint.baseUrl} yet (HTTP ${response.code})."
                     )
                 }
 
@@ -490,6 +571,9 @@ class TmdbProxyClient(
                         pushedFavorites = json.optInt("pushedFavorites", json.optInt("pushedCount", 0)),
                         pushedWatchlist = json.optInt("pushedWatchlist", 0),
                         pushedRatings = json.optInt("pushedRatings", 0),
+                        httpStatusCode = response.code,
+                        errorCategory = TmdbErrorCategory.NONE,
+                        requestUrl = requestUrl,
                         userMessage = "Favorites, Watchlist, and Ratings synchronized with TMDb."
                     )
                 }
@@ -500,15 +584,20 @@ class TmdbProxyClient(
 
                 return@withContext TmdbTwoWaySyncResult(
                     ok = false,
+                    httpStatusCode = response.code,
+                    errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                    requestUrl = requestUrl,
                     userMessage = serverError.ifBlank {
-                        "Could not synchronize with TMDb right now. Please try again shortly."
+                        "TMDb synchronization returned HTTP ${response.code} from ${endpoint.baseUrl}."
                     }
                 )
             }
         } catch (_: Exception) {
             TmdbTwoWaySyncResult(
                 ok = false,
-                userMessage = "Network unavailable during TMDb synchronization."
+                errorCategory = TmdbErrorCategory.NETWORK_ERROR,
+                requestUrl = requestUrl,
+                userMessage = "Network error: Unable to reach ${endpoint.baseUrl} during TMDb synchronization."
             )
         }
     }
@@ -521,7 +610,7 @@ class TmdbProxyClient(
         tmdbId: Int,
         favorite: Boolean
     ): Boolean = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { DEFAULT_CLOUDFLARE_WORKER_URL })
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty() || sessionId.isBlank() || tmdbId <= 0) return@withContext false
 
         try {
@@ -534,7 +623,7 @@ class TmdbProxyClient(
                 put("favorite", favorite)
             }
             val request = buildAuthenticatedRequest(
-                url = "${endpoint.baseUrl}/api/tmdb/account/favorite",
+                url = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/account/favorite"),
                 proxyAuthToken = endpoint.proxyAuthToken,
                 tmdbSessionId = sessionId,
                 method = "POST",
@@ -556,7 +645,7 @@ class TmdbProxyClient(
         tmdbId: Int,
         watchlist: Boolean
     ): Boolean = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { DEFAULT_CLOUDFLARE_WORKER_URL })
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty() || sessionId.isBlank() || tmdbId <= 0) return@withContext false
 
         try {
@@ -569,7 +658,7 @@ class TmdbProxyClient(
                 put("watchlist", watchlist)
             }
             val request = buildAuthenticatedRequest(
-                url = "${endpoint.baseUrl}/api/tmdb/account/watchlist",
+                url = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/account/watchlist"),
                 proxyAuthToken = endpoint.proxyAuthToken,
                 tmdbSessionId = sessionId,
                 method = "POST",
@@ -591,7 +680,7 @@ class TmdbProxyClient(
         tmdbId: Int,
         rating: Double
     ): Boolean = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { DEFAULT_CLOUDFLARE_WORKER_URL })
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty() || sessionId.isBlank() || tmdbId <= 0) return@withContext false
 
         try {
@@ -604,7 +693,7 @@ class TmdbProxyClient(
                 put("rating", rating)
             }
             val request = buildAuthenticatedRequest(
-                url = "${endpoint.baseUrl}/api/tmdb/account/rating",
+                url = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/account/rating"),
                 proxyAuthToken = endpoint.proxyAuthToken,
                 tmdbSessionId = sessionId,
                 method = "POST",
@@ -622,12 +711,12 @@ class TmdbProxyClient(
         rawProxyUrl: String,
         sessionId: String
     ): Boolean = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { DEFAULT_CLOUDFLARE_WORKER_URL })
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty() || sessionId.isBlank()) return@withContext true
 
         try {
             val request = buildAuthenticatedRequest(
-                url = "${endpoint.baseUrl}/api/tmdb/auth/logout",
+                url = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/auth/logout"),
                 proxyAuthToken = endpoint.proxyAuthToken,
                 tmdbSessionId = sessionId,
                 method = "POST",
@@ -651,22 +740,26 @@ class TmdbProxyClient(
             return@withContext TmdbHealthResult(
                 state = TmdbConnectionState.NOT_CONFIGURED,
                 isConnected = false,
-                message = "Backend proxy URL is not configured."
+                message = "Backend proxy URL is not configured.",
+                errorCategory = TmdbErrorCategory.UNCONFIGURED
             )
         }
 
-        // Check both /api/tmdb/test (existing Cloudflare Worker endpoint) and /api/tmdb/health
+        // Test the backend using the existing /api/tmdb/test endpoint first, then /api/tmdb/health
         val candidatePaths = listOf("/api/tmdb/test", "/api/tmdb/health")
         var lastResult = TmdbHealthResult(
             state = TmdbConnectionState.PROXY_UNREACHABLE,
             isConnected = false,
-            message = "TMDb metadata service is currently unreachable."
+            message = "Network error: Unable to reach ${endpoint.baseUrl}/api/tmdb/test.",
+            errorCategory = TmdbErrorCategory.NETWORK_ERROR,
+            testedUrl = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/test")
         )
 
         for (path in candidatePaths) {
+            val targetUrl = buildEndpointUrl(endpoint.baseUrl, path)
             try {
                 val request = buildAuthenticatedRequest(
-                    url = "${endpoint.baseUrl}$path",
+                    url = targetUrl,
                     proxyAuthToken = endpoint.proxyAuthToken
                 )
 
@@ -690,7 +783,10 @@ class TmdbProxyClient(
                         return@withContext TmdbHealthResult(
                             state = TmdbConnectionState.CONNECTED,
                             isConnected = true,
-                            message = serverMessage.ifBlank { "Connected to TMDb API v3 via secure backend proxy." }
+                            message = serverMessage.ifBlank { "Connected to TMDb API v3 via ${endpoint.baseUrl}." },
+                            httpStatusCode = response.code,
+                            errorCategory = TmdbErrorCategory.NONE,
+                            testedUrl = targetUrl
                         )
                     }
 
@@ -700,18 +796,35 @@ class TmdbProxyClient(
                         lastResult = TmdbHealthResult(
                             state = TmdbConnectionState.SERVER_KEY_MISSING,
                             isConnected = false,
-                            message = "TMDb service is currently unconfigured."
+                            message = "TMDb service is currently unconfigured on ${endpoint.baseUrl} (HTTP ${response.code}).",
+                            httpStatusCode = response.code,
+                            errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                            testedUrl = targetUrl
                         )
                     } else if (response.code == 401 || response.code == 403) {
                         lastResult = TmdbHealthResult(
                             state = TmdbConnectionState.TMDB_REJECTED,
                             isConnected = false,
-                            message = "TMDb authentication failed."
+                            message = "TMDb authentication failed on ${endpoint.baseUrl} (HTTP ${response.code}).",
+                            httpStatusCode = response.code,
+                            errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                            testedUrl = targetUrl
+                        )
+                    } else {
+                        lastResult = TmdbHealthResult(
+                            state = TmdbConnectionState.HTTP_ERROR,
+                            isConnected = false,
+                            message = serverMessage.ifBlank {
+                                "Backend at $targetUrl returned HTTP ${response.code}."
+                            },
+                            httpStatusCode = response.code,
+                            errorCategory = TmdbErrorCategory.HTTP_ERROR,
+                            testedUrl = targetUrl
                         )
                     }
                 }
             } catch (_: Exception) {
-                // Try next candidate path
+                // Keep network error if no HTTP response was received on any candidate path
             }
         }
 
@@ -725,7 +838,7 @@ class TmdbProxyClient(
         tmdbId: Int = 0,
         language: String = "en-US"
     ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty()) return@withContext null
 
         val cleaned = extractTmdbQuery(rawTitle)
@@ -741,7 +854,10 @@ class TmdbProxyClient(
             val encodedTitle = URLEncoder.encode(effectiveTitle, "UTF-8")
             val encodedYear = URLEncoder.encode(effectiveYear, "UTF-8")
             val encodedLang = URLEncoder.encode(language, "UTF-8")
-            val url = "${endpoint.baseUrl}/api/tmdb/movie?title=$encodedTitle&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
+            val url = buildEndpointUrl(
+                endpoint.baseUrl,
+                "/api/tmdb/movie?title=$encodedTitle&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
+            )
 
             val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
 
@@ -767,7 +883,7 @@ class TmdbProxyClient(
         tmdbId: Int = 0,
         language: String = "en-US"
     ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty()) return@withContext null
 
         val cleaned = extractTmdbQuery(rawTitle)
@@ -783,7 +899,10 @@ class TmdbProxyClient(
             val encodedTitle = URLEncoder.encode(effectiveTitle, "UTF-8")
             val encodedYear = URLEncoder.encode(effectiveYear, "UTF-8")
             val encodedLang = URLEncoder.encode(language, "UTF-8")
-            val url = "${endpoint.baseUrl}/api/tmdb/tv?title=$encodedTitle&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
+            val url = buildEndpointUrl(
+                endpoint.baseUrl,
+                "/api/tmdb/tv?title=$encodedTitle&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
+            )
 
             val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
 
@@ -807,7 +926,7 @@ class TmdbProxyClient(
         movieId: Int,
         language: String = "en-US"
     ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty() || movieId <= 0) return@withContext null
 
         val cacheKey = "movie_id:$movieId:$language"
@@ -815,7 +934,7 @@ class TmdbProxyClient(
 
         try {
             val encodedLang = URLEncoder.encode(language, "UTF-8")
-            val url = "${endpoint.baseUrl}/api/tmdb/movie/$movieId?language=$encodedLang"
+            val url = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/movie/$movieId?language=$encodedLang")
             val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
 
             httpClient.newCall(request).execute().use { response ->
@@ -838,7 +957,7 @@ class TmdbProxyClient(
         tvId: Int,
         language: String = "en-US"
     ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty() || tvId <= 0) return@withContext null
 
         val cacheKey = "tv_id:$tvId:$language"
@@ -846,7 +965,7 @@ class TmdbProxyClient(
 
         try {
             val encodedLang = URLEncoder.encode(language, "UTF-8")
-            val url = "${endpoint.baseUrl}/api/tmdb/tv/$tvId?language=$encodedLang"
+            val url = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/tv/$tvId?language=$encodedLang")
             val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
 
             httpClient.newCall(request).execute().use { response ->
@@ -872,7 +991,7 @@ class TmdbProxyClient(
         tmdbId: Int = 0,
         language: String = "en-US"
     ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty()) return@withContext null
 
         val cleaned = extractTmdbQuery(rawTitle)
@@ -885,7 +1004,10 @@ class TmdbProxyClient(
             val encodedType = URLEncoder.encode(type.lowercase(), "UTF-8")
             val encodedYear = URLEncoder.encode(effectiveYear, "UTF-8")
             val encodedLang = URLEncoder.encode(language, "UTF-8")
-            val url = "${endpoint.baseUrl}/api/tmdb/match?title=$encodedTitle&type=$encodedType&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
+            val url = buildEndpointUrl(
+                endpoint.baseUrl,
+                "/api/tmdb/match?title=$encodedTitle&type=$encodedType&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
+            )
             val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
 
             httpClient.newCall(request).execute().use { response ->
@@ -905,7 +1027,7 @@ class TmdbProxyClient(
         seasonNumber: Int,
         language: String = "en-US"
     ): List<TmdbEpisodeMetadata> = withContext(Dispatchers.IO) {
-        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
         if (endpoint.baseUrl.isEmpty() || tmdbId <= 0 || seasonNumber < 0) return@withContext emptyList()
 
         val cacheKey = "season:$tmdbId:$seasonNumber:$language"
@@ -913,7 +1035,7 @@ class TmdbProxyClient(
 
         try {
             val encodedLang = URLEncoder.encode(language, "UTF-8")
-            val url = "${endpoint.baseUrl}/api/tmdb/tv/$tmdbId/season/$seasonNumber?language=$encodedLang"
+            val url = buildEndpointUrl(endpoint.baseUrl, "/api/tmdb/tv/$tmdbId/season/$seasonNumber?language=$encodedLang")
             val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
 
             httpClient.newCall(request).execute().use { response ->
@@ -934,8 +1056,13 @@ class TmdbProxyClient(
     }
 
     companion object {
-        const val DEFAULT_CLOUDFLARE_WORKER_URL = "https://kras-tmdb-proxy.asdking01.workers.dev"
+        const val CANONICAL_BACKEND_BASE_URL = "https://kras-tmdb-proxy.asdking01.workers.dev"
+        const val DEFAULT_CLOUDFLARE_WORKER_URL = CANONICAL_BACKEND_BASE_URL
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+        private val SCHEME_BOUNDARY_REGEX = Regex("""(?i)https?://""")
+        private val REPEATED_LEADING_SCHEME_REGEX = Regex("""^(?i)(https?://)+""")
+        private val TRAILING_STUCK_SCHEME_REGEX = Regex("""(?i)https?:?$""")
 
         private val LEADING_COUNTRY_PREFIX_REGEX =
             Regex("""^(?:[A-Z]{2,4}\s*\|\s*|[A-Z]{2,3}\s+-\s+|(?:EN|US|UK|AR|FR|DE|ES|IT|TR|RU|NL|PT|BR|IN|CA|AU|VIP|VOD)\s*:\s*|[\u2600-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF]+\s*[\|\-:]?\s*)+""", RegexOption.IGNORE_CASE)
@@ -947,6 +1074,162 @@ class TmdbProxyClient(
             Regex("""\b(?:8K|4K|UHD|2160p|1080p|FHD|Full\s*HD|720p|HD|480p|SD|HEVC|H\.?265|H\.?264|x264|x265|HDR10\+?|HDR|DV|Dolby\s*Vision|Atmos|50\s*FPS|60\s*FPS|BluRay|WEB-?DL|WEBRip|BRRip|CAM|MULTI|SUB|DUB|VOSTFR)\b""", RegexOption.IGNORE_CASE)
         private val BRACKET_NOISE_REGEX = Regex("""\[[^\]]*\]|\([^\)]*\)""")
         private val MULTI_SPACE_REGEX = Regex("""\s{2,}""")
+
+        /**
+         * Normalizes any stored or user-provided URL into a clean single base URL, falling back
+         * to [CANONICAL_BACKEND_BASE_URL] if the input is null, blank, or malformed.
+         */
+        fun normalizeOrFallbackToCanonical(rawUrl: String?, fallbackUrl: String = CANONICAL_BACKEND_BASE_URL): String {
+            val candidate = rawUrl?.trim().orEmpty()
+            if (candidate.isEmpty()) {
+                return TmdbProxyClient().normalizeProxyBaseUrl(fallbackUrl).ifBlank { CANONICAL_BACKEND_BASE_URL }
+            }
+            val normalized = TmdbProxyClient().normalizeProxyBaseUrl(candidate)
+            return normalized.ifBlank {
+                TmdbProxyClient().normalizeProxyBaseUrl(fallbackUrl).ifBlank { CANONICAL_BACKEND_BASE_URL }
+            }
+        }
+
+        /**
+         * Detects and removes duplicated/concatenated URLs such as:
+         * - `https://kras-tmdb-proxy.asdking01.workers.devhttps://kras-tmdb-proxy.asdking01.workers.dev`
+         * - `https://kras-tmdb-proxy.asdking01.workers.dev/https://kras-tmdb-proxy.asdking01.workers.dev`
+         * - `https://https://kras-tmdb-proxy.asdking01.workers.dev`
+         * - `kras-tmdb-proxy.asdking01.workers.devhttps://kras-tmdb-proxy.asdking01.workers.dev`
+         * - `https://kras-tmdb-proxy.asdking01.workers.devkras-tmdb-proxy.asdking01.workers.dev`
+         */
+        fun deduplicateConcatenatedUrls(raw: String): String {
+            var working = raw.trim().trim('"', '\'')
+            if (working.isEmpty()) return ""
+
+            // If the exact string is repeated back-to-back (S + S), collapse to S
+            if (working.length % 2 == 0) {
+                val half = working.length / 2
+                val firstHalf = working.substring(0, half)
+                val secondHalf = working.substring(half)
+                if (firstHalf.equals(secondHalf, ignoreCase = true)) {
+                    working = firstHalf
+                }
+            }
+
+            working = REPEATED_LEADING_SCHEME_REGEX.replace(working) { match ->
+                if (match.value.lowercase().contains("http://") && !match.value.lowercase().endsWith("https://")) {
+                    "http://"
+                } else {
+                    "https://"
+                }
+            }
+
+            val matches = SCHEME_BOUNDARY_REGEX.findAll(working).toList()
+            if (matches.size >= 2) {
+                // Split into individual scheme-prefixed segments and return the first non-empty valid segment
+                for (i in matches.indices) {
+                    val startIdx = matches[i].range.first
+                    val endIdx = if (i + 1 < matches.size) matches[i + 1].range.first else working.length
+                    val segment = working.substring(startIdx, endIdx).trim().trimEnd('/')
+                    val hostCandidate = segment.substringAfter("://", "").substringBefore("/").substringBefore("?")
+                    if (hostCandidate.isNotBlank()) {
+                        working = segment
+                        break
+                    }
+                }
+            } else if (matches.size == 1 && matches[0].range.first > 0) {
+                // E.g. "kras-tmdb-proxy.asdking01.workers.devhttps://kras-tmdb-proxy.asdking01.workers.dev"
+                val secondPart = working.substring(matches[0].range.first).trim().trimEnd('/')
+                if (secondPart.substringAfter("://", "").isNotBlank()) {
+                    working = secondPart
+                }
+            }
+
+            // Also guard against scheme-less duplicated hostnames (e.g. "https://host.workers.devhost.workers.dev")
+            val schemePrefix = if (working.startsWith("http://", ignoreCase = true)) {
+                "http://"
+            } else if (working.startsWith("https://", ignoreCase = true)) {
+                "https://"
+            } else {
+                ""
+            }
+            val remainder = if (schemePrefix.isNotEmpty()) working.substring(schemePrefix.length) else working
+            val hostAndPort = remainder.substringBefore("/").substringBefore("?").substringBefore("#")
+            val pathAndQuery = remainder.substring(hostAndPort.length)
+            var cleanHostAndPort = hostAndPort.replace(TRAILING_STUCK_SCHEME_REGEX, "")
+            if (cleanHostAndPort.length % 2 == 0 && cleanHostAndPort.isNotEmpty()) {
+                val half = cleanHostAndPort.length / 2
+                if (cleanHostAndPort.substring(0, half).equals(cleanHostAndPort.substring(half), ignoreCase = true)) {
+                    cleanHostAndPort = cleanHostAndPort.substring(0, half)
+                }
+            }
+            val workersDevIdx = cleanHostAndPort.lowercase().indexOf(".workers.dev")
+            if (workersDevIdx > 0) {
+                val endOfWorkersDev = workersDevIdx + ".workers.dev".length
+                if (cleanHostAndPort.length > endOfWorkersDev && cleanHostAndPort[endOfWorkersDev] != ':') {
+                    cleanHostAndPort = cleanHostAndPort.substring(0, endOfWorkersDev)
+                }
+            }
+
+            return "$schemePrefix$cleanHostAndPort$pathAndQuery"
+        }
+
+        internal fun extractQueryTokenFromRawString(raw: String, isRawQueryOnly: Boolean = false): String {
+            val queryPart = if (isRawQueryOnly) raw else raw.substringAfter("?", "").substringBefore("#")
+            if (queryPart.isEmpty()) return ""
+            for (pair in queryPart.split("&")) {
+                val parts = pair.split("=", limit = 2)
+                if (parts.size == 2 && (parts[0] == "token" || parts[0] == "proxyToken")) {
+                    val rawVal = parts[1].substringBefore("http://").substringBefore("https://")
+                    return try {
+                        java.net.URLDecoder.decode(rawVal, "UTF-8").trim()
+                    } catch (_: Exception) {
+                        rawVal.trim()
+                    }
+                }
+            }
+            return ""
+        }
+
+        internal fun isValidBackendHost(host: String): Boolean {
+            val clean = host.trim().lowercase()
+            if (clean.isEmpty()) return false
+            if (clean.contains(" ") || clean.contains("http:") || clean.contains("https:") || clean.contains("/")) {
+                return false
+            }
+            if (clean == "localhost" || clean == "127.0.0.1" || clean == "10.0.2.2") return true
+            return clean.contains(".") && !clean.startsWith(".") && !clean.endsWith(".")
+        }
+
+        internal fun stripKnownEndpointSuffixes(rawPathOrUrl: String): String {
+            var current = rawPathOrUrl.trim().trimEnd('/')
+            val suffixes = listOf(
+                "/api/tmdb/auth/request-token",
+                "/api/tmdb/auth/session",
+                "/api/tmdb/auth/logout",
+                "/api/tmdb/account/favorite",
+                "/api/tmdb/account/watchlist",
+                "/api/tmdb/account/rating",
+                "/api/tmdb/account",
+                "/api/tmdb/connectivity-test",
+                "/api/tmdb/health",
+                "/api/tmdb/test",
+                "/api/tmdb/sync",
+                "/api/tmdb/movie",
+                "/api/tmdb/tv",
+                "/api/tmdb/match",
+                "/api/tmdb",
+                "/health",
+                "/test"
+            )
+            var changed = true
+            while (changed) {
+                changed = false
+                for (suffix in suffixes) {
+                    if (current.endsWith(suffix, ignoreCase = true)) {
+                        current = current.dropLast(suffix.length).trimEnd('/')
+                        changed = true
+                    }
+                }
+            }
+            return current
+        }
 
         fun serializeSyncItemsArray(items: List<TmdbSyncItem>): JSONArray {
             val arr = JSONArray()

@@ -791,12 +791,16 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun canonicalTmdbProxyUrl(candidate: String = _userSettings.value.tmdbProxyUrl): String {
+        return TmdbProxyClient.normalizeOrFallbackToCanonical(candidate)
+    }
+
     /**
      * Initiates official TMDb user account authorization via the backend proxy and opens the
      * TMDb approval URL in the user's browser.
      */
     fun startTmdbAccountAuthorization(onOpenBrowserUrl: (String) -> Unit) {
-        val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+        val proxyUrl = canonicalTmdbProxyUrl()
         _tmdbAccountState.value = _tmdbAccountState.value.copy(
             authStatus = TmdbAuthStatus.VERIFYING_SESSION,
             statusMessage = null,
@@ -863,7 +867,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             ?: tmdbSessionStore.getPendingRequestToken()
             ?: return
 
-        val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+        val proxyUrl = canonicalTmdbProxyUrl()
         if (!isAutoResumeCheck) {
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
                 authStatus = TmdbAuthStatus.VERIFYING_SESSION,
@@ -939,7 +943,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (_tmdbAccountState.value.syncStatus == TmdbSyncStatus.SYNCING) return
 
-        val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+        val proxyUrl = canonicalTmdbProxyUrl()
         _tmdbAccountState.value = _tmdbAccountState.value.copy(
             syncStatus = TmdbSyncStatus.SYNCING,
             statusMessage = if (isAuto) _tmdbAccountState.value.statusMessage else null,
@@ -1016,7 +1020,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     fun disconnectTmdbAccount() {
         val stored = tmdbSessionStore.getSession()
-        val proxyUrl = _userSettings.value.tmdbProxyUrl.trim()
+        val proxyUrl = canonicalTmdbProxyUrl()
         tmdbSessionStore.clearSession()
         _tmdbAccountState.value = TmdbAccountUiState(
             authStatus = TmdbAuthStatus.DISCONNECTED,
@@ -1039,7 +1043,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
      * Verifies the server-side TMDb metadata service silently in the background.
      */
     fun verifyTmdbProxyConnection(proxyUrl: String = _userSettings.value.tmdbProxyUrl) {
-        val trimmed = proxyUrl.trim()
+        val trimmed = canonicalTmdbProxyUrl(proxyUrl)
         if (trimmed.isBlank()) {
             _tmdbHealthState.value = TmdbHealthResult(
                 state = TmdbConnectionState.NOT_CONFIGURED,
@@ -1074,7 +1078,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
      */
     private suspend fun enrichCatalogWithTmdb(account: Account) = withContext(Dispatchers.IO) {
         val settings = _userSettings.value
-        val proxyUrl = settings.tmdbProxyUrl.trim()
+        val proxyUrl = canonicalTmdbProxyUrl(settings.tmdbProxyUrl)
         if (!settings.tmdbAutoEnrichEnabled || proxyUrl.isBlank()) return@withContext
 
         val health = tmdbProxyClient.verifyConnection(proxyUrl)
@@ -2247,23 +2251,26 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- Settings & Cache ---
     fun updateSettings(newSettings: UserSettings) {
-        val orderChanged = _userSettings.value.liveChannelOrder != newSettings.liveChannelOrder
-        val bufferChanged = _userSettings.value.bufferSize != newSettings.bufferSize
-        val tmdbProxyChanged = _userSettings.value.tmdbProxyUrl != newSettings.tmdbProxyUrl ||
-                _userSettings.value.tmdbAutoEnrichEnabled != newSettings.tmdbAutoEnrichEnabled
-        KrasMediaPlaybackService.backgroundPlaybackEnabled = newSettings.backgroundPlayback
-        _userSettings.value = newSettings
+        val normalizedSettings = newSettings.copy(
+            tmdbProxyUrl = canonicalTmdbProxyUrl(newSettings.tmdbProxyUrl)
+        )
+        val orderChanged = _userSettings.value.liveChannelOrder != normalizedSettings.liveChannelOrder
+        val bufferChanged = _userSettings.value.bufferSize != normalizedSettings.bufferSize
+        val tmdbProxyChanged = _userSettings.value.tmdbProxyUrl != normalizedSettings.tmdbProxyUrl ||
+                _userSettings.value.tmdbAutoEnrichEnabled != normalizedSettings.tmdbAutoEnrichEnabled
+        KrasMediaPlaybackService.backgroundPlaybackEnabled = normalizedSettings.backgroundPlayback
+        _userSettings.value = normalizedSettings
         viewModelScope.launch(Dispatchers.IO) {
-            repository.saveUserSettings(newSettings)
+            repository.saveUserSettings(normalizedSettings)
         }
         if (bufferChanged) {
-            playerWrapper.initPlayer(newSettings.bufferSize)
+            playerWrapper.initPlayer(normalizedSettings.bufferSize)
         }
         if (orderChanged) {
             refreshLiveChannelsOrder()
         }
         if (tmdbProxyChanged) {
-            verifyTmdbProxyConnection(newSettings.tmdbProxyUrl)
+            verifyTmdbProxyConnection(normalizedSettings.tmdbProxyUrl)
         }
     }
 
