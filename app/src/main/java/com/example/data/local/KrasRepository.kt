@@ -401,7 +401,9 @@ class KrasRepository(context: Context) {
             autoCheckUpdates = prefs.getBoolean("autoCheckUpdates", true),
             backgroundPlayback = prefs.getBoolean("backgroundPlayback", true),
             liveSwipeGesturesEnabled = prefs.getBoolean("liveSwipeGesturesEnabled", true),
-            tmdbProxyUrl = prefs.getString("tmdbProxyUrl", "") ?: "",
+            tmdbProxyUrl = prefs.getString("tmdbProxyUrl", null)
+                ?.takeIf { it.isNotBlank() }
+                ?: com.example.BuildConfig.DEFAULT_TMDB_PROXY_URL,
             tmdbAutoEnrichEnabled = prefs.getBoolean("tmdbAutoEnrichEnabled", true)
         )
     }

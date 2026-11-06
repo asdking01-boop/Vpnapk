@@ -1,11 +1,12 @@
 {
   "name": "kras-tv-tmdb-proxy",
   "version": "1.0.0",
-  "description": "Secure server-side TMDb API proxy for KRAS TV Android application. Keeps TMDB_API_KEY strictly on the server.",
+  "description": "Production server-side TMDb API v3 proxy for KRAS TV Android application. Reads TMDB_API_KEY from server environment or Google Cloud Secret Manager.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test server.test.js"
   },
   "engines": {
     "node": ">=18.0.0"

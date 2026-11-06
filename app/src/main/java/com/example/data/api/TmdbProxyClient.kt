@@ -4,6 +4,7 @@ import com.example.data.model.Episode
 import com.example.data.model.MediaItem
 import com.example.data.model.Season
 import com.example.data.model.SeriesDetails
+import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -32,6 +33,11 @@ data class TmdbHealthResult(
 data class CleanedTmdbQuery(
     val cleanTitle: String,
     val extractedYear: String
+)
+
+data class ParsedProxyEndpoint(
+    val baseUrl: String,
+    val proxyAuthToken: String = ""
 )
 
 data class TmdbSeasonSummary(
@@ -71,11 +77,14 @@ data class TmdbMediaMetadata(
 )
 
 /**
- * Client for communicating with the secure server-side KRAS TV TMDb Proxy (`/backend-tmdb-proxy`).
+ * Client for communicating with the secure server-side KRAS TV TMDb API v3 Proxy (`/backend-tmdb-proxy`).
  *
  * Security Guarantee:
  * - Never embeds, stores, or transmits `TMDB_API_KEY` from the Android client.
- * - All TMDb authentication occurs strictly on the backend proxy via `process.env.TMDB_API_KEY`.
+ * - All TMDb API v3 authentication occurs strictly on the backend proxy via `process.env.TMDB_API_KEY`
+ *   (or Google Cloud Secret Manager).
+ * - Supports optional proxy token authentication (`X-KRAS-Proxy-Token` / `Authorization: Bearer`) if the
+ *   user includes `?token=<token>` in the Settings proxy URL.
  * - Reports `CONNECTED` ONLY when a live HTTP request to `/api/tmdb/health` succeeds with `tmdbConnected == true`.
  */
 class TmdbProxyClient(
@@ -91,19 +100,74 @@ class TmdbProxyClient(
     private val tvCache = ConcurrentHashMap<String, TmdbMediaMetadata>()
     private val seasonEpisodesCache = ConcurrentHashMap<String, List<TmdbEpisodeMetadata>>()
 
-    fun normalizeProxyBaseUrl(rawUrl: String): String {
+    /**
+     * Parses a raw proxy URL from KRAS TV Settings into a clean base URL and optional proxy auth token.
+     * Supports URLs like:
+     * - `https://kras-tmdb-proxy-xxxx.europe-west3.run.app`
+     * - `https://kras-tmdb-proxy-xxxx.europe-west3.run.app?token=my_proxy_token`
+     */
+    fun parseProxyEndpoint(rawUrl: String): ParsedProxyEndpoint {
         var trimmed = rawUrl.trim()
-        if (trimmed.isEmpty()) return ""
+        if (trimmed.isEmpty()) return ParsedProxyEndpoint("", "")
         if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
             trimmed = "https://$trimmed"
         }
-        while (trimmed.endsWith("/")) {
-            trimmed = trimmed.substring(0, trimmed.length - 1)
+
+        var extractedToken = ""
+        try {
+            val uri = URI(trimmed)
+            val rawQuery = uri.rawQuery.orEmpty()
+            if (rawQuery.isNotEmpty()) {
+                for (pair in rawQuery.split("&")) {
+                    val parts = pair.split("=", limit = 2)
+                    if (parts.size == 2 && (parts[0] == "token" || parts[0] == "proxyToken")) {
+                        extractedToken = java.net.URLDecoder.decode(parts[1], "UTF-8").trim()
+                    }
+                }
+            }
+            val cleanSchemeHostPort = buildString {
+                append(uri.scheme ?: "https")
+                append("://")
+                append(uri. authority ?: "")
+                val cleanPath = (uri.path ?: "")
+                    .removeSuffix("/")
+                    .removeSuffix("/api/tmdb/health")
+                    .removeSuffix("/api/tmdb")
+                    .removeSuffix("/health")
+                append(cleanPath)
+            }.trimEnd('/')
+            if (cleanSchemeHostPort.isNotBlank() && uri.authority != null) {
+                return ParsedProxyEndpoint(cleanSchemeHostPort, extractedToken)
+            }
+        } catch (_: Exception) {
+            // Fall back to string normalization below
         }
-        if (trimmed.endsWith("/api/tmdb")) {
-            trimmed = trimmed.removeSuffix("/api/tmdb")
+
+        val withoutQuery = trimmed.substringBefore("?").substringBefore("#").trimEnd('/')
+        val normalizedBase = withoutQuery
+            .removeSuffix("/api/tmdb/health")
+            .removeSuffix("/api/tmdb")
+            .removeSuffix("/health")
+            .trimEnd('/')
+
+        return ParsedProxyEndpoint(normalizedBase, extractedToken)
+    }
+
+    fun normalizeProxyBaseUrl(rawUrl: String): String {
+        return parseProxyEndpoint(rawUrl).baseUrl
+    }
+
+    private fun buildAuthenticatedRequest(url: String, proxyAuthToken: String): Request {
+        val builder = Request.Builder()
+            .url(url)
+            .header("Accept", "application/json")
+            .header("X-Client-App", "KRAS-TV-Android")
+            .get()
+        if (proxyAuthToken.isNotBlank()) {
+            builder.header("X-KRAS-Proxy-Token", proxyAuthToken)
+            builder.header("Authorization", "Bearer $proxyAuthToken")
         }
-        return trimmed
+        return builder.build()
     }
 
     /**
@@ -111,8 +175,8 @@ class TmdbProxyClient(
      * Never claims TMDb is connected unless the backend proxy responds with HTTP 200 and `tmdbConnected == true`.
      */
     suspend fun verifyConnection(rawProxyUrl: String): TmdbHealthResult = withContext(Dispatchers.IO) {
-        val base = normalizeProxyBaseUrl(rawProxyUrl)
-        if (base.isEmpty()) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty()) {
             return@withContext TmdbHealthResult(
                 state = TmdbConnectionState.NOT_CONFIGURED,
                 isConnected = false,
@@ -121,11 +185,10 @@ class TmdbProxyClient(
         }
 
         try {
-            val request = Request.Builder()
-                .url("$base/api/tmdb/health")
-                .header("Accept", "application/json")
-                .get()
-                .build()
+            val request = buildAuthenticatedRequest(
+                url = "${endpoint.baseUrl}/api/tmdb/health",
+                proxyAuthToken = endpoint.proxyAuthToken
+            )
 
             httpClient.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
@@ -136,13 +199,15 @@ class TmdbProxyClient(
                 val okFlag = json?.optBoolean("ok", false) == true
                 val tmdbConnected = json?.optBoolean("tmdbConnected", false) == true
                 val serverStatus = json?.optString("status", "").orEmpty()
-                val serverMessage = json?.optString("message", "").orEmpty()
+                val serverMessage = json?.optString("message", "")
+                    ?.ifBlank { json.optString("error", "") }
+                    .orEmpty()
 
                 if (response.isSuccessful && (tmdbConnected || okFlag)) {
                     return@withContext TmdbHealthResult(
                         state = TmdbConnectionState.CONNECTED,
                         isConnected = true,
-                        message = serverMessage.ifBlank { "Connected to TMDb via secure backend proxy." }
+                        message = serverMessage.ifBlank { "Connected to TMDb API v3 via secure backend proxy." }
                     )
                 }
 
@@ -160,7 +225,7 @@ class TmdbProxyClient(
                     return@withContext TmdbHealthResult(
                         state = TmdbConnectionState.TMDB_REJECTED,
                         isConnected = false,
-                        message = serverMessage.ifBlank { "TMDb rejected the server API key (HTTP ${response.code})." }
+                        message = serverMessage.ifBlank { "Authentication failed (HTTP ${response.code}). Check PROXY_AUTH_TOKEN or server TMDB_API_KEY." }
                     )
                 }
 
@@ -186,8 +251,8 @@ class TmdbProxyClient(
         tmdbId: Int = 0,
         language: String = "en-US"
     ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
-        val base = normalizeProxyBaseUrl(rawProxyUrl)
-        if (base.isEmpty()) return@withContext null
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty()) return@withContext null
 
         val cleaned = extractTmdbQuery(rawTitle)
         val effectiveTitle = cleaned.cleanTitle.ifBlank { rawTitle.trim() }
@@ -202,13 +267,9 @@ class TmdbProxyClient(
             val encodedTitle = URLEncoder.encode(effectiveTitle, "UTF-8")
             val encodedYear = URLEncoder.encode(effectiveYear, "UTF-8")
             val encodedLang = URLEncoder.encode(language, "UTF-8")
-            val url = "$base/api/tmdb/movie?title=$encodedTitle&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
+            val url = "${endpoint.baseUrl}/api/tmdb/movie?title=$encodedTitle&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
 
-            val request = Request.Builder()
-                .url(url)
-                .header("Accept", "application/json")
-                .get()
-                .build()
+            val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
 
             httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext null
@@ -232,8 +293,8 @@ class TmdbProxyClient(
         tmdbId: Int = 0,
         language: String = "en-US"
     ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
-        val base = normalizeProxyBaseUrl(rawProxyUrl)
-        if (base.isEmpty()) return@withContext null
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty()) return@withContext null
 
         val cleaned = extractTmdbQuery(rawTitle)
         val effectiveTitle = cleaned.cleanTitle.ifBlank { rawTitle.trim() }
@@ -248,13 +309,9 @@ class TmdbProxyClient(
             val encodedTitle = URLEncoder.encode(effectiveTitle, "UTF-8")
             val encodedYear = URLEncoder.encode(effectiveYear, "UTF-8")
             val encodedLang = URLEncoder.encode(language, "UTF-8")
-            val url = "$base/api/tmdb/tv?title=$encodedTitle&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
+            val url = "${endpoint.baseUrl}/api/tmdb/tv?title=$encodedTitle&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
 
-            val request = Request.Builder()
-                .url(url)
-                .header("Accept", "application/json")
-                .get()
-                .build()
+            val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
 
             httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext null
@@ -271,26 +328,119 @@ class TmdbProxyClient(
         }
     }
 
+    suspend fun fetchMovieDetailsById(
+        rawProxyUrl: String,
+        movieId: Int,
+        language: String = "en-US"
+    ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty() || movieId <= 0) return@withContext null
+
+        val cacheKey = "movie_id:$movieId:$language"
+        movieCache[cacheKey]?.let { return@withContext it }
+
+        try {
+            val encodedLang = URLEncoder.encode(language, "UTF-8")
+            val url = "${endpoint.baseUrl}/api/tmdb/movie/$movieId?language=$encodedLang"
+            val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                val body = response.body?.string().orEmpty()
+                if (!body.trimStart().startsWith("{")) return@withContext null
+                val parsed = parseMediaMetadataJson(JSONObject(body))
+                if (parsed != null) {
+                    movieCache[cacheKey] = parsed
+                }
+                parsed
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun fetchTvDetailsById(
+        rawProxyUrl: String,
+        tvId: Int,
+        language: String = "en-US"
+    ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty() || tvId <= 0) return@withContext null
+
+        val cacheKey = "tv_id:$tvId:$language"
+        tvCache[cacheKey]?.let { return@withContext it }
+
+        try {
+            val encodedLang = URLEncoder.encode(language, "UTF-8")
+            val url = "${endpoint.baseUrl}/api/tmdb/tv/$tvId?language=$encodedLang"
+            val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                val body = response.body?.string().orEmpty()
+                if (!body.trimStart().startsWith("{")) return@withContext null
+                val parsed = parseMediaMetadataJson(JSONObject(body))
+                if (parsed != null) {
+                    tvCache[cacheKey] = parsed
+                }
+                parsed
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun matchMetadata(
+        rawProxyUrl: String,
+        rawTitle: String,
+        type: String = "movie",
+        year: String = "",
+        tmdbId: Int = 0,
+        language: String = "en-US"
+    ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty()) return@withContext null
+
+        val cleaned = extractTmdbQuery(rawTitle)
+        val effectiveTitle = cleaned.cleanTitle.ifBlank { rawTitle.trim() }
+        val effectiveYear = year.trim().takeIf { it.length == 4 } ?: cleaned.extractedYear
+        if (effectiveTitle.isEmpty() && tmdbId <= 0) return@withContext null
+
+        try {
+            val encodedTitle = URLEncoder.encode(effectiveTitle, "UTF-8")
+            val encodedType = URLEncoder.encode(type.lowercase(), "UTF-8")
+            val encodedYear = URLEncoder.encode(effectiveYear, "UTF-8")
+            val encodedLang = URLEncoder.encode(language, "UTF-8")
+            val url = "${endpoint.baseUrl}/api/tmdb/match?title=$encodedTitle&type=$encodedType&year=$encodedYear&tmdbId=$tmdbId&language=$encodedLang"
+            val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                val body = response.body?.string().orEmpty()
+                if (!body.trimStart().startsWith("{")) return@withContext null
+                parseMediaMetadataJson(JSONObject(body))
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     suspend fun fetchTvSeasonEpisodes(
         rawProxyUrl: String,
         tmdbId: Int,
         seasonNumber: Int,
         language: String = "en-US"
     ): List<TmdbEpisodeMetadata> = withContext(Dispatchers.IO) {
-        val base = normalizeProxyBaseUrl(rawProxyUrl)
-        if (base.isEmpty() || tmdbId <= 0 || seasonNumber < 1) return@withContext emptyList()
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        if (endpoint.baseUrl.isEmpty() || tmdbId <= 0 || seasonNumber < 0) return@withContext emptyList()
 
         val cacheKey = "season:$tmdbId:$seasonNumber:$language"
         seasonEpisodesCache[cacheKey]?.let { return@withContext it }
 
         try {
             val encodedLang = URLEncoder.encode(language, "UTF-8")
-            val url = "$base/api/tmdb/tv/$tmdbId/season/$seasonNumber?language=$encodedLang"
-            val request = Request.Builder()
-                .url(url)
-                .header("Accept", "application/json")
-                .get()
-                .build()
+            val url = "${endpoint.baseUrl}/api/tmdb/tv/$tmdbId/season/$seasonNumber?language=$encodedLang"
+            val request = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
 
             httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext emptyList()
@@ -311,7 +461,7 @@ class TmdbProxyClient(
 
     companion object {
         private val LEADING_COUNTRY_PREFIX_REGEX =
-            Regex("""^(?:[A-Z]{2,4}\s*[\|\-:]\s*|[\u2600-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF]+\s*[\|\-:]?\s*)+""", RegexOption.IGNORE_CASE)
+            Regex("""^(?:[A-Z]{2,4}\s*\|\s*|[A-Z]{2,3}\s+-\s+|(?:EN|US|UK|AR|FR|DE|ES|IT|TR|RU|NL|PT|BR|IN|CA|AU|VIP|VOD)\s*:\s*|[\u2600-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF]+\s*[\|\-:]?\s*)+""", RegexOption.IGNORE_CASE)
         private val BRACKETED_YEAR_REGEX = Regex("""[\(\[](19\d{2}|20[0-3]\d)[\)\]]""")
         private val TRAILING_YEAR_REGEX = Regex("""\b(19\d{2}|20[0-3]\d)\s*$""")
         private val SEASON_EPISODE_TAG_REGEX =
@@ -337,27 +487,17 @@ class TmdbProxyClient(
             var working = rawName.trim()
             if (working.isEmpty()) return CleanedTmdbQuery("", "")
 
-            // 1. Extract bracketed or parenthesized release year first (e.g., "The Batman (2022)")
             var extractedYear = ""
             val bracketYearMatch = BRACKETED_YEAR_REGEX.find(working)
             if (bracketYearMatch != null) {
                 extractedYear = bracketYearMatch.groupValues[1]
             }
 
-            // 2. Strip leading IPTV country/group prefixes (e.g., "EN | ", "AR - ", "US: ")
             working = LEADING_COUNTRY_PREFIX_REGEX.replace(working, "")
-
-            // 3. Strip season/episode suffix (e.g., "Breaking Bad S01E01")
             working = SEASON_EPISODE_TAG_REGEX.replace(working, "")
-
-            // 4. Remove bracketed/parenthesized tags (including the year we already extracted)
             working = BRACKET_NOISE_REGEX.replace(working, " ")
-
-            // 5. Remove resolution/codec/framerate tokens BEFORE checking trailing year
-            //    so "The Batman 2022 4K UHD" becomes "The Batman 2022" and then extracts "2022"
             working = QUALITY_AND_CODEC_TAGS_REGEX.replace(working, " ")
 
-            // 6. Check for trailing 4-digit year if not yet extracted
             val trimmedBeforeYear = working.trim().trimEnd('-', '|', ':', '.')
             if (extractedYear.isEmpty()) {
                 val trailingYearMatch = TRAILING_YEAR_REGEX.find(trimmedBeforeYear)

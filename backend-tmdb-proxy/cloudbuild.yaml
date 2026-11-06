@@ -1,0 +1,41 @@
+steps:
+  # 1. Build container image
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/kras-tmdb-proxy:$COMMIT_SHA"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/kras-tmdb-proxy:latest"
+      - "."
+
+  # 2. Push container image to Container Registry / Artifact Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "gcr.io/$PROJECT_ID/kras-tmdb-proxy:latest"
+
+  # 3. Deploy to Google Cloud Run with TMDB_API_KEY mounted from Google Cloud Secret Manager
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "${_SERVICE_NAME}"
+      - "--image=gcr.io/$PROJECT_ID/kras-tmdb-proxy:latest"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--port=8080"
+      - "--max-instances=10"
+      - "--memory=256Mi"
+      - "--cpu=1"
+      - "--set-secrets=TMDB_API_KEY=${_TMDB_SECRET_NAME}:latest"
+
+substitutions:
+  _SERVICE_NAME: "kras-tmdb-proxy"
+  _REGION: "europe-west3"
+  _TMDB_SECRET_NAME: "TMDB_API_KEY"
+
+images:
+  - "gcr.io/$PROJECT_ID/kras-tmdb-proxy:latest"

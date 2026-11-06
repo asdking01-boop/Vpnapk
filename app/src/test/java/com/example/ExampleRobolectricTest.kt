@@ -1179,10 +1179,15 @@ class ExampleRobolectricTest {
     assertEquals(1, m3uSeriesDetails!!.seasons.size)
     assertEquals(2, m3uSeriesDetails.seasons.first().episodes.size)
 
-    // 4. Verify connection never claims connected when proxy URL is blank
+    // 4. Verify Cloud Run URL and optional proxy token parsing + unconfigured state
+    val parsedEndpoint = tmdbClient.parseProxyEndpoint("https://kras-tmdb-proxy-12345.europe-west3.run.app/api/tmdb?token=my_secret_token")
+    assertEquals("https://kras-tmdb-proxy-12345.europe-west3.run.app", parsedEndpoint.baseUrl)
+    assertEquals("my_secret_token", parsedEndpoint.proxyAuthToken)
+
     kotlinx.coroutines.runBlocking {
       val unconfigured = tmdbClient.verifyConnection("")
       assertEquals(com.example.data.api.TmdbConnectionState.NOT_CONFIGURED, unconfigured.state)
+      assertFalse(unconfigured.isConnected)
 
       // Persist enriched movie in Room and verify fields survive round-trip
       repo.insertMediaBatch(
