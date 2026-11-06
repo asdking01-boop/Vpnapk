@@ -9,6 +9,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Login
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -1745,17 +1747,17 @@ private fun TmdbAccountSyncCard(
                             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                             modifier = Modifier
                                 .weight(1f)
-                                .testTag("tmdb_disconnect_account_button")
+                                .testTag("tmdb_logout_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.LinkOff,
-                                contentDescription = "Disconnect Account",
+                                imageVector = Icons.AutoMirrored.Filled.Logout,
+                                contentDescription = "Logout",
                                 tint = KrasRedBright,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (isArabic) "إلغاء الربط" else "Disconnect Account",
+                                text = if (isArabic) "تسجيل الخروج" else "Logout",
                                 color = KrasRedBright,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
@@ -1766,9 +1768,9 @@ private fun TmdbAccountSyncCard(
                     // Disconnected / Authorizing View
                     Text(
                         text = if (isArabic) {
-                            "اربط حسابك الشخصي في TMDb لمزامنة الأفلام والمسلسلات المفضلة وقائمة المشاهدة والتقييمات تلقائياً عبر جميع أجهزتك."
+                            "سجل الدخول بحسابك في TMDb لمزامنة الأفلام والمسلسلات المفضلة وقائمة المشاهدة والتقييمات تلقائياً عبر جميع أجهزتك."
                         } else {
-                            "Connect your personal TMDb account using official TMDb authorization to sync your Favorites, Watchlist, and Ratings automatically."
+                            "Sign in with your personal TMDb account to access and sync your Favorites, Watchlist, and Ratings across all your devices."
                         },
                         color = TextSecondary,
                         fontSize = 12.sp,
@@ -1797,7 +1799,7 @@ private fun TmdbAccountSyncCard(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = if (isArabic) "إكمال الربط" else "Complete Sign-In",
+                                    text = if (isArabic) "إكمال تسجيل الدخول" else "Complete Sign-In",
                                     color = Color.Black,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.ExtraBold
@@ -1827,7 +1829,7 @@ private fun TmdbAccountSyncCard(
                             contentPadding = PaddingValues(horizontal = 18.dp, vertical = 11.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .testTag("tmdb_connect_account_button")
+                                .testTag("tmdb_login_button")
                         ) {
                             if (isVerifying) {
                                 CircularProgressIndicator(
@@ -1837,21 +1839,21 @@ private fun TmdbAccountSyncCard(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = if (isArabic) "جارٍ التحقق من الحساب..." else "Connecting TMDb Account...",
+                                    text = if (isArabic) "جارٍ تسجيل الدخول إلى TMDb..." else "Logging in to TMDb...",
                                     color = Color.White,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             } else {
                                 Icon(
-                                    imageVector = Icons.Default.AccountCircle,
-                                    contentDescription = "Connect TMDb Account",
+                                    imageVector = Icons.AutoMirrored.Filled.Login,
+                                    contentDescription = "Login with TMDb",
                                     tint = Color.White,
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = if (isArabic) "ربط حساب TMDb" else "Connect TMDb Account",
+                                    text = if (isArabic) "تسجيل الدخول عبر TMDb" else "Login with TMDb",
                                     color = Color.White,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold

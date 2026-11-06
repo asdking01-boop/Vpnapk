@@ -695,16 +695,16 @@ async function createAndPersistServerTmdbSession(
  */
 function renderAppReturnPage({ appLinkUrl, customSchemeUrl, androidIntentUrl, isDenied, isExpired, username }) {
   const titleText = isDenied
-    ? "Authorization Cancelled"
+    ? "Login Cancelled"
     : isExpired
-    ? "Session Expired"
+    ? "Login Session Expired"
     : username
-    ? `Connected as @${username}`
-    : "TMDb Account Authorized";
+    ? `Logged in as @${username}`
+    : "TMDb Login Successful";
   const subtitleText = isDenied
-    ? "You cancelled or denied TMDb authorization. Returning to KRAS TV..."
+    ? "You cancelled or denied TMDb login. Returning to KRAS TV..."
     : isExpired
-    ? "Your authorization request expired. Please return to KRAS TV and try again."
+    ? "Your login request expired. Please return to KRAS TV and try again."
     : "Your TMDb account has been verified. Returning to KRAS TV automatically...";
 
   const html = `<!DOCTYPE html>
@@ -712,7 +712,7 @@ function renderAppReturnPage({ appLinkUrl, customSchemeUrl, androidIntentUrl, is
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>KRAS TV — TMDb Authorization</title>
+  <title>KRAS TV — TMDb Login</title>
   <style>
     body {
       margin: 0;

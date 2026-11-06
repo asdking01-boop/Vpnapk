@@ -982,7 +982,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
                 krasAccountId = krasUserId,
                 authStatus = TmdbAuthStatus.DISCONNECTED,
-                statusMessage = "Authorization was denied on TMDb. Tap Connect TMDb Account if you wish to try again.",
+                statusMessage = "Authorization was denied on TMDb. Tap Login with TMDb if you wish to try again.",
                 isError = true
             )
             return
@@ -996,7 +996,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
                 krasAccountId = krasUserId,
                 authStatus = TmdbAuthStatus.DISCONNECTED,
-                statusMessage = "Your TMDb authorization session expired. Tap Connect TMDb Account to start a new session.",
+                statusMessage = "Your TMDb authorization session expired. Tap Login with TMDb to start a new session.",
                 isError = true
             )
             return
@@ -1010,7 +1010,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
                 krasAccountId = krasUserId,
                 authStatus = TmdbAuthStatus.DISCONNECTED,
-                statusMessage = "Security state check failed. Please tap Connect TMDb Account to reconnect.",
+                statusMessage = "Security state check failed. Please tap Login with TMDb to reconnect.",
                 isError = true
             )
             return
@@ -1051,7 +1051,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _tmdbAccountState.value = _tmdbAccountState.value.copy(
                     krasAccountId = krasUserId,
                     authStatus = TmdbAuthStatus.DISCONNECTED,
-                    statusMessage = "Your TMDb authorization session expired. Tap Connect TMDb Account to start a new session.",
+                    statusMessage = "Your TMDb authorization session expired. Tap Login with TMDb to start a new session.",
                     isError = true
                 )
             }
@@ -1158,7 +1158,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         if (stored == null) {
             if (!isAuto && krasUserId == activeKrasUserId()) {
                 _tmdbAccountState.value = _tmdbAccountState.value.copy(
-                    statusMessage = "Please connect your TMDb account first.",
+                    statusMessage = "Please log in with your TMDb account first.",
                     isError = true
                 )
             }
@@ -1277,7 +1277,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             syncedWatchlistCount = 0,
             syncedRatingsCount = 0,
             pendingOfflineChangesCount = 0,
-            statusMessage = "TMDb account disconnected.",
+            statusMessage = "Logged out from TMDb.",
             isError = false
         )
         if (stored != null && stored.sessionId.isNotBlank()) {

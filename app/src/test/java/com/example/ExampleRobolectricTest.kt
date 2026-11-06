@@ -3,6 +3,7 @@ package com.example
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.KrasRepository
+import com.example.data.local.TmdbSecureSessionStore
 import com.example.data.model.Account
 import com.example.data.model.MediaType
 import com.example.data.model.WatchProgress
@@ -1641,5 +1642,91 @@ class ExampleRobolectricTest {
     assertFalse(pendingReq!!.isExpired(pendingReq.createdAtMs + 10_000L))
     assertTrue(pendingReq.isExpired(pendingReq.createdAtMs + 120_000L))
     sessionStore.clearPendingRequestToken(userA)
+  }
+
+  @Test
+  fun `tmdb login with official auth persists profile across app restart and supports multi user logout`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val store1 = TmdbSecureSessionStore(context)
+    val user1 = "kras_acc_alice"
+    val user2 = "kras_acc_bob"
+
+    // Clear any leftover state
+    store1.clearSession(user1)
+    store1.clearSession(user2)
+
+    // 1. User Alice initiates Login with TMDb
+    val aliceNonce = store1.generateStateNonce()
+    store1.savePendingAuthRequest(
+      krasAccountId = user1,
+      requestToken = "tmdb_req_alice_456",
+      stateNonce = aliceNonce,
+      authSessionId = "auth_alice_789"
+    )
+
+    val pendingAlice = store1.getPendingAuthRequest(user1)
+    assertNotNull(pendingAlice)
+    assertEquals("tmdb_req_alice_456", pendingAlice!!.requestToken)
+    assertEquals(aliceNonce, pendingAlice.stateNonce)
+
+    // 2. User Alice completes Login with TMDb
+    store1.saveSession(
+      krasAccountId = user1,
+      sessionId = "kras_tok_alice_session_secure",
+      accountId = 88201,
+      username = "alice_cinephile",
+      displayName = "Alice Wonderland",
+      avatarUrl = "https://image.tmdb.org/t/p/w500/alice.jpg",
+      syncedFavoritesCount = 14,
+      syncedWatchlistCount = 28,
+      syncedRatingsCount = 9
+    )
+
+    // Pending auth is cleared upon login
+    assertNull(store1.getPendingAuthRequest(user1))
+
+    // 3. User Bob also logs into his separate TMDb account
+    store1.saveSession(
+      krasAccountId = user2,
+      sessionId = "kras_tok_bob_session_secure",
+      accountId = 99302,
+      username = "bob_moviebuff",
+      displayName = "Bob The Builder",
+      avatarUrl = "https://image.tmdb.org/t/p/w500/bob.jpg",
+      syncedFavoritesCount = 5,
+      syncedWatchlistCount = 12,
+      syncedRatingsCount = 3
+    )
+
+    // 4. Simulate App Restart (new instance of TmdbSecureSessionStore)
+    val storeAfterRestart = TmdbSecureSessionStore(context)
+    val restoredAlice = storeAfterRestart.getSession(user1)
+    val restoredBob = storeAfterRestart.getSession(user2)
+
+    assertNotNull(restoredAlice)
+    assertEquals("alice_cinephile", restoredAlice!!.username)
+    assertEquals("Alice Wonderland", restoredAlice.displayName)
+    assertEquals("https://image.tmdb.org/t/p/w500/alice.jpg", restoredAlice.avatarUrl)
+    assertEquals("kras_tok_alice_session_secure", restoredAlice.sessionId)
+    assertEquals(88201, restoredAlice.accountId)
+    assertEquals(14, restoredAlice.syncedFavoritesCount)
+
+    assertNotNull(restoredBob)
+    assertEquals("bob_moviebuff", restoredBob!!.username)
+    assertEquals("Bob The Builder", restoredBob.displayName)
+    assertEquals("kras_tok_bob_session_secure", restoredBob.sessionId)
+    assertEquals(99302, restoredBob.accountId)
+
+    // 5. User Alice logs out
+    storeAfterRestart.clearSession(user1)
+    assertNull(storeAfterRestart.getSession(user1))
+
+    // User Bob remains logged in
+    val stillLoggedInBob = storeAfterRestart.getSession(user2)
+    assertNotNull(stillLoggedInBob)
+    assertEquals("bob_moviebuff", stillLoggedInBob!!.username)
+
+    // Cleanup
+    storeAfterRestart.clearSession(user2)
   }
 }
