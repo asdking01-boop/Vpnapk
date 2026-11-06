@@ -55,7 +55,8 @@ data class Account(
     val expDate: String = "",
     val maxConnections: String = "1",
     val isDemo: Boolean = false,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val activationDate: String = ""
 )
 
 data class MediaItem(

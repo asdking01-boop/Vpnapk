@@ -11,10 +11,11 @@ object SampleData {
         username = "guest_viewer",
         password = "••••••••",
         isActive = true,
-        status = "Premium 4K",
-        expDate = "2028-12-31",
+        status = "Active",
+        expDate = "",
         maxConnections = "5",
-        isDemo = true
+        isDemo = true,
+        activationDate = ""
     )
 
     val liveCategories = listOf(

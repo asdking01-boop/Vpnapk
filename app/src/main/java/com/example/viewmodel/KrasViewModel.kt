@@ -502,8 +502,32 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         val active = _activeAccount.value ?: return
         viewModelScope.launch {
             _isRefreshing.value = true
+            refreshSubscriptionInfo(active)
             loadContentForAccount(active, isBackgroundRefresh = true)
             _isRefreshing.value = false
+        }
+    }
+
+    /**
+     * Automatically refreshes subscription activation date, expiration date (`user_info.exp_date`),
+     * and account status from the Xtream Codes server when available.
+     */
+    fun refreshSubscriptionInfo(account: Account? = _activeAccount.value) {
+        val target = account ?: return
+        if (target.isDemo || target.serverUrl.isBlank() || target.username.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                apiClient.fetchSubscriptionInfo(target).onSuccess { refreshed ->
+                    repository.updateAccountSubscription(refreshed)
+                    val allAccounts = repository.getAccounts()
+                    val active = repository.getActiveAccount()
+                    _accounts.value = allAccounts
+                    if (_activeAccount.value?.id == refreshed.id) {
+                        _activeAccount.value = active
+                    }
+                }
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -570,6 +594,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             try {
+                // Step 0: Refresh Account Subscription Info (user_info.exp_date, created_at, status)
+                apiClient.fetchSubscriptionInfo(account).onSuccess { refreshed ->
+                    repository.updateAccountSubscription(refreshed)
+                    _accounts.value = repository.getAccounts()
+                    if (_activeAccount.value?.id == refreshed.id) {
+                        _activeAccount.value = repository.getActiveAccount()
+                    }
+                }
+
                 // Step 1: Stream and Cache Categories
                 _syncProgress.value = "Updating Categories..."
                 val movieCats = apiClient.fetchCategories(account, MediaType.MOVIE)

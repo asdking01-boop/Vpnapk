@@ -41,7 +41,8 @@ class KrasRepository(context: Context) {
                         expDate = obj.optString("expDate", ""),
                         maxConnections = obj.optString("maxConnections", "1"),
                         isDemo = obj.optBoolean("isDemo", false),
-                        createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                        createdAt = obj.optLong("createdAt", System.currentTimeMillis()),
+                        activationDate = obj.optString("activationDate", "")
                     )
                 )
             }
@@ -70,6 +71,7 @@ class KrasRepository(context: Context) {
                     put("maxConnections", acc.maxConnections)
                     put("isDemo", acc.isDemo)
                     put("createdAt", acc.createdAt)
+                    put("activationDate", acc.activationDate)
                 }
                 array.put(obj)
             }
@@ -94,6 +96,24 @@ class KrasRepository(context: Context) {
     fun addAccount(account: Account) {
         val existing = getAccounts().filter { it.id != account.id }
         val updated = existing.map { it.copy(isActive = false) } + account.copy(isActive = true)
+        saveAccounts(updated)
+    }
+
+    fun updateAccountSubscription(updatedAccount: Account) {
+        val existing = getAccounts()
+        if (existing.none { it.id == updatedAccount.id }) return
+        val updated = existing.map { acc ->
+            if (acc.id == updatedAccount.id) {
+                acc.copy(
+                    status = updatedAccount.status,
+                    expDate = updatedAccount.expDate,
+                    activationDate = updatedAccount.activationDate.ifBlank { acc.activationDate },
+                    maxConnections = updatedAccount.maxConnections.ifBlank { acc.maxConnections }
+                )
+            } else {
+                acc
+            }
+        }
         saveAccounts(updated)
     }
 

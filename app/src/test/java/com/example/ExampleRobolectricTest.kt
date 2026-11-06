@@ -990,5 +990,111 @@ class ExampleRobolectricTest {
     assertEquals(5, com.example.ui.components.resolveHeroCarouselIndex(targetVirtualForDot5, itemCount))
     assertEquals(initialVirtual + 5, targetVirtualForDot5)
   }
+
+  @Test
+  fun `subscription expiration calculator computes remaining days countdown 7-day warning bilingual labels and never fabricates missing dates`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = KrasRepository(context)
+
+    val dayMs = 24L * 60L * 60L * 1000L
+    val hourMs = 60L * 60L * 1000L
+    val minuteMs = 60L * 1000L
+    val nowMs = 1_760_000_000_000L // Fixed reference epoch ms
+
+    // 1. Missing provider exp_date (or Demo account) -> Never fabricates date, shows "Not Available" / "غير متوفر"
+    val noExpAccount = Account(
+      id = "acc_no_exp",
+      name = "No Exp User",
+      serverUrl = "http://iptv.example.com:8080",
+      username = "u1",
+      password = "p1",
+      expDate = "",
+      activationDate = ""
+    )
+    val noExpInfo = com.example.data.model.SubscriptionInfoHelper.calculate(noExpAccount, nowMs)
+    assertEquals(com.example.data.model.SubscriptionStatus.ACTIVE, noExpInfo.status)
+    assertFalse(noExpInfo.hasExpirationDate)
+    assertFalse(noExpInfo.hasActivationDate)
+    assertNull(noExpInfo.remainingDays)
+    assertEquals("Not Available", noExpInfo.expirationDateText(isArabic = false))
+    assertEquals("غير متوفر", noExpInfo.expirationDateText(isArabic = true))
+    assertEquals("Not Available", noExpInfo.activationDateText(isArabic = false))
+    assertEquals("غير متوفر", noExpInfo.activationDateText(isArabic = true))
+    assertEquals("Not Available", noExpInfo.countdownText(isArabic = false))
+    assertEquals("غير متوفر", noExpInfo.countdownText(isArabic = true))
+    assertFalse(noExpInfo.isExpiringWarningVisible)
+
+    // Demo account also never displays a fabricated expiration date
+    val demoInfo = com.example.data.model.SubscriptionInfoHelper.calculate(com.example.data.sample.SampleData.demoAccount, nowMs)
+    assertEquals("Not Available", demoInfo.expirationDateText(isArabic = false))
+    assertEquals("غير متوفر", demoInfo.expirationDateText(isArabic = true))
+
+    // 2. Active subscription with > 7 days remaining (e.g. 20 days, 5 hours, 30 minutes) via Xtream Unix seconds
+    val createdSec = ((nowMs - 10 * dayMs) / 1000L).toString()
+    val activeExpMs = nowMs + (20 * dayMs) + (5 * hourMs) + (30 * minuteMs)
+    val activeExpSec = (activeExpMs / 1000L).toString()
+    val activeAccount = noExpAccount.copy(
+      id = "acc_active",
+      expDate = activeExpSec,
+      activationDate = createdSec
+    )
+    val activeInfo = com.example.data.model.SubscriptionInfoHelper.calculate(activeAccount, nowMs)
+    assertEquals(com.example.data.model.SubscriptionStatus.ACTIVE, activeInfo.status)
+    assertEquals("Active", activeInfo.statusLabel(isArabic = false))
+    assertEquals("نشط", activeInfo.statusLabel(isArabic = true))
+    assertEquals(20, activeInfo.remainingDays)
+    assertEquals(20, activeInfo.countdownDays)
+    assertEquals(5, activeInfo.countdownHours)
+    assertEquals(30, activeInfo.countdownMinutes)
+    assertEquals("20d 05h 30m", activeInfo.countdownText(isArabic = false))
+    assertTrue(activeInfo.countdownText(isArabic = true).contains("20"))
+    assertFalse(activeInfo.isExpiringWarningVisible)
+
+    // 3. Expiring Soon subscription with <= 7 days remaining (e.g. 5 days, 12 hours, 15 minutes)
+    val soonExpMs = nowMs + (5 * dayMs) + (12 * hourMs) + (15 * minuteMs)
+    val soonAccount = activeAccount.copy(
+      id = "acc_soon",
+      expDate = (soonExpMs / 1000L).toString()
+    )
+    val soonInfo = com.example.data.model.SubscriptionInfoHelper.calculate(soonAccount, nowMs)
+    assertEquals(com.example.data.model.SubscriptionStatus.EXPIRING_SOON, soonInfo.status)
+    assertEquals("Expiring Soon", soonInfo.statusLabel(isArabic = false))
+    assertEquals("ينتهي قريباً", soonInfo.statusLabel(isArabic = true))
+    assertEquals(5, soonInfo.remainingDays)
+    assertEquals(5, soonInfo.countdownDays)
+    assertEquals(12, soonInfo.countdownHours)
+    assertEquals(15, soonInfo.countdownMinutes)
+    assertTrue(soonInfo.isExpiringWarningVisible)
+    assertNotNull(soonInfo.warningText(isArabic = false))
+    assertNotNull(soonInfo.warningText(isArabic = true))
+
+    // 4. Expired subscription (past exp_date)
+    val expiredMs = nowMs - (2 * dayMs)
+    val expiredAccount = activeAccount.copy(
+      id = "acc_expired",
+      expDate = (expiredMs / 1000L).toString()
+    )
+    val expiredInfo = com.example.data.model.SubscriptionInfoHelper.calculate(expiredAccount, nowMs)
+    assertEquals(com.example.data.model.SubscriptionStatus.EXPIRED, expiredInfo.status)
+    assertEquals("Expired", expiredInfo.statusLabel(isArabic = false))
+    assertEquals("منتهي", expiredInfo.statusLabel(isArabic = true))
+    assertEquals(0, expiredInfo.remainingDays)
+    assertEquals(0, expiredInfo.countdownDays)
+    assertEquals(0, expiredInfo.countdownHours)
+    assertEquals(0, expiredInfo.countdownMinutes)
+    assertTrue(expiredInfo.isExpired)
+
+    // 5. Repository persists activationDate and updates subscription fields cleanly
+    repo.addAccount(activeAccount)
+    val refreshed = activeAccount.copy(
+      status = "Active",
+      expDate = (soonExpMs / 1000L).toString(),
+      activationDate = createdSec
+    )
+    repo.updateAccountSubscription(refreshed)
+    val saved = repo.getActiveAccount()
+    assertEquals((soonExpMs / 1000L).toString(), saved.expDate)
+    assertEquals(createdSec, saved.activationDate)
+  }
 }
 

@@ -97,8 +97,21 @@ class XtreamClient {
                 )
             }
 
-            val expDateRaw = userInfo.optString("exp_date", "")
-            val maxConn = userInfo.optString("max_connections", "1")
+            val expDateRaw = if (userInfo.isNull("exp_date")) {
+                ""
+            } else {
+                userInfo.optString("exp_date", "").trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+            }
+            val createdAtRaw = if (userInfo.isNull("created_at")) {
+                ""
+            } else {
+                userInfo.optString("created_at", "").trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+            }
+            val maxConn = if (userInfo.isNull("max_connections")) {
+                "1"
+            } else {
+                userInfo.optString("max_connections", "1").trim().ifBlank { "1" }
+            }
 
             val account = Account(
                 id = java.util.UUID.randomUUID().toString(),
@@ -109,7 +122,8 @@ class XtreamClient {
                 isActive = true,
                 status = status,
                 expDate = expDateRaw,
-                maxConnections = maxConn
+                maxConnections = maxConn,
+                activationDate = createdAtRaw
             )
 
             Result.success(account)
@@ -119,6 +133,69 @@ class XtreamClient {
             Result.failure(Exception("Server connection timed out. Server might be down."))
         } catch (e: Exception) {
             Result.failure(Exception(e.message ?: "Connection error occurred"))
+        }
+    }
+
+    /**
+     * Refreshes authenticated subscription information (`user_info.exp_date`, `user_info.created_at`,
+     * `user_info.status`, and `user_info.max_connections`) for an existing Xtream Codes account.
+     * Preserves the existing account ID, name, and active flag.
+     */
+    suspend fun fetchSubscriptionInfo(account: Account): Result<Account> = withContext(Dispatchers.IO) {
+        if (account.isDemo || account.serverUrl.isBlank() || account.username.isBlank()) {
+            return@withContext Result.success(account)
+        }
+        try {
+            val base = normalizeUrl(account.serverUrl)
+            val apiUrl = "$base/player_api.php?username=${account.username}&password=${account.password}"
+            val request = Request.Builder().url(apiUrl).get().build()
+
+            val body = httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(Exception("HTTP ${response.code}"))
+                }
+                response.body?.string().orEmpty()
+            }
+
+            if (body.isBlank() || !body.trimStart().startsWith("{")) {
+                return@withContext Result.failure(Exception("Invalid response"))
+            }
+
+            val json = JSONObject(body)
+            val userInfo = json.optJSONObject("user_info")
+                ?: return@withContext Result.failure(Exception("Missing user_info"))
+
+            val status = if (userInfo.isNull("status")) {
+                account.status
+            } else {
+                userInfo.optString("status", account.status).trim().ifBlank { account.status }
+            }
+            val expDateRaw = if (userInfo.isNull("exp_date")) {
+                ""
+            } else {
+                userInfo.optString("exp_date", "").trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+            }
+            val createdAtRaw = if (userInfo.isNull("created_at")) {
+                ""
+            } else {
+                userInfo.optString("created_at", "").trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+            }
+            val maxConn = if (userInfo.isNull("max_connections")) {
+                account.maxConnections
+            } else {
+                userInfo.optString("max_connections", account.maxConnections).trim().ifBlank { account.maxConnections }
+            }
+
+            Result.success(
+                account.copy(
+                    status = status,
+                    expDate = expDateRaw,
+                    activationDate = createdAtRaw.ifBlank { account.activationDate },
+                    maxConnections = maxConn
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 

@@ -548,7 +548,8 @@ class MainActivity : ComponentActivity() {
                                         onRemoveAccount = { accId -> viewModel.removeAccount(accId) },
                                         onClearCache = { viewModel.clearCache() },
                                         updateState = updateState,
-                                        onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) }
+                                        onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) },
+                                        onRefreshSubscriptionClick = { viewModel.refreshSubscriptionInfo() }
                                     )
                                 }
                             }

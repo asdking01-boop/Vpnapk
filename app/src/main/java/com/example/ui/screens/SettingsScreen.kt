@@ -17,10 +17,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -31,12 +33,17 @@ import com.example.data.model.Account
 import com.example.data.model.AspectRatioMode
 import com.example.data.model.CardStyle
 import com.example.data.model.LiveChannelOrder
+import com.example.data.model.SubscriptionInfo
+import com.example.data.model.SubscriptionInfoHelper
+import com.example.data.model.SubscriptionStatus
 import com.example.data.model.UserSettings
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.KrasLogo
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.theme.*
 import com.example.updater.AppUpdateUiState
+import java.util.Locale
+import kotlinx.coroutines.delay
 
 @Composable
 fun SettingsScreen(
@@ -50,7 +57,8 @@ fun SettingsScreen(
     onClearCache: () -> Unit,
     modifier: Modifier = Modifier,
     updateState: AppUpdateUiState = AppUpdateUiState(),
-    onCheckForUpdatesClick: () -> Unit = {}
+    onCheckForUpdatesClick: () -> Unit = {},
+    onRefreshSubscriptionClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -61,10 +69,34 @@ fun SettingsScreen(
     var showDndPermissionDialog by remember { mutableStateOf(false) }
     var cacheClearedFeedback by remember { mutableStateOf(false) }
 
+    // Live clock state for real-time countdown (days, hours, minutes)
+    var currentTimeMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(activeAccount?.id) {
+        onRefreshSubscriptionClick()
+    }
+
+    LaunchedEffect(activeAccount?.id, activeAccount?.expDate) {
+        while (true) {
+            currentTimeMs = System.currentTimeMillis()
+            delay(15_000L)
+        }
+    }
+
+    val isArabic = remember(userSettings.language) {
+        SubscriptionInfoHelper.isArabicLanguage(userSettings.language)
+    }
+
+    val subscriptionInfo = remember(activeAccount, currentTimeMs) {
+        SubscriptionInfoHelper.calculate(activeAccount, currentTimeMs)
+    }
+
     // Re-check DND permission when returning from system settings screen
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
+                currentTimeMs = System.currentTimeMillis()
+                onRefreshSubscriptionClick()
                 if (PlayerImmersiveHelper.isDndPermissionGranted(context)) {
                     if (showDndPermissionDialog) {
                         showDndPermissionDialog = false
@@ -154,7 +186,7 @@ fun SettingsScreen(
                                     fontSize = 14.sp
                                 )
                                 Text(
-                                    text = "Status: ${activeAccount.status} • Exp: ${activeAccount.expDate.ifEmpty { "Never" }}",
+                                    text = "Status: ${subscriptionInfo.statusLabel(isArabic = false)} • Exp: ${subscriptionInfo.expirationDateText(isArabic = false)}",
                                     color = TextSecondary,
                                     fontSize = 11.sp
                                 )
@@ -198,6 +230,21 @@ fun SettingsScreen(
                     }
                 }
             }
+        }
+
+        // 1b. Subscription Information & Remaining Duration Card (Supports English & Arabic)
+        item {
+            SubscriptionInformationCard(
+                subscriptionInfo = subscriptionInfo,
+                isArabic = isArabic,
+                onRefreshClick = {
+                    currentTimeMs = System.currentTimeMillis()
+                    onRefreshSubscriptionClick()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+            )
         }
 
         // 2. Live TV Settings (Channel Order)
@@ -918,6 +965,435 @@ fun SettingsScreen(
             },
             containerColor = CinemaDark,
             shape = RoundedCornerShape(16.dp)
+        )
+    }
+}
+
+@Composable
+private fun SubscriptionInformationCard(
+    subscriptionInfo: SubscriptionInfo,
+    isArabic: Boolean,
+    onRefreshClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val statusAccentColor = when (subscriptionInfo.status) {
+        SubscriptionStatus.ACTIVE -> AccentEmerald
+        SubscriptionStatus.EXPIRING_SOON -> AccentGold
+        SubscriptionStatus.EXPIRED -> KrasRedBright
+    }
+
+    val statusIcon = when (subscriptionInfo.status) {
+        SubscriptionStatus.ACTIVE -> Icons.Default.VerifiedUser
+        SubscriptionStatus.EXPIRING_SOON -> Icons.Default.WarningAmber
+        SubscriptionStatus.EXPIRED -> Icons.Default.ErrorOutline
+    }
+
+    val layoutDirection = if (isArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+
+    CompositionLocalProvider(LocalLayoutDirection provides layoutDirection) {
+        Box(
+            modifier = modifier
+                .liquidGlassPanel(
+                    cornerRadius = 20.dp,
+                    accentGlow = when (subscriptionInfo.status) {
+                        SubscriptionStatus.ACTIVE -> KrasRed
+                        SubscriptionStatus.EXPIRING_SOON -> AccentGold
+                        SubscriptionStatus.EXPIRED -> KrasRedBright
+                    }
+                )
+                .testTag("subscription_info_card")
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                // 1. Header Row: Title + Status Badge + Refresh Button
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(KrasRed.copy(alpha = 0.18f))
+                                .border(1.dp, KrasRedBright.copy(alpha = 0.45f), RoundedCornerShape(10.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CardMembership,
+                                contentDescription = if (isArabic) "معلومات الاشتراك" else "Subscription Information",
+                                tint = KrasRedBright,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        Column {
+                            Text(
+                                text = if (isArabic) "معلومات الاشتراك" else "Subscription Information",
+                                color = Color.White,
+                                fontSize = 15.sp,
+                                fontFamily = OutfitFontFamily,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (isArabic) "حالة الحساب والمدة المتبقية" else "Account validity & remaining duration",
+                                color = TextSecondary,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Subscription Status Pill (Active / Expiring Soon / Expired)
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(statusAccentColor.copy(alpha = 0.16f))
+                                .border(1.dp, statusAccentColor.copy(alpha = 0.55f), RoundedCornerShape(50))
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                                .testTag("subscription_status_badge"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = statusIcon,
+                                contentDescription = subscriptionInfo.statusLabel(isArabic),
+                                tint = statusAccentColor,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                text = subscriptionInfo.statusLabel(isArabic),
+                                color = statusAccentColor,
+                                fontSize = 11.sp,
+                                fontFamily = OutfitFontFamily,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+
+                        // Refresh Subscription Info Button
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.08f))
+                                .border(1.dp, GlassBorder, CircleShape)
+                                .clickable { onRefreshClick() }
+                                .testTag("subscription_refresh_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = if (isArabic) "تحديث الاشتراك" else "Refresh Subscription",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+
+                // 2. Warning Banner (7 days or fewer remaining) or Expired Alert Banner
+                val warningText = subscriptionInfo.warningText(isArabic)
+                if ((subscriptionInfo.isExpiringWarningVisible || subscriptionInfo.isExpired) && !warningText.isNullOrBlank()) {
+                    val bannerColor = if (subscriptionInfo.isExpired) KrasRedBright else AccentGold
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(bannerColor.copy(alpha = 0.14f))
+                            .border(1.dp, bannerColor.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                            .testTag("subscription_warning_banner"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (subscriptionInfo.isExpired) Icons.Default.ErrorOutline else Icons.Default.WarningAmber,
+                            contentDescription = if (isArabic) "تنبيه الاشتراك" else "Subscription Warning",
+                            tint = bannerColor,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = warningText,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                // 3. Activation Date & Expiration Date Side-by-Side Glass Tiles
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Activation Date Tile
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White.copy(alpha = 0.05f))
+                            .border(1.dp, GlassBorder, RoundedCornerShape(14.dp))
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                            .testTag("subscription_activation_date_tile"),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.EventAvailable,
+                                contentDescription = null,
+                                tint = TextSecondary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = if (isArabic) "تاريخ التفعيل" else "Activation Date",
+                                color = TextSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        Text(
+                            text = subscriptionInfo.activationDateText(isArabic),
+                            color = if (subscriptionInfo.hasActivationDate) Color.White else TextSecondary,
+                            fontSize = 14.sp,
+                            fontFamily = OutfitFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.testTag("subscription_activation_date_value")
+                        )
+                    }
+
+                    // Expiration Date Tile
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White.copy(alpha = 0.05f))
+                            .border(
+                                1.dp,
+                                if (subscriptionInfo.isExpiringWarningVisible || subscriptionInfo.isExpired) {
+                                    statusAccentColor.copy(alpha = 0.45f)
+                                } else {
+                                    GlassBorder
+                                },
+                                RoundedCornerShape(14.dp)
+                            )
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                            .testTag("subscription_expiration_date_tile"),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.EventBusy,
+                                contentDescription = null,
+                                tint = if (subscriptionInfo.isExpiringWarningVisible || subscriptionInfo.isExpired) statusAccentColor else TextSecondary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = if (isArabic) "تاريخ الانتهاء" else "Expiration Date",
+                                color = TextSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        Text(
+                            text = subscriptionInfo.expirationDateText(isArabic),
+                            color = when {
+                                !subscriptionInfo.hasExpirationDate -> TextSecondary
+                                subscriptionInfo.isExpired -> KrasRedBright
+                                subscriptionInfo.isExpiringWarningVisible -> AccentGold
+                                else -> Color.White
+                            },
+                            fontSize = 14.sp,
+                            fontFamily = OutfitFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.testTag("subscription_expiration_date_value")
+                        )
+                    }
+                }
+
+                // 4. Days Remaining Summary Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White.copy(alpha = 0.04f))
+                        .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                        .testTag("subscription_remaining_days_row"),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Timelapse,
+                            contentDescription = null,
+                            tint = KrasRedBright,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (isArabic) "الأيام المتبقية" else "Days Remaining",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Text(
+                        text = subscriptionInfo.remainingDaysText(isArabic),
+                        color = when {
+                            !subscriptionInfo.hasExpirationDate -> TextSecondary
+                            subscriptionInfo.isExpired -> KrasRedBright
+                            subscriptionInfo.isExpiringWarningVisible -> AccentGold
+                            else -> AccentEmerald
+                        },
+                        fontSize = 13.sp,
+                        fontFamily = OutfitFontFamily,
+                        fontWeight = FontWeight.ExtraBold,
+                        modifier = Modifier.testTag("subscription_remaining_days_value")
+                    )
+                }
+
+                // 5. Live Countdown Section (Days, Hours, Minutes)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFF0A0C12).copy(alpha = 0.72f))
+                        .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(14.dp))
+                        .padding(12.dp)
+                        .testTag("subscription_live_countdown_section"),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(statusAccentColor)
+                            )
+                            Text(
+                                text = if (isArabic) "العد التنازلي المباشر" else "Live Countdown",
+                                color = TextSecondary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Text(
+                            text = subscriptionInfo.countdownText(isArabic),
+                            color = if (subscriptionInfo.hasExpirationDate) Color.White else TextSecondary,
+                            fontSize = 11.sp,
+                            fontFamily = OutfitFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.testTag("subscription_live_countdown_text")
+                        )
+                    }
+
+                    if (subscriptionInfo.hasExpirationDate) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            CountdownUnitBox(
+                                value = subscriptionInfo.countdownDays.toString(),
+                                label = if (isArabic) "يوم" else "DAYS",
+                                accentColor = statusAccentColor,
+                                modifier = Modifier.weight(1f)
+                            )
+                            CountdownUnitBox(
+                                value = String.format(Locale.US, "%02d", subscriptionInfo.countdownHours),
+                                label = if (isArabic) "ساعة" else "HOURS",
+                                accentColor = statusAccentColor,
+                                modifier = Modifier.weight(1f)
+                            )
+                            CountdownUnitBox(
+                                value = String.format(Locale.US, "%02d", subscriptionInfo.countdownMinutes),
+                                label = if (isArabic) "دقيقة" else "MINUTES",
+                                accentColor = statusAccentColor,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color.White.copy(alpha = 0.04f))
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = subscriptionInfo.countdownText(isArabic),
+                                color = TextSecondary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CountdownUnitBox(
+    value: String,
+    label: String,
+    accentColor: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color.White.copy(alpha = 0.06f))
+            .border(1.dp, accentColor.copy(alpha = 0.28f), RoundedCornerShape(10.dp))
+            .padding(vertical = 8.dp, horizontal = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Text(
+            text = value,
+            color = Color.White,
+            fontSize = 18.sp,
+            fontFamily = OutfitFontFamily,
+            fontWeight = FontWeight.Black
+        )
+        Text(
+            text = label,
+            color = TextSecondary,
+            fontSize = 9.sp,
+            fontFamily = OutfitFontFamily,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.6.sp
         )
     }
 }
