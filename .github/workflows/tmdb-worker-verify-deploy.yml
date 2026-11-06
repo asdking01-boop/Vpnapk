@@ -1,0 +1,81 @@
+name: KRAS TV — TMDb Worker verification and guarded release
+
+# The production Worker is NEVER deployed on push or pull request.
+on:
+  pull_request:
+    paths:
+      - 'backend-tmdb-proxy/**'
+      - '.github/workflows/tmdb-worker-verify-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      deploy_production:
+        description: 'Deploy to the existing Cloudflare Worker ONLY after security review and D1 setup'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Check syntax and run offline Worker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check JavaScript syntax
+        run: node --check backend-tmdb-proxy/worker.js
+      - name: Run local Worker tests
+        run: node --test backend-tmdb-proxy/worker.test.js
+
+  deploy-production:
+    name: Controlled production deployment
+    needs: verify
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_production == true && vars.TMDB_RELEASE_APPROVED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: tmdb-production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Security and storage preflight (blocks current unsafe Worker)
+        shell: bash
+        env:
+          D1_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$D1_ID" || { echo '::error::Missing CLOUDFLARE_D1_DATABASE_ID'; exit 1; }
+          test -n "$CF_TOKEN" || { echo '::error::Missing CLOUDFLARE_API_TOKEN'; exit 1; }
+          test -n "$CF_ACCOUNT" || { echo '::error::Missing CLOUDFLARE_ACCOUNT_ID'; exit 1; }
+          [[ "$D1_ID" =~ ^[[:xdigit:]-]{36}$ ]] || { echo '::error::Invalid D1 database ID'; exit 1; }
+          # These known code paths must be fixed, reviewed and tested first.
+          if grep -Eq 'kras_default_key|codeData\.stateNonce && clientStateNonce|unsealOneTimeAuthCode\(env, authCode\)' backend-tmdb-proxy/worker.js; then
+            echo '::error::Unsafe auth fallback / non-atomic one-time code / optional state checks found. Fix before deployment.'
+            exit 1
+          fi
+          if grep -Eq 'const secretMaterial = .*TMDB_API_KEY' backend-tmdb-proxy/worker.js; then
+            echo '::error::Use a separate encryption secret, not the TMDb API key, for session token encryption.'
+            exit 1
+          fi
+          cat >> backend-tmdb-proxy/wrangler.toml <<EOF
+
+          [[d1_databases]]
+          binding = "DB"
+          database_name = "kras-tmdb-db"
+          database_id = "$D1_ID"
+          EOF
+      - name: Deploy reviewed Worker
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: backend-tmdb-proxy
+          command: deploy
+      - name: Check health endpoint
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 30 \
+            https://kras-tmdb-proxy.asdking01.workers.dev/api/tmdb/test \
+            | node -e 'let t="";process.stdin.on("data",c=>t+=c);process.stdin.on("end",()=>{const v=JSON.parse(t);if(v.ok!==true){console.error("TMDb health check failed");process.exit(1)}console.log("TMDb connectivity verified. User login still needs end-to-end validation.")})'
