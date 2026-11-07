@@ -68,6 +68,7 @@ fun SettingsScreen(
     onCheckForUpdatesClick: () -> Unit = {},
     onRefreshSubscriptionClick: () -> Unit = {},
     tmdbAccountState: TmdbAccountUiState = TmdbAccountUiState(),
+    onLoginTmdbAccountClick: (apiKey: String, username: String, password: CharSequence) -> Unit = { _, _, _ -> },
     onConnectTmdbAccountClick: () -> Unit = {},
     onCompleteTmdbAuthClick: () -> Unit = {},
     onCancelTmdbAuthClick: () -> Unit = {},
@@ -262,11 +263,12 @@ fun SettingsScreen(
             )
         }
 
-        // 1c. TMDb Account & Sync Card (Official TMDb User Auth + Two-Way Sync)
+        // 1c. TMDb Account & Sync Card (In-App Direct HTTPS Login & Two-Way Sync)
         item {
             TmdbAccountSyncCard(
                 tmdbAccountState = tmdbAccountState,
                 isArabic = isArabic,
+                onLoginClick = onLoginTmdbAccountClick,
                 onConnectClick = onConnectTmdbAccountClick,
                 onCompleteAuthClick = onCompleteTmdbAuthClick,
                 onCancelAuthClick = onCancelTmdbAuthClick,
@@ -1434,6 +1436,7 @@ private fun CountdownUnitBox(
 private fun TmdbAccountSyncCard(
     tmdbAccountState: TmdbAccountUiState,
     isArabic: Boolean,
+    onLoginClick: (apiKey: String, username: String, password: CharSequence) -> Unit,
     onConnectClick: () -> Unit,
     onCompleteAuthClick: () -> Unit,
     onCancelAuthClick: () -> Unit,
@@ -1444,12 +1447,19 @@ private fun TmdbAccountSyncCard(
 ) {
     val layoutDirection = if (isArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
     val isConnected = tmdbAccountState.isConnected
-    val isAuthorizing = tmdbAccountState.authStatus == TmdbAuthStatus.AUTHORIZING_IN_BROWSER
-    val isVerifying = tmdbAccountState.authStatus == TmdbAuthStatus.VERIFYING_SESSION
+    val isLoggingIn = tmdbAccountState.authStatus == TmdbAuthStatus.LOGGING_IN
     val isSyncing = tmdbAccountState.syncStatus == TmdbSyncStatus.SYNCING
 
+    // In-app form state
+    var apiKey by remember(tmdbAccountState.savedApiKey) {
+        mutableStateOf(tmdbAccountState.savedApiKey)
+    }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var isPasswordVisible by remember { mutableStateOf(false) }
+
     val badgeColor = when {
-        isSyncing || isVerifying || isAuthorizing -> AccentGold
+        isSyncing || isLoggingIn -> AccentGold
         isConnected -> AccentEmerald
         else -> TextSecondary
     }
@@ -1505,9 +1515,9 @@ private fun TmdbAccountSyncCard(
                             )
                             Text(
                                 text = if (isArabic) {
-                                    "مزامنة ثنائية للمفضلة وقائمة المشاهدة والتقييمات"
+                                    "تسجيل دخول مباشر ومزامنة للمفضلة وقائمة المشاهدة والتقييمات"
                                 } else {
-                                    "Two-way sync for Favorites, Watchlist & Ratings"
+                                    "In-app direct login & two-way sync for Favorites, Watchlist & Ratings"
                                 },
                                 color = TextSecondary,
                                 fontSize = 11.sp
@@ -1765,100 +1775,151 @@ private fun TmdbAccountSyncCard(
                         }
                     }
                 } else {
-                    // Disconnected / Authorizing View
+                    // Disconnected View: Working In-App TMDb Login Form
                     Text(
                         text = if (isArabic) {
-                            "سجل الدخول بحسابك في TMDb لمزامنة الأفلام والمسلسلات المفضلة وقائمة المشاهدة والتقييمات تلقائياً عبر جميع أجهزتك."
+                            "أدخل مفتاح واجهة برمجة تطبيقات TMDb (v3) واسم المستخدم وكلمة المرور لتسجيل الدخول مباشرة من التطبيق دون مغادرته."
                         } else {
-                            "Sign in with your personal TMDb account to access and sync your Favorites, Watchlist, and Ratings across all your devices."
+                            "Enter your TMDb API Key (v3 auth), username, and password to sign in directly within KRAS TV without leaving the app."
                         },
                         color = TextSecondary,
                         fontSize = 12.sp,
                         lineHeight = 17.sp
                     )
 
-                    if (isAuthorizing) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Button(
-                                onClick = onCompleteAuthClick,
-                                colors = ButtonDefaults.buttonColors(containerColor = AccentEmerald),
-                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("tmdb_complete_auth_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = "Complete Sign-In",
-                                    tint = Color.Black,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = if (isArabic) "إكمال تسجيل الدخول" else "Complete Sign-In",
-                                    color = Color.Black,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
+                    // 1. API Key Field (v3, pasted once and stored securely in EncryptedSharedPreferences)
+                    OutlinedTextField(
+                        value = apiKey,
+                        onValueChange = { apiKey = it },
+                        label = { Text(if (isArabic) "مفتاح API الخاص بـ TMDb (v3)" else "TMDb API Key (v3)") },
+                        placeholder = { Text("e.g. 8f4a... (32 hex characters)") },
+                        leadingIcon = {
+                            Icon(Icons.Default.Key, contentDescription = null, tint = AccentGold, modifier = Modifier.size(18.dp))
+                        },
+                        trailingIcon = {
+                            if (apiKey.isNotBlank()) {
+                                IconButton(onClick = { apiKey = "" }, modifier = Modifier.size(24.dp)) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear", tint = TextSecondary, modifier = Modifier.size(16.dp))
+                                }
                             }
+                        },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = KrasRedBright,
+                            unfocusedBorderColor = GlassBorder,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedLabelColor = KrasRedBright,
+                            unfocusedLabelColor = TextSecondary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("tmdb_api_key_input")
+                    )
 
-                            OutlinedButton(
-                                onClick = onCancelAuthClick,
-                                border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                                modifier = Modifier.testTag("tmdb_cancel_auth_button")
+                    // 2. TMDb Username Field
+                    OutlinedTextField(
+                        value = username,
+                        onValueChange = { username = it },
+                        label = { Text(if (isArabic) "اسم المستخدم في TMDb" else "TMDb Username") },
+                        placeholder = { Text(if (isArabic) "اسم الحساب" else "Your TMDb account username") },
+                        leadingIcon = {
+                            Icon(Icons.Default.Person, contentDescription = null, tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                        },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = KrasRedBright,
+                            unfocusedBorderColor = GlassBorder,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedLabelColor = KrasRedBright,
+                            unfocusedLabelColor = TextSecondary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("tmdb_username_input")
+                    )
+
+                    // 3. TMDb Password Field (Hidden, with show/hide eye toggle icon)
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = { Text(if (isArabic) "كلمة المرور في TMDb" else "TMDb Password") },
+                        placeholder = { Text("••••••••") },
+                        leadingIcon = {
+                            Icon(Icons.Default.Lock, contentDescription = null, tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                        },
+                        trailingIcon = {
+                            IconButton(
+                                onClick = { isPasswordVisible = !isPasswordVisible },
+                                modifier = Modifier.size(24.dp)
                             ) {
-                                Text(
-                                    text = if (isArabic) "إلغاء" else "Cancel",
-                                    color = TextSecondary,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    } else {
-                        Button(
-                            onClick = onConnectClick,
-                            enabled = !isVerifying,
-                            colors = ButtonDefaults.buttonColors(containerColor = KrasRed),
-                            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 11.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("tmdb_login_button")
-                        ) {
-                            if (isVerifying) {
-                                CircularProgressIndicator(
-                                    color = Color.White,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = if (isArabic) "جارٍ تسجيل الدخول إلى TMDb..." else "Logging in to TMDb...",
-                                    color = Color.White,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            } else {
                                 Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.Login,
-                                    contentDescription = "Login with TMDb",
-                                    tint = Color.White,
+                                    imageVector = if (isPasswordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (isPasswordVisible) "Hide password" else "Show password",
+                                    tint = TextSecondary,
                                     modifier = Modifier.size(18.dp)
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = if (isArabic) "تسجيل الدخول عبر TMDb" else "Login with TMDb",
-                                    color = Color.White,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
                             }
+                        },
+                        visualTransformation = if (isPasswordVisible) androidx.compose.ui.text.input.VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = KrasRedBright,
+                            unfocusedBorderColor = GlassBorder,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedLabelColor = KrasRedBright,
+                            unfocusedLabelColor = TextSecondary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("tmdb_password_input")
+                    )
+
+                    // 4. In-App Login Button with Loading State
+                    Button(
+                        onClick = {
+                            onLoginClick(apiKey, username, password)
+                        },
+                        enabled = !isLoggingIn && apiKey.isNotBlank() && username.isNotBlank() && password.isNotBlank(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = KrasRed,
+                            disabledContainerColor = KrasRed.copy(alpha = 0.35f)
+                        ),
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("tmdb_login_button")
+                    ) {
+                        if (isLoggingIn) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isArabic) "جارٍ تسجيل الدخول إلى TMDb..." else "Logging in to TMDb...",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Login,
+                                contentDescription = "Login",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isArabic) "تسجيل الدخول إلى TMDb" else "Login to TMDb",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }

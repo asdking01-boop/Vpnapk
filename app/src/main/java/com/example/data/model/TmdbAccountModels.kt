@@ -6,13 +6,34 @@ import java.util.Locale
 
 enum class TmdbAuthStatus {
     DISCONNECTED,
+    LOGGING_IN,
     AUTHORIZING_IN_BROWSER,
     VERIFYING_SESSION,
     CONNECTED
 }
 
+sealed class TmdbAuthResult {
+    data class Success(
+        val apiKey: String,
+        val sessionId: String,
+        val accountId: Int,
+        val username: String,
+        val displayName: String,
+        val avatarUrl: String
+    ) : TmdbAuthResult()
+
+    data class Error(
+        val message: String,
+        val statusCode: Int = 0,
+        val authErrorType: TmdbAuthErrorType = TmdbAuthErrorType.NONE
+    ) : TmdbAuthResult()
+}
+
 enum class TmdbAuthErrorType {
     NONE,
+    WRONG_CREDENTIALS,
+    INVALID_API_KEY,
+    NO_INTERNET,
     CANCELLED,
     DENIED,
     EXPIRED_TOKEN,
@@ -129,6 +150,7 @@ data class TmdbAccountUiState(
     val username: String = "",
     val displayName: String = "",
     val avatarUrl: String = "",
+    val savedApiKey: String = "",
     val autoSyncEnabled: Boolean = true,
     val lastSyncTimestampMs: Long = 0L,
     val syncedFavoritesCount: Int = 0,
@@ -142,13 +164,14 @@ data class TmdbAccountUiState(
         get() = authStatus == TmdbAuthStatus.CONNECTED && username.isNotBlank()
 
     val isBusy: Boolean
-        get() = authStatus == TmdbAuthStatus.VERIFYING_SESSION || syncStatus == TmdbSyncStatus.SYNCING
+        get() = authStatus == TmdbAuthStatus.LOGGING_IN || authStatus == TmdbAuthStatus.VERIFYING_SESSION || syncStatus == TmdbSyncStatus.SYNCING
 
     fun statusBadgeLabel(isArabic: Boolean): String {
         return when (authStatus) {
             TmdbAuthStatus.CONNECTED -> if (isArabic) "متصل" else "Connected"
-            TmdbAuthStatus.AUTHORIZING_IN_BROWSER -> if (isArabic) "بانتظار التفويض" else "Awaiting Approval"
-            TmdbAuthStatus.VERIFYING_SESSION -> if (isArabic) "جاري التحقق..." else "Connecting..."
+            TmdbAuthStatus.LOGGING_IN,
+            TmdbAuthStatus.VERIFYING_SESSION -> if (isArabic) "جارٍ تسجيل الدخول..." else "Logging in..."
+            TmdbAuthStatus.AUTHORIZING_IN_BROWSER -> if (isArabic) "غير متصل" else "Not Connected"
             TmdbAuthStatus.DISCONNECTED -> if (isArabic) "غير متصل" else "Not Connected"
         }
     }

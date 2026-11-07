@@ -410,7 +410,7 @@ class TmdbProxyClient(
                         errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
                         authErrorType = com.example.data.model.TmdbAuthErrorType.SERVICE_UNAVAILABLE,
                         requestUrl = requestUrl,
-                        userMessage = "TMDb account sign-in service is awaiting the latest Cloudflare Worker deployment."
+                        userMessage = "TMDb account sign-in service is currently unavailable. Please try again."
                     )
                 }
 
@@ -518,7 +518,7 @@ class TmdbProxyClient(
                         errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
                         authErrorType = com.example.data.model.TmdbAuthErrorType.SERVICE_UNAVAILABLE,
                         requestUrl = requestUrl,
-                        userMessage = "TMDb account sign-in service is awaiting the latest Cloudflare Worker deployment."
+                        userMessage = "TMDb account sign-in service is currently unavailable. Please try again."
                     )
                 }
 
@@ -679,7 +679,7 @@ class TmdbProxyClient(
                         httpStatusCode = response.code,
                         errorCategory = TmdbErrorCategory.MISSING_AUTH_ENDPOINT,
                         requestUrl = requestUrl,
-                        userMessage = "TMDb synchronization service is awaiting the latest Cloudflare Worker deployment."
+                        userMessage = "TMDb synchronization service is currently unavailable. Please try again."
                     )
                 }
 

@@ -194,9 +194,6 @@ class MainActivity : ComponentActivity() {
                     val observer = LifecycleEventObserver { _, event ->
                         when (event) {
                             Lifecycle.Event.ON_RESUME -> {
-                                if (tmdbAccountState.authStatus == TmdbAuthStatus.AUTHORIZING_IN_BROWSER) {
-                                    viewModel.completeTmdbAuthorization(isAutoResumeCheck = true)
-                                }
                                 if (currentActiveLive != null && currentNowPlaying == null) {
                                     viewModel.playerWrapper.setBackgroundAudioOnlyMode(false)
                                     if (!currentBgPlayback) {
@@ -573,27 +570,8 @@ class MainActivity : ComponentActivity() {
                                         onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) },
                                         onRefreshSubscriptionClick = { viewModel.refreshSubscriptionInfo() },
                                         tmdbAccountState = tmdbAccountState,
-                                        onConnectTmdbAccountClick = {
-                                            viewModel.startTmdbAccountAuthorization { authUrl ->
-                                                try {
-                                                    val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)).apply {
-                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                    }
-                                                    context.startActivity(browserIntent)
-                                                } catch (_: Exception) {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "Unable to open browser for TMDb authorization.",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
-                                                }
-                                            }
-                                        },
-                                        onCompleteTmdbAuthClick = {
-                                            viewModel.completeTmdbAuthorization(isAutoResumeCheck = false)
-                                        },
-                                        onCancelTmdbAuthClick = {
-                                            viewModel.cancelTmdbAuthorization()
+                                        onLoginTmdbAccountClick = { apiKey, username, password ->
+                                            viewModel.loginToTmdbAccount(apiKey, username, password)
                                         },
                                         onSyncTmdbNowClick = {
                                             viewModel.syncTmdbAccountNow(isAuto = false)

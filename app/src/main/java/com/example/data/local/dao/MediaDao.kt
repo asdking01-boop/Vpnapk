@@ -53,6 +53,12 @@ interface MediaDao {
         limit: Int = 40
     ): List<MediaItemEntity>
 
+    @Query("SELECT * FROM media_items WHERE accountId = :accountId AND type = :type AND LOWER(TRIM(name)) = LOWER(TRIM(:name)) LIMIT 1")
+    suspend fun findMediaByNameAndType(accountId: String, type: String, name: String): MediaItemEntity?
+
+    @Query("SELECT * FROM media_items WHERE type = :type AND LOWER(TRIM(name)) = LOWER(TRIM(:name)) LIMIT 1")
+    suspend fun findMediaByNameAndType(name: String, type: String): MediaItemEntity?
+
     // --- Quality Update (when real video resolution is detected from VOD/Series info or ExoPlayer) ---
     @Query("UPDATE media_items SET quality = :quality, resolution = :quality WHERE id = :id")
     suspend fun updateMediaQuality(id: String, quality: String)

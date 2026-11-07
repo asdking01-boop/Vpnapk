@@ -14,7 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 data class StoredTmdbSession(
     val krasAccountId: String,
-    val sessionId: String, // Opaque installation-bound client token issued by Cloudflare Worker (never exposes raw TMDb session_id)
+    val sessionId: String, // TMDb session_id stored securely
     val accountId: Int,
     val username: String,
     val displayName: String,
@@ -23,7 +23,8 @@ data class StoredTmdbSession(
     val syncedFavoritesCount: Int,
     val syncedWatchlistCount: Int,
     val syncedRatingsCount: Int,
-    val installationId: String = ""
+    val installationId: String = "",
+    val apiKey: String = ""
 )
 
 data class PendingTmdbAuthRequest(
@@ -136,6 +137,20 @@ class TmdbSecureSessionStore(context: Context) {
             .apply()
     }
 
+    fun getSavedApiKey(): String {
+        val encrypted = prefs.getString(KEY_SAVED_API_KEY, null) ?: return ""
+        return decryptValue(encrypted).trim()
+    }
+
+    fun saveApiKey(apiKey: String) {
+        val trimmed = apiKey.trim()
+        if (trimmed.isEmpty()) {
+            prefs.edit().remove(KEY_SAVED_API_KEY).apply()
+        } else {
+            prefs.edit().putString(KEY_SAVED_API_KEY, encryptValue(trimmed)).apply()
+        }
+    }
+
     fun saveSession(
         krasAccountId: String = DEFAULT_USER_ID,
         sessionId: String,
@@ -143,6 +158,7 @@ class TmdbSecureSessionStore(context: Context) {
         username: String,
         displayName: String,
         avatarUrl: String,
+        apiKey: String = "",
         lastSyncTimestampMs: Long = 0L,
         syncedFavoritesCount: Int = 0,
         syncedWatchlistCount: Int = 0,
@@ -151,6 +167,10 @@ class TmdbSecureSessionStore(context: Context) {
         val normalizedUser = normalizeUserKey(krasAccountId)
         val existing = getSession(normalizedUser)
         val installationId = getOrCreateInstallationId()
+        val effectiveApiKey = apiKey.trim().ifEmpty { existing?.apiKey.orEmpty() }.ifEmpty { getSavedApiKey() }
+        if (effectiveApiKey.isNotEmpty()) {
+            saveApiKey(effectiveApiKey)
+        }
         val payload = JSONObject().apply {
             put("krasAccountId", normalizedUser)
             put("installationId", installationId)
@@ -159,6 +179,7 @@ class TmdbSecureSessionStore(context: Context) {
             put("username", username.trim())
             put("displayName", displayName.trim())
             put("avatarUrl", avatarUrl.trim())
+            put("apiKey", effectiveApiKey)
             put("lastSyncTimestampMs", if (lastSyncTimestampMs > 0L) lastSyncTimestampMs else (existing?.lastSyncTimestampMs ?: 0L))
             put("syncedFavoritesCount", if (syncedFavoritesCount > 0) syncedFavoritesCount else (existing?.syncedFavoritesCount ?: 0))
             put("syncedWatchlistCount", if (syncedWatchlistCount > 0) syncedWatchlistCount else (existing?.syncedWatchlistCount ?: 0))
@@ -183,6 +204,8 @@ class TmdbSecureSessionStore(context: Context) {
             val username = obj.optString("username", "").trim()
             if (sessionId.isEmpty() || username.isEmpty()) return null
 
+            val apiKey = obj.optString("apiKey", "").trim().ifEmpty { getSavedApiKey() }
+
             StoredTmdbSession(
                 krasAccountId = obj.optString("krasAccountId", normalizedUser),
                 sessionId = sessionId,
@@ -194,7 +217,8 @@ class TmdbSecureSessionStore(context: Context) {
                 syncedFavoritesCount = obj.optInt("syncedFavoritesCount", 0),
                 syncedWatchlistCount = obj.optInt("syncedWatchlistCount", 0),
                 syncedRatingsCount = obj.optInt("syncedRatingsCount", 0),
-                installationId = obj.optString("installationId", getOrCreateInstallationId())
+                installationId = obj.optString("installationId", getOrCreateInstallationId()),
+                apiKey = apiKey
             )
         } catch (_: Exception) {
             null
@@ -216,6 +240,7 @@ class TmdbSecureSessionStore(context: Context) {
             username = current.username,
             displayName = current.displayName,
             avatarUrl = current.avatarUrl,
+            apiKey = current.apiKey,
             lastSyncTimestampMs = lastSyncTimestampMs,
             syncedFavoritesCount = favoritesCount,
             syncedWatchlistCount = watchlistCount,
@@ -402,6 +427,7 @@ class TmdbSecureSessionStore(context: Context) {
         const val DEFAULT_USER_ID = "demo"
 
         private const val KEY_INSTALLATION_ID = "enc_kras_installation_id_v1"
+        private const val KEY_SAVED_API_KEY = "enc_tmdb_saved_api_key_v1"
         private const val KEY_USER_SESSION_PREFIX = "enc_user_session_v2_"
         private const val KEY_USER_PENDING_AUTH_PREFIX = "enc_pending_auth_v2_"
 
