@@ -2,14 +2,15 @@
  * KRAS TV — Official Cloudflare Worker Backend for TMDb Metadata & Multi-User Account Sync
  * Worker URL: https://kras-tmdb-proxy.asdking01.workers.dev
  *
- * Required Cloudflare Worker Secret:
- *   - TMDB_API_KEY       : Your TMDb v3 API Key (or v4 Read Access Token)
+ * Required Cloudflare Worker Secrets:
+ *   - TMDB_API_KEY           : Your TMDb v3 API Key (or v4 Read Access Token)
+ *   - SESSION_ENCRYPTION_KEY : High-entropy secret key for AES-256-GCM session sealing
  *
- * Optional Storage Bindings (Works automatically with D1, KV, or zero-config AES-256-GCM sealed tokens):
- *   - DB                 : (Optional) Cloudflare D1 Database binding for persistent sessions & sync cache
- *   - TMDB_AUTH_KV       : (Optional) Cloudflare KV Namespace binding for pending auth & sessions
- *   - ANDROID_APP_SHA256 : (Optional) Comma-separated SHA-256 signing certificate fingerprints
- *                          for custom release keys in /.well-known/assetlinks.json
+ * Required Cloudflare D1 Database Binding:
+ *   - DB                     : Bound Cloudflare D1 Database (kras-tmdb-db) for persistent auth & sessions
+ *
+ * Optional Configuration:
+ *   - ANDROID_APP_SHA256     : Comma-separated SHA-256 fingerprints for /.well-known/assetlinks.json
  */
 
 const TMDB_BASE_URL = "https://api.themoviedb.org/3";
@@ -32,7 +33,7 @@ const sessionIsolateCache = new Map();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 120;
 
-let d1SchemaInitialized = false;
+const initializedD1Databases = new WeakSet();
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -89,7 +90,7 @@ function getKV(env) {
 
 async function ensureD1Schema(env) {
   const db = getD1(env);
-  if (!db || d1SchemaInitialized) return db;
+  if (!db || initializedD1Databases.has(db)) return db;
   try {
     await db.batch([
       db.prepare(`
@@ -135,6 +136,7 @@ async function ensureD1Schema(env) {
           display_name TEXT NOT NULL DEFAULT '',
           avatar_url TEXT,
           include_adult INTEGER NOT NULL DEFAULT 0,
+          revoked INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           last_sync_at INTEGER NOT NULL DEFAULT 0
@@ -169,7 +171,12 @@ async function ensureD1Schema(env) {
         )
       `)
     ]);
-    d1SchemaInitialized = true;
+
+    try {
+      await db.prepare(`ALTER TABLE tmdb_user_sessions ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0`).run();
+    } catch (_) {}
+
+    initializedD1Databases.add(db);
   } catch (_) {
     // Non-fatal; individual queries have try/catch guards
   }
@@ -206,63 +213,40 @@ function base64UrlToBytes(b64url) {
   return bytes;
 }
 
+function getSessionEncryptionKey(env) {
+  const key = env && (env.SESSION_ENCRYPTION_KEY || env.TMDB_SESSION_ENCRYPTION_KEY);
+  if (!key || typeof key !== "string" || key.trim().length === 0) {
+    throw new Error(
+      "Missing required SESSION_ENCRYPTION_KEY Cloudflare secret. Please configure SESSION_ENCRYPTION_KEY in Cloudflare Worker settings."
+    );
+  }
+  return key.trim();
+}
+
 async function deriveWorkerAesKey(env) {
-  const secretMaterial = `${(env && env.TMDB_API_KEY) || "kras_default_key"}::kras-tmdb-session-seal-v2`;
+  const secretMaterial = getSessionEncryptionKey(env);
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secretMaterial));
   return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
 
 /**
  * Encrypts server-side session metadata (`tmdbSessionId`, `accountId`, `krasUserId`, `installationId`)
- * into an opaque `kras_tok_...` token with AES-256-GCM using a key derived from `env.TMDB_API_KEY`.
- * The Android client cannot decrypt this token and never sees the raw TMDb `session_id`.
+ * into an opaque `kras_tok_...` token with AES-256-GCM using the required SESSION_ENCRYPTION_KEY secret.
+ * The raw TMDb `session_id` is never exposed to the client or URLs.
  */
 async function sealOpaqueClientToken(env, sessionPayload) {
-  try {
-    const key = await deriveWorkerAesKey(env);
-    const iv = new Uint8Array(12);
-    crypto.getRandomValues(iv);
-    const plainBytes = new TextEncoder().encode(JSON.stringify(sessionPayload));
-    const cipherBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plainBytes);
-    const cipherBytes = new Uint8Array(cipherBuf);
-    return `kras_tok_${bytesToBase64Url(iv)}.${bytesToBase64Url(cipherBytes)}`;
-  } catch (_) {
-    return `kras_tok_${randomHex(24)}`;
-  }
+  const key = await deriveWorkerAesKey(env);
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const plainBytes = new TextEncoder().encode(JSON.stringify(sessionPayload));
+  const cipherBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plainBytes);
+  const cipherBytes = new Uint8Array(cipherBuf);
+  return `kras_tok_${bytesToBase64Url(iv)}.${bytesToBase64Url(cipherBytes)}`;
 }
 
 async function unsealOpaqueClientToken(env, token) {
-  if (!token || !token.startsWith("kras_tok_")) return null;
+  if (!token || typeof token !== "string" || !token.startsWith("kras_tok_")) return null;
   const raw = token.slice("kras_tok_".length);
-  const dotIdx = raw.indexOf(".");
-  if (dotIdx <= 0) return null;
-  try {
-    const iv = base64UrlToBytes(raw.slice(0, dotIdx));
-    const cipherBytes = base64UrlToBytes(raw.slice(dotIdx + 1));
-    const key = await deriveWorkerAesKey(env);
-    const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipherBytes);
-    return JSON.parse(new TextDecoder().decode(plainBuf));
-  } catch (_) {
-    return null;
-  }
-}
-
-async function sealOneTimeAuthCode(env, codePayload) {
-  try {
-    const key = await deriveWorkerAesKey(env);
-    const iv = new Uint8Array(12);
-    crypto.getRandomValues(iv);
-    const plainBytes = new TextEncoder().encode(JSON.stringify(codePayload));
-    const cipherBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plainBytes);
-    return `kras_code_${bytesToBase64Url(iv)}.${bytesToBase64Url(new Uint8Array(cipherBuf))}`;
-  } catch (_) {
-    return `kras_code_${randomHex(20)}`;
-  }
-}
-
-async function unsealOneTimeAuthCode(env, authCode) {
-  if (!authCode || !authCode.startsWith("kras_code_")) return null;
-  const raw = authCode.slice("kras_code_".length);
   const dotIdx = raw.indexOf(".");
   if (dotIdx <= 0) return null;
   try {
@@ -452,7 +436,45 @@ async function handleCreateRequestToken(request, url, env) {
   ).trim();
   const krasUserId = extractKrasUserId(request, body, url);
   const installationId = extractInstallationId(request, body, url);
-  const stateNonce = String(body.state || url.searchParams.get("state") || randomHex(16)).trim();
+  const stateNonce = String(body.state || url.searchParams.get("state") || "").trim();
+
+  if (!stateNonce) {
+    return jsonResponse(
+      {
+        status: "error",
+        ok: false,
+        errorCode: "missing_state",
+        error: "Missing required 'state' parameter for authorization CSRF protection."
+      },
+      400
+    );
+  }
+
+  const db = await ensureD1Schema(env);
+  if (!db) {
+    return jsonResponse(
+      {
+        status: "error",
+        ok: false,
+        error: "Cloudflare D1 database (DB) binding is required."
+      },
+      500
+    );
+  }
+
+  try {
+    getSessionEncryptionKey(env);
+  } catch (err) {
+    return jsonResponse(
+      {
+        status: "error",
+        ok: false,
+        errorCode: "misconfigured_secret",
+        error: "Server misconfiguration: SESSION_ENCRYPTION_KEY secret is required."
+      },
+      500
+    );
+  }
 
   const tokenRes = await tmdbFetch("/authentication/token/new", {}, env);
   if (!tokenRes.ok || !tokenRes.data || !tokenRes.data.request_token) {
@@ -498,7 +520,6 @@ async function handleCreateRequestToken(request, url, env) {
     } catch (_) {}
   }
 
-  const db = await ensureD1Schema(env);
   if (db) {
     try {
       await db
@@ -610,19 +631,9 @@ async function createAndPersistServerTmdbSession(
     iat: nowMs
   });
 
-  // Create single-use 5-minute authorization code for the verified Android App Link
-  const authCode = await sealOneTimeAuthCode(env, {
-    clientToken,
-    tmdbSessionId,
-    accountId,
-    username,
-    displayName,
-    avatarUrl,
-    krasUserId,
-    installationId,
-    stateNonce,
-    exp: nowMs + ONE_TIME_CODE_TTL_MS
-  });
+  // Create single-use 5-minute random authorization code for D1 atomic exchange
+  const authCode = `kras_code_${randomHex(20)}`;
+  const expiresAtMs = nowMs + ONE_TIME_CODE_TTL_MS;
 
   const sessionRecord = {
     clientToken,
@@ -640,7 +651,7 @@ async function createAndPersistServerTmdbSession(
     ...sessionRecord,
     stateNonce,
     consumed: false,
-    expiresAtMs: nowMs + ONE_TIME_CODE_TTL_MS
+    expiresAtMs
   };
 
   sessionIsolateCache.set(clientToken, sessionRecord);
@@ -659,64 +670,76 @@ async function createAndPersistServerTmdbSession(
   }
 
   const db = await ensureD1Schema(env);
-  if (db) {
-    try {
-      await db.batch([
-        db
-          .prepare(
-            `UPDATE tmdb_auth_requests
-             SET status = 'approved', approved = 1
-             WHERE request_token = ?`
-          )
-          .bind(requestToken),
-        db
-          .prepare(
-            `INSERT OR REPLACE INTO tmdb_user_sessions
-             (session_id, tmdb_session_id, installation_id, kras_user_id, tmdb_account_id, username, display_name, avatar_url, include_adult, created_at, updated_at, last_sync_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
-          )
-          .bind(
-            clientToken,
-            tmdbSessionId,
-            installationId,
-            krasUserId,
-            accountId,
-            username,
-            displayName,
-            avatarUrl,
-            includeAdult,
-            nowMs,
-            nowMs
-          ),
-        db
-          .prepare(
-            `INSERT OR REPLACE INTO tmdb_auth_codes
-             (auth_code, client_token, tmdb_session_id, tmdb_account_id, username, display_name, avatar_url, installation_id, kras_user_id, state_nonce, consumed, expires_at_ms, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
-          )
-          .bind(
-            authCode,
-            clientToken,
-            tmdbSessionId,
-            accountId,
-            username,
-            displayName,
-            avatarUrl,
-            installationId,
-            krasUserId,
-            stateNonce,
-            nowMs + ONE_TIME_CODE_TTL_MS,
-            nowMs
-          ),
-        db
-          .prepare(
-            `INSERT OR REPLACE INTO tmdb_accounts
-             (account_id, username, name, avatar_url, session_id, updated_at, last_sync_at)
-             VALUES (?, ?, ?, ?, ?, ?, 0)`
-          )
-          .bind(accountId, username, displayName, avatarUrl, clientToken, nowMs)
-      ]);
-    } catch (_) {}
+  if (!db) {
+    return {
+      ok: false,
+      status: 500,
+      error: "Cloudflare D1 database (DB) binding is required."
+    };
+  }
+
+  try {
+    await db.batch([
+      db
+        .prepare(
+          `UPDATE tmdb_auth_requests
+           SET status = 'approved', approved = 1
+           WHERE request_token = ? AND status = 'pending'`
+        )
+        .bind(requestToken),
+      db
+        .prepare(
+          `INSERT OR REPLACE INTO tmdb_user_sessions
+           (session_id, tmdb_session_id, installation_id, kras_user_id, tmdb_account_id, username, display_name, avatar_url, include_adult, revoked, created_at, updated_at, last_sync_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0)`
+        )
+        .bind(
+          clientToken,
+          tmdbSessionId,
+          installationId,
+          krasUserId,
+          accountId,
+          username,
+          displayName,
+          avatarUrl,
+          includeAdult,
+          nowMs,
+          nowMs
+        ),
+      db
+        .prepare(
+          `INSERT INTO tmdb_auth_codes
+           (auth_code, client_token, tmdb_session_id, tmdb_account_id, username, display_name, avatar_url, installation_id, kras_user_id, state_nonce, consumed, expires_at_ms, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
+        )
+        .bind(
+          authCode,
+          clientToken,
+          tmdbSessionId,
+          accountId,
+          username,
+          displayName,
+          avatarUrl,
+          installationId,
+          krasUserId,
+          stateNonce,
+          expiresAtMs,
+          nowMs
+        ),
+      db
+        .prepare(
+          `INSERT OR REPLACE INTO tmdb_accounts
+           (account_id, username, name, avatar_url, session_id, updated_at, last_sync_at)
+           VALUES (?, ?, ?, ?, ?, ?, 0)`
+        )
+        .bind(accountId, username, displayName, avatarUrl, clientToken, nowMs)
+    ]);
+  } catch (dbErr) {
+    return {
+      ok: false,
+      status: 500,
+      error: "Failed to persist authenticated session to D1: " + dbErr.message
+    };
   }
 
   return {
@@ -739,7 +762,15 @@ async function createAndPersistServerTmdbSession(
  * (`https://kras-tmdb-proxy.asdking01.workers.dev/app/tmdb-auth?code=...&state=...`)
  * and `intent://` / `krastv://tmdb-auth` with the one-time authorization code (`code`).
  */
-function renderAppReturnPage({ appLinkUrl, customSchemeUrl, androidIntentUrl, isDenied, isExpired, username }) {
+function renderAppReturnPage({
+  appLinkUrl,
+  customSchemeUrl,
+  androidIntentUrl,
+  isDenied,
+  isExpired,
+  username,
+  statusCode = 200
+}) {
   const titleText = isDenied
     ? "Login Cancelled"
     : isExpired
@@ -850,7 +881,7 @@ function renderAppReturnPage({ appLinkUrl, customSchemeUrl, androidIntentUrl, is
 </body>
 </html>`;
 
-  return htmlResponse(html, 200);
+  return htmlResponse(html, statusCode);
 }
 
 /**
@@ -864,54 +895,11 @@ async function handleAuthCallback(url, env) {
   const requestToken = (url.searchParams.get("request_token") || "").trim();
   const approvedParam = (url.searchParams.get("approved") || "").trim().toLowerCase();
   const deniedParam = (url.searchParams.get("denied") || "").trim().toLowerCase();
-  let stateNonce = (url.searchParams.get("state") || "").trim();
-  let krasUserId = (url.searchParams.get("kras_user") || url.searchParams.get("uid") || "").trim();
-  let installationId = (url.searchParams.get("iid") || "").trim();
-
-  const db = await ensureD1Schema(env);
-  const kv = getKV(env);
-  let storedReq = pendingAuthIsolateCache.get(requestToken) || null;
-
-  if (!storedReq && kv && requestToken) {
-    try {
-      const kvVal = await kv.get(`auth_req:${requestToken}`, "json");
-      if (kvVal) storedReq = kvVal;
-    } catch (_) {}
-  }
-
-  if (db && requestToken) {
-    try {
-      const row = await db
-        .prepare(
-          `SELECT request_token, installation_id, kras_user_id, state_nonce, status, expires_at_ms
-           FROM tmdb_auth_requests
-           WHERE request_token = ?`
-        )
-        .bind(requestToken)
-        .first();
-      if (row) {
-        storedReq = {
-          requestToken: row.request_token,
-          installationId: row.installation_id || "",
-          krasUserId: row.kras_user_id || "demo",
-          stateNonce: row.state_nonce || "",
-          status: row.status || "pending",
-          expiresAtMs: Number(row.expires_at_ms || 0)
-        };
-      }
-    } catch (_) {}
-  }
-
-  if (storedReq) {
-    if (!stateNonce) stateNonce = storedReq.stateNonce || "";
-    if (!krasUserId) krasUserId = storedReq.krasUserId || "demo";
-    if (!installationId) installationId = storedReq.installationId || "";
-  }
+  const incomingState = (url.searchParams.get("state") || "").trim();
+  const incomingUser = (url.searchParams.get("kras_user") || url.searchParams.get("uid") || "").trim();
+  const incomingIid = (url.searchParams.get("iid") || "").trim();
 
   const isDenied = deniedParam === "true" || approvedParam === "false";
-  const isExpired =
-    !requestToken ||
-    (storedReq && storedReq.expiresAtMs > 0 && Date.now() > storedReq.expiresAtMs);
 
   const buildLinks = (paramsObj) => {
     const appLink = new URL(`${url.origin}/app/tmdb-auth`);
@@ -935,15 +923,76 @@ async function handleAuthCallback(url, env) {
     };
   };
 
+  // 1. Validate request_token
+  if (!requestToken) {
+    const links = buildLinks({ status: "expired", error: "missing_request_token" });
+    return renderAppReturnPage({ ...links, isDenied: false, isExpired: true, statusCode: 400 });
+  }
+
+  // 2. Strict State Validation: Callback MUST include non-empty state
+  if (!incomingState) {
+    const links = buildLinks({ status: "denied", error: "missing_state" });
+    return renderAppReturnPage({ ...links, isDenied: true, isExpired: false, statusCode: 400 });
+  }
+
+  // 3. Require valid, unexpired pending authorization request in D1
+  const db = await ensureD1Schema(env);
+  if (!db) {
+    const links = buildLinks({ status: "error", error: "db_required" });
+    return renderAppReturnPage({ ...links, isDenied: false, isExpired: true, statusCode: 500 });
+  }
+
+  let storedRow = null;
+  try {
+    storedRow = await db
+      .prepare(
+        `SELECT request_token, auth_session_id, installation_id, kras_user_id, state_nonce, redirect_uri, status, expires_at_ms
+         FROM tmdb_auth_requests
+         WHERE request_token = ?`
+      )
+      .bind(requestToken)
+      .first();
+  } catch (_) {}
+
+  if (!storedRow) {
+    const links = buildLinks({ status: "expired", error: "request_not_found" });
+    return renderAppReturnPage({ ...links, isDenied: false, isExpired: true, statusCode: 404 });
+  }
+
+  const nowMs = Date.now();
+  if (storedRow.status !== "pending") {
+    const links = buildLinks({ status: "expired", error: "already_processed" });
+    return renderAppReturnPage({ ...links, isDenied: false, isExpired: true, statusCode: 409 });
+  }
+
+  if (Number(storedRow.expires_at_ms) > 0 && nowMs > Number(storedRow.expires_at_ms)) {
+    const links = buildLinks({ status: "expired", error: "request_expired" });
+    return renderAppReturnPage({ ...links, isDenied: false, isExpired: true, statusCode: 410 });
+  }
+
+  // Strict state comparison: Must match stored state_nonce
+  if (storedRow.state_nonce !== incomingState) {
+    const links = buildLinks({ status: "denied", error: "state_mismatch" });
+    return renderAppReturnPage({ ...links, isDenied: true, isExpired: false, statusCode: 403 });
+  }
+
+  // User isolation check
+  if (incomingUser && storedRow.kras_user_id && storedRow.kras_user_id !== incomingUser) {
+    const links = buildLinks({ status: "denied", error: "user_mismatch" });
+    return renderAppReturnPage({ ...links, isDenied: true, isExpired: false, statusCode: 403 });
+  }
+
+  const stateNonce = storedRow.state_nonce;
+  const krasUserId = storedRow.kras_user_id || incomingUser || "demo";
+  const installationId = storedRow.installation_id || incomingIid || "";
+
   if (isDenied) {
-    if (db && requestToken) {
-      try {
-        await db
-          .prepare(`UPDATE tmdb_auth_requests SET status = 'denied', approved = 0 WHERE request_token = ?`)
-          .bind(requestToken)
-          .run();
-      } catch (_) {}
-    }
+    await db
+      .prepare(`UPDATE tmdb_auth_requests SET status = 'denied', approved = 0 WHERE request_token = ?`)
+      .bind(requestToken)
+      .run()
+      .catch(() => {});
+
     const links = buildLinks({
       status: "denied",
       denied: "true",
@@ -951,16 +1000,6 @@ async function handleAuthCallback(url, env) {
       kras_user: krasUserId
     });
     return renderAppReturnPage({ ...links, isDenied: true, isExpired: false });
-  }
-
-  if (isExpired) {
-    const links = buildLinks({
-      status: "expired",
-      expired: "true",
-      state: stateNonce,
-      kras_user: krasUserId
-    });
-    return renderAppReturnPage({ ...links, isDenied: false, isExpired: true });
   }
 
   // Validate pending authorization and immediately create the official TMDb session on the server
@@ -1049,76 +1088,82 @@ async function handleCreateSession(request, env) {
 
   // Branch A: One-Time Authorization Code Exchange (Primary Flow from Verified Android App Link)
   if (authCode) {
-    let codeData = authCodeIsolateCache.get(authCode) || null;
-
-    if (!codeData && kv) {
-      try {
-        const kvCode = await kv.get(`auth_code:${authCode}`, "json");
-        if (kvCode) codeData = kvCode;
-      } catch (_) {}
+    if (!clientStateNonce) {
+      return jsonResponse(
+        {
+          status: "error",
+          ok: false,
+          errorCode: "state_mismatch",
+          error: "Missing required 'state' parameter for authorization exchange."
+        },
+        403
+      );
     }
 
-    if (db) {
-      try {
-        const row = await db
-          .prepare(
-            `SELECT auth_code, client_token, tmdb_session_id, tmdb_account_id, username, display_name,
-                    avatar_url, installation_id, kras_user_id, state_nonce, consumed, expires_at_ms
-             FROM tmdb_auth_codes
-             WHERE auth_code = ?`
-          )
-          .bind(authCode)
-          .first();
-
-        if (row) {
-          if (Number(row.consumed) === 1) {
-            return jsonResponse(
-              {
-                status: "error",
-                ok: false,
-                errorCode: "expired_code",
-                error: "This one-time authorization code has already been used."
-              },
-              410
-            );
-          }
-          codeData = {
-            clientToken: row.client_token,
-            tmdbSessionId: row.tmdb_session_id,
-            accountId: Number(row.tmdb_account_id || 0),
-            username: row.username || "",
-            displayName: row.display_name || row.username || "",
-            avatarUrl: row.avatar_url || "",
-            installationId: row.installation_id || "",
-            krasUserId: row.kras_user_id || "demo",
-            stateNonce: row.state_nonce || "",
-            consumed: Number(row.consumed) === 1,
-            expiresAtMs: Number(row.expires_at_ms || 0)
-          };
-        }
-      } catch (_) {}
+    if (!db) {
+      return jsonResponse(
+        {
+          status: "error",
+          ok: false,
+          error: "Cloudflare D1 database (DB) binding is required."
+        },
+        500
+      );
     }
 
-    if (!codeData) {
-      const unsealed = await unsealOneTimeAuthCode(env, authCode);
-      if (unsealed) {
-        codeData = {
-          clientToken: unsealed.clientToken,
-          tmdbSessionId: unsealed.tmdbSessionId,
-          accountId: Number(unsealed.accountId || 0),
-          username: unsealed.username || "",
-          displayName: unsealed.displayName || unsealed.username || "",
-          avatarUrl: unsealed.avatarUrl || "",
-          installationId: unsealed.installationId || "",
-          krasUserId: unsealed.krasUserId || "demo",
-          stateNonce: unsealed.stateNonce || "",
-          consumed: false,
-          expiresAtMs: Number(unsealed.exp || 0)
-        };
+    const nowMs = Date.now();
+
+    // Atomic consumption in D1: Only one request will transition consumed from 0 to 1
+    const updateRes = await db
+      .prepare(
+        `UPDATE tmdb_auth_codes
+         SET consumed = 1
+         WHERE auth_code = ? AND consumed = 0 AND expires_at_ms > ?`
+      )
+      .bind(authCode, nowMs)
+      .run();
+
+    const changes = updateRes?.meta?.changes ?? updateRes?.changes ?? 0;
+
+    if (changes === 0) {
+      const existing = await db
+        .prepare(`SELECT consumed, expires_at_ms FROM tmdb_auth_codes WHERE auth_code = ?`)
+        .bind(authCode)
+        .first();
+
+      if (!existing) {
+        return jsonResponse(
+          {
+            status: "error",
+            ok: false,
+            errorCode: "invalid_code",
+            error: "Invalid authorization code."
+          },
+          410
+        );
       }
-    }
-
-    if (!codeData) {
+      if (Number(existing.consumed) === 1) {
+        return jsonResponse(
+          {
+            status: "error",
+            ok: false,
+            errorCode: "code_already_consumed",
+            error: "This one-time authorization code has already been used."
+          },
+          410
+        );
+      }
+      if (Number(existing.expires_at_ms) <= nowMs) {
+        return jsonResponse(
+          {
+            status: "error",
+            ok: false,
+            errorCode: "code_expired",
+            error: "Authorization code has expired."
+          },
+          410
+        );
+      }
       return jsonResponse(
         {
           status: "error",
@@ -1130,23 +1175,25 @@ async function handleCreateSession(request, env) {
       );
     }
 
-    if (codeData.consumed || (codeData.expiresAtMs > 0 && Date.now() > codeData.expiresAtMs)) {
+    const row = await db
+      .prepare(
+        `SELECT auth_code, client_token, tmdb_session_id, tmdb_account_id, username, display_name,
+                avatar_url, installation_id, kras_user_id, state_nonce
+         FROM tmdb_auth_codes
+         WHERE auth_code = ?`
+      )
+      .bind(authCode)
+      .first();
+
+    if (!row) {
       return jsonResponse(
-        {
-          status: "error",
-          ok: false,
-          errorCode: "expired_code",
-          error: "Authorization code has expired."
-        },
-        410
+        { status: "error", ok: false, error: "Authorization code record not found." },
+        500
       );
     }
 
-    if (
-      codeData.stateNonce &&
-      clientStateNonce &&
-      codeData.stateNonce !== clientStateNonce
-    ) {
+    // Strict State Verification
+    if (row.state_nonce !== clientStateNonce) {
       return jsonResponse(
         {
           status: "error",
@@ -1158,11 +1205,8 @@ async function handleCreateSession(request, env) {
       );
     }
 
-    if (
-      codeData.krasUserId &&
-      krasUserId &&
-      codeData.krasUserId !== krasUserId
-    ) {
+    // Cross-user isolation
+    if (krasUserId && row.kras_user_id && row.kras_user_id !== krasUserId) {
       return jsonResponse(
         {
           status: "error",
@@ -1173,42 +1217,25 @@ async function handleCreateSession(request, env) {
       );
     }
 
-    // Mark one-time authorization code as consumed immediately
-    codeData.consumed = true;
-    authCodeIsolateCache.set(authCode, codeData);
-    if (kv) {
-      try {
-        await kv.delete(`auth_code:${authCode}`);
-      } catch (_) {}
-    }
-    if (db) {
-      try {
-        await db
-          .prepare(`UPDATE tmdb_auth_codes SET consumed = 1 WHERE auth_code = ?`)
-          .bind(authCode)
-          .run();
-      } catch (_) {}
-    }
-
     return jsonResponse({
       status: "ok",
       ok: true,
       verified: true,
-      clientToken: codeData.clientToken,
-      client_token: codeData.clientToken,
-      sessionId: codeData.clientToken,
-      session_id: codeData.clientToken,
-      accountId: codeData.accountId,
-      username: codeData.username,
-      name: codeData.displayName,
-      avatarUrl: codeData.avatarUrl,
+      clientToken: row.client_token,
+      client_token: row.client_token,
+      sessionId: row.client_token,
+      session_id: row.client_token,
+      accountId: Number(row.tmdb_account_id || 0),
+      username: row.username,
+      name: row.display_name || row.username,
+      avatarUrl: row.avatar_url || "",
       account: {
-        id: codeData.accountId,
-        accountId: codeData.accountId,
-        username: codeData.username,
-        name: codeData.displayName,
-        avatarUrl: codeData.avatarUrl,
-        avatar_url: codeData.avatarUrl
+        id: Number(row.tmdb_account_id || 0),
+        accountId: Number(row.tmdb_account_id || 0),
+        username: row.username,
+        name: row.display_name || row.username,
+        avatarUrl: row.avatar_url || "",
+        avatar_url: row.avatar_url || ""
       }
     });
   }
@@ -1372,188 +1399,91 @@ async function validateSessionAndOwnership(
     return { ok: false, status: 401, error: "Missing authentication session token." };
   }
 
-  // 1. Check isolate memory cache
-  const cached = sessionIsolateCache.get(clientToken);
-  if (cached && cached.tmdbSessionId) {
-    if (krasUserId && cached.krasUserId && cached.krasUserId !== krasUserId) {
-      return {
-        ok: false,
-        status: 403,
-        error: "Cross-user session access is forbidden."
-      };
-    }
-    if (
-      requestedAccountId > 0 &&
-      cached.accountId > 0 &&
-      cached.accountId !== requestedAccountId
-    ) {
-      return {
-        ok: false,
-        status: 403,
-        error: "Session does not belong to the requested TMDb accountId."
-      };
-    }
-    return {
-      ok: true,
-      tmdbSessionId: cached.tmdbSessionId,
-      accountId: cached.accountId,
-      username: cached.username,
-      displayName: cached.displayName || cached.username,
-      avatarUrl: cached.avatarUrl || ""
-    };
-  }
-
-  // 2. Check Cloudflare KV if bound
-  const kv = getKV(env);
-  if (kv) {
-    try {
-      const kvSession = await kv.get(`session:${clientToken}`, "json");
-      if (kvSession && kvSession.tmdbSessionId) {
-        if (krasUserId && kvSession.krasUserId && kvSession.krasUserId !== krasUserId) {
-          return {
-            ok: false,
-            status: 403,
-            error: "Cross-user session access is forbidden."
-          };
-        }
-        const boundAccountId = Number(kvSession.accountId || 0);
-        if (
-          requestedAccountId > 0 &&
-          boundAccountId > 0 &&
-          boundAccountId !== requestedAccountId
-        ) {
-          return {
-            ok: false,
-            status: 403,
-            error: "Session does not belong to the requested TMDb accountId."
-          };
-        }
-        sessionIsolateCache.set(clientToken, kvSession);
-        return {
-          ok: true,
-          tmdbSessionId: kvSession.tmdbSessionId,
-          accountId: boundAccountId,
-          username: kvSession.username || "",
-          displayName: kvSession.displayName || kvSession.username || "",
-          avatarUrl: kvSession.avatarUrl || ""
-        };
-      }
-    } catch (_) {}
-  }
-
-  // 3. Check Cloudflare D1 `tmdb_user_sessions`
   const db = await ensureD1Schema(env);
-  if (db) {
-    try {
-      const row = await db
-        .prepare(
-          `SELECT tmdb_session_id, installation_id, kras_user_id, tmdb_account_id, username, display_name, avatar_url
-           FROM tmdb_user_sessions
-           WHERE session_id = ?`
-        )
-        .bind(clientToken)
-        .first();
-      if (row) {
-        if (krasUserId && row.kras_user_id && row.kras_user_id !== krasUserId) {
-          return {
-            ok: false,
-            status: 403,
-            error: "Cross-user session access is forbidden."
-          };
-        }
-        const boundAccountId = Number(row.tmdb_account_id || 0);
-        if (
-          requestedAccountId > 0 &&
-          boundAccountId > 0 &&
-          boundAccountId !== requestedAccountId
-        ) {
-          return {
-            ok: false,
-            status: 403,
-            error: "Session does not belong to the requested TMDb accountId."
-          };
-        }
-        const realTmdbSessionId = row.tmdb_session_id || clientToken;
-        if (boundAccountId > 0 && realTmdbSessionId) {
-          sessionIsolateCache.set(clientToken, {
-            clientToken,
-            tmdbSessionId: realTmdbSessionId,
-            accountId: boundAccountId,
-            username: row.username || "",
-            displayName: row.display_name || row.username || "",
-            avatarUrl: row.avatar_url || "",
-            krasUserId: row.kras_user_id || krasUserId
-          });
-          return {
-            ok: true,
-            tmdbSessionId: realTmdbSessionId,
-            accountId: boundAccountId,
-            username: row.username || "",
-            displayName: row.display_name || row.username || "",
-            avatarUrl: row.avatar_url || ""
-          };
-        }
-      }
-    } catch (_) {}
-  }
-
-  // 4. Unseal AES-GCM server-sealed `kras_tok_...` token if neither D1 nor KV is bound
-  const unsealed = await unsealOpaqueClientToken(env, clientToken);
-  if (unsealed && unsealed.tmdbSessionId) {
-    if (krasUserId && unsealed.krasUserId && unsealed.krasUserId !== krasUserId) {
-      return {
-        ok: false,
-        status: 403,
-        error: "Cross-user session access is forbidden."
-      };
-    }
-    const boundAccountId = Number(unsealed.accountId || 0);
-    if (
-      requestedAccountId > 0 &&
-      boundAccountId > 0 &&
-      boundAccountId !== requestedAccountId
-    ) {
-      return {
-        ok: false,
-        status: 403,
-        error: "Session does not belong to the requested TMDb accountId."
-      };
-    }
+  if (!db) {
     return {
-      ok: true,
-      tmdbSessionId: unsealed.tmdbSessionId,
-      accountId: boundAccountId,
-      username: unsealed.username || "",
-      displayName: unsealed.displayName || unsealed.username || "",
-      avatarUrl: unsealed.avatarUrl || ""
+      ok: false,
+      status: 500,
+      error: "Cloudflare D1 database (DB) binding is required for persistent session validation."
     };
   }
 
-  // 5. Legacy fallback: verify directly against TMDb `/account`
-  const accRes = await tmdbFetch("/account", { session_id: clientToken }, env);
-  if (!accRes.ok || !accRes.data || !accRes.data.id) {
+  let row = null;
+  try {
+    row = await db
+      .prepare(
+        `SELECT tmdb_session_id, installation_id, kras_user_id, tmdb_account_id, username, display_name, avatar_url, revoked
+         FROM tmdb_user_sessions
+         WHERE session_id = ?`
+      )
+      .bind(clientToken)
+      .first();
+  } catch (err) {
+    return { ok: false, status: 500, error: "Database error during session lookup: " + err.message };
+  }
+
+  if (!row || Number(row.revoked) === 1) {
+    sessionIsolateCache.delete(clientToken);
     return {
       ok: false,
       status: 401,
-      error: "Invalid or expired TMDb session."
+      errorCode: "session_revoked",
+      error: "Session has been revoked or expired. Please sign in again."
     };
   }
-  const verifiedAccountId = Number(accRes.data.id);
-  if (requestedAccountId > 0 && verifiedAccountId !== requestedAccountId) {
+
+  if (krasUserId && row.kras_user_id && row.kras_user_id !== krasUserId) {
     return {
       ok: false,
       status: 403,
+      errorCode: "user_mismatch",
+      error: "Cross-user session access is forbidden."
+    };
+  }
+
+  const boundAccountId = Number(row.tmdb_account_id || 0);
+  if (
+    requestedAccountId > 0 &&
+    boundAccountId > 0 &&
+    boundAccountId !== requestedAccountId
+  ) {
+    return {
+      ok: false,
+      status: 403,
+      errorCode: "account_mismatch",
       error: "Session does not belong to the requested TMDb accountId."
+    };
+  }
+
+  if (
+    installationId &&
+    row.installation_id &&
+    row.installation_id !== installationId
+  ) {
+    return {
+      ok: false,
+      status: 403,
+      errorCode: "installation_mismatch",
+      error: "Session does not match this installation."
+    };
+  }
+
+  const realTmdbSessionId = row.tmdb_session_id;
+  if (!realTmdbSessionId) {
+    return {
+      ok: false,
+      status: 401,
+      error: "Invalid session record."
     };
   }
 
   return {
     ok: true,
-    tmdbSessionId: clientToken,
-    accountId: verifiedAccountId,
-    username: accRes.data.username || "",
-    displayName: accRes.data.name || accRes.data.username || "",
-    avatarUrl: extractAvatarUrl(accRes.data)
+    tmdbSessionId: realTmdbSessionId,
+    accountId: boundAccountId,
+    username: row.username || "",
+    displayName: row.display_name || row.username || "",
+    avatarUrl: row.avatar_url || ""
   };
 }
 
@@ -1575,7 +1505,12 @@ async function handleGetAccountProfile(request, url, env) {
   );
   if (!ownership.ok) {
     return jsonResponse(
-      { status: "error", ok: false, error: ownership.error },
+      {
+        status: "error",
+        ok: false,
+        errorCode: ownership.errorCode || "unauthorized",
+        error: ownership.error
+      },
       ownership.status || 401
     );
   }
@@ -1785,6 +1720,7 @@ async function handleTwoWaySync(request, env) {
       {
         status: "error",
         ok: false,
+        errorCode: ownership.errorCode || "unauthorized",
         error: ownership.error
       },
       ownership.status || 403
@@ -2122,7 +2058,10 @@ async function handlePushFavorite(request, env) {
     installationId
   );
   if (!ownership.ok) {
-    return jsonResponse({ status: "error", ok: false, error: ownership.error }, ownership.status || 403);
+    return jsonResponse(
+      { status: "error", ok: false, errorCode: ownership.errorCode || "unauthorized", error: ownership.error },
+      ownership.status || 403
+    );
   }
 
   const res = await tmdbFetch(
@@ -2160,7 +2099,10 @@ async function handlePushWatchlist(request, env) {
     installationId
   );
   if (!ownership.ok) {
-    return jsonResponse({ status: "error", ok: false, error: ownership.error }, ownership.status || 403);
+    return jsonResponse(
+      { status: "error", ok: false, errorCode: ownership.errorCode || "unauthorized", error: ownership.error },
+      ownership.status || 403
+    );
   }
 
   const res = await tmdbFetch(
@@ -2198,7 +2140,10 @@ async function handlePushRating(request, env) {
     installationId
   );
   if (!ownership.ok) {
-    return jsonResponse({ status: "error", ok: false, error: ownership.error }, ownership.status || 403);
+    return jsonResponse(
+      { status: "error", ok: false, errorCode: ownership.errorCode || "unauthorized", error: ownership.error },
+      ownership.status || 403
+    );
   }
 
   const ratePath = isTv ? `/tv/${mediaId}/rating` : `/movie/${mediaId}/rating`;
@@ -2451,6 +2396,7 @@ export default {
           oneTimeCodeAuth: true,
           multiUserIsolated: true,
           d1Bound: Boolean(db),
+          sessionEncryptionConfigured: Boolean(env?.SESSION_ENCRYPTION_KEY),
           kvBound: Boolean(kv),
           service: "KRAS TMDb Proxy",
           message: "Connected to TMDb API v3 with Browser Auth & Multi-User Account Sync",
