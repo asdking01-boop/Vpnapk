@@ -134,6 +134,28 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val _isSeriesDetailsLoading = MutableStateFlow(false)
     val isSeriesDetailsLoading = _isSeriesDetailsLoading.asStateFlow()
 
+    // Rich Quick Preview & Full Details State
+    private val _previewMediaItem = MutableStateFlow<MediaItem?>(null)
+    val previewMediaItem = _previewMediaItem.asStateFlow()
+
+    private val _previewEnrichedDetails = MutableStateFlow<EnrichedMediaDetails?>(null)
+    val previewEnrichedDetails = _previewEnrichedDetails.asStateFlow()
+
+    private val _isPreviewLoading = MutableStateFlow(false)
+    val isPreviewLoading = _isPreviewLoading.asStateFlow()
+
+    private val _fullDetailsMediaItem = MutableStateFlow<MediaItem?>(null)
+    val fullDetailsMediaItem = _fullDetailsMediaItem.asStateFlow()
+
+    private val _fullDetailsEnriched = MutableStateFlow<EnrichedMediaDetails?>(null)
+    val fullDetailsEnriched = _fullDetailsEnriched.asStateFlow()
+
+    private val _isFullDetailsLoading = MutableStateFlow(false)
+    val isFullDetailsLoading = _isFullDetailsLoading.asStateFlow()
+
+    private var previewJob: Job? = null
+    private var fullDetailsJob: Job? = null
+
     // Favorites & History & Downloads
     private val _favorites = MutableStateFlow<List<FavoriteItem>>(emptyList())
     val favorites = _favorites.asStateFlow()
@@ -1804,6 +1826,118 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _isSeriesDetailsLoading.value = false
             }
         }
+    }
+
+    // --- Rich Quick Preview (Bottom Sheet Preview) & Full Details ---
+    fun showMediaPreview(item: MediaItem) {
+        _previewMediaItem.value = item
+        val peeked = repository.peekCachedDetails(item)
+        if (peeked != null) {
+            _previewEnrichedDetails.value = peeked
+            _isPreviewLoading.value = false
+            return
+        }
+
+        _previewEnrichedDetails.value = null
+        _isPreviewLoading.value = true
+
+        previewJob?.cancel()
+        previewJob = viewModelScope.launch {
+            delay(120L) // Small debounce for visible items
+            try {
+                val apiKey = tmdbSessionStore.getApiKey()
+                val isArabic = _userSettings.value.language.equals("Arabic", ignoreCase = true)
+                val details = repository.getOrFetchEnrichedMediaDetails(
+                    item = item,
+                    tmdbApiKey = apiKey,
+                    isArabic = isArabic,
+                    accountOverride = _activeAccount.value
+                )
+                if (_previewMediaItem.value?.id == item.id) {
+                    _previewEnrichedDetails.value = details
+                }
+            } catch (e: Exception) {
+                if (e !is CancellationException) {
+                    e.printStackTrace()
+                }
+            } finally {
+                _isPreviewLoading.value = false
+            }
+        }
+    }
+
+    fun dismissMediaPreview() {
+        previewJob?.cancel()
+        _previewMediaItem.value = null
+        _previewEnrichedDetails.value = null
+        _isPreviewLoading.value = false
+    }
+
+    fun showMediaDetails(item: MediaItem) {
+        dismissMediaPreview()
+        _fullDetailsMediaItem.value = item
+
+        // If series, load series details for episode list
+        if (item.type == MediaType.SERIES) {
+            loadSeriesDetails(item)
+        }
+
+        val peeked = repository.peekCachedDetails(item)
+        if (peeked != null) {
+            _fullDetailsEnriched.value = peeked
+            _isFullDetailsLoading.value = false
+        } else {
+            _fullDetailsEnriched.value = null
+            _isFullDetailsLoading.value = true
+        }
+
+        fullDetailsJob?.cancel()
+        fullDetailsJob = viewModelScope.launch {
+            try {
+                val apiKey = tmdbSessionStore.getApiKey()
+                val isArabic = _userSettings.value.language.equals("Arabic", ignoreCase = true)
+                val details = repository.getOrFetchEnrichedMediaDetails(
+                    item = item,
+                    tmdbApiKey = apiKey,
+                    isArabic = isArabic,
+                    accountOverride = _activeAccount.value
+                )
+                if (_fullDetailsMediaItem.value?.id == item.id) {
+                    _fullDetailsEnriched.value = details
+                    if (item.type == MediaType.SERIES && details.seasons.isNotEmpty()) {
+                        _currentSeriesDetails.value = SeriesDetails(
+                            seriesId = item.streamId,
+                            name = details.title,
+                            cover = details.posterUrl,
+                            backdrop = details.backdropUrl,
+                            plot = details.plot,
+                            cast = details.cast.joinToString(", ") { it.name },
+                            director = details.director,
+                            genre = details.genres.joinToString(", "),
+                            releaseDate = details.releaseDate,
+                            rating = details.rating,
+                            seasons = details.seasons,
+                            quality = details.quality,
+                            youtubeTrailer = details.youtubeTrailer,
+                            tmdbId = details.tmdbId
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                if (e !is CancellationException) {
+                    e.printStackTrace()
+                }
+            } finally {
+                _isFullDetailsLoading.value = false
+            }
+        }
+    }
+
+    fun dismissMediaDetails() {
+        fullDetailsJob?.cancel()
+        _fullDetailsMediaItem.value = null
+        _fullDetailsEnriched.value = null
+        _isFullDetailsLoading.value = false
     }
 
     // --- Feature 3: Persistent Live TV Channel Selection & Playback ---

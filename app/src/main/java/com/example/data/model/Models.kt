@@ -129,7 +129,9 @@ data class SeriesDetails(
     val releaseDate: String = "",
     val rating: Double = 0.0,
     val seasons: List<Season> = emptyList(),
-    val quality: String = ""
+    val quality: String = "",
+    val youtubeTrailer: String = "",
+    val tmdbId: Int = 0
 )
 
 data class WatchProgress(

@@ -56,7 +56,9 @@ fun HomeScreen(
     isLoading: Boolean,
     cardStyle: CardStyle,
     modifier: Modifier = Modifier,
-    favorites: List<FavoriteItem> = emptyList()
+    favorites: List<FavoriteItem> = emptyList(),
+    onItemInfoClick: ((MediaItem) -> Unit)? = null,
+    onItemLongClick: ((MediaItem) -> Unit)? = null
 ) {
     var selectedQuickFilter by remember { mutableStateOf("All") }
     var showHeroInfoDialog by remember { mutableStateOf<MediaItem?>(null) }
@@ -158,7 +160,13 @@ fun HomeScreen(
                             currentIndex = currentHeroIndex,
                             onCurrentIndexChange = { currentHeroIndex = it },
                             onPlayClick = { item -> onMediaClick(item) },
-                            onInfoClick = { item -> showHeroInfoDialog = item },
+                            onInfoClick = { item ->
+                                if (onItemInfoClick != null) {
+                                    onItemInfoClick(item)
+                                } else {
+                                    showHeroInfoDialog = item
+                                }
+                            },
                             isFavorite = { id -> isFavorite(id) },
                             onToggleFavorite = { item -> onToggleFavorite(item) },
                             onSearchClick = onSearchClick,
@@ -234,7 +242,9 @@ fun HomeScreen(
                             cardStyle = CardStyle.WIDE,
                             isFavorite = isFavorite,
                             onToggleFavorite = onToggleFavorite,
-                            watchHistory = watchHistory
+                            watchHistory = watchHistory,
+                            onInfoClick = onItemInfoClick,
+                            onLongClick = onItemLongClick
                         )
                     }
                 }
@@ -249,7 +259,9 @@ fun HomeScreen(
                             cardStyle = cardStyle,
                             isFavorite = isFavorite,
                             onToggleFavorite = onToggleFavorite,
-                            watchHistory = watchHistory
+                            watchHistory = watchHistory,
+                            onInfoClick = onItemInfoClick,
+                            onLongClick = onItemLongClick
                         )
                     }
                 }
@@ -278,7 +290,9 @@ fun HomeScreen(
                             cardStyle = CardStyle.BILLBOARD,
                             isFavorite = isFavorite,
                             onToggleFavorite = onToggleFavorite,
-                            watchHistory = watchHistory
+                            watchHistory = watchHistory,
+                            onInfoClick = onItemInfoClick,
+                            onLongClick = onItemLongClick
                         )
                     }
                 }
@@ -293,7 +307,9 @@ fun HomeScreen(
                             cardStyle = cardStyle,
                             isFavorite = isFavorite,
                             onToggleFavorite = onToggleFavorite,
-                            watchHistory = watchHistory
+                            watchHistory = watchHistory,
+                            onInfoClick = onItemInfoClick,
+                            onLongClick = onItemLongClick
                         )
                     }
                 }
@@ -308,7 +324,9 @@ fun HomeScreen(
                             cardStyle = cardStyle,
                             isFavorite = isFavorite,
                             onToggleFavorite = onToggleFavorite,
-                            watchHistory = watchHistory
+                            watchHistory = watchHistory,
+                            onInfoClick = onItemInfoClick,
+                            onLongClick = onItemLongClick
                         )
                     }
                 }
@@ -322,7 +340,9 @@ fun HomeScreen(
                             onItemClick = onMediaClick,
                             cardStyle = cardStyle,
                             isFavorite = isFavorite,
-                            onToggleFavorite = onToggleFavorite
+                            onToggleFavorite = onToggleFavorite,
+                            onInfoClick = onItemInfoClick,
+                            onLongClick = onItemLongClick
                         )
                     }
                 }

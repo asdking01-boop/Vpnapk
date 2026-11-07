@@ -11,8 +11,8 @@ import com.example.data.local.entity.CategoryEntity
 import com.example.data.local.entity.MediaItemEntity
 
 @Database(
-    entities = [MediaItemEntity::class, CategoryEntity::class],
-    version = 4,
+    entities = [MediaItemEntity::class, CategoryEntity::class, com.example.data.local.entity.EnrichedMediaEntity::class],
+    version = 5,
     exportSchema = false
 )
 abstract class KrasDatabase : RoomDatabase() {
@@ -59,6 +59,22 @@ abstract class KrasDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS enriched_media_cache (
+                        mediaKey TEXT NOT NULL PRIMARY KEY,
+                        streamId INTEGER NOT NULL,
+                        mediaType TEXT NOT NULL,
+                        tmdbId INTEGER NOT NULL,
+                        jsonData TEXT NOT NULL,
+                        updatedAtMs INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_enriched_media_updated ON enriched_media_cache(updatedAtMs)")
+            }
+        }
+
         fun getInstance(context: Context): KrasDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -66,7 +82,7 @@ abstract class KrasDatabase : RoomDatabase() {
                     KrasDatabase::class.java,
                     "kras_tv_media.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance

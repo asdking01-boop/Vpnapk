@@ -38,7 +38,9 @@ fun MediaRow(
     onToggleFavorite: ((MediaItem) -> Unit)? = null,
     isFavorite: ((String) -> Boolean)? = null,
     watchHistory: List<WatchProgress>? = null,
-    onSeeAllClick: (() -> Unit)? = null
+    onSeeAllClick: (() -> Unit)? = null,
+    onInfoClick: ((MediaItem) -> Unit)? = null,
+    onLongClick: ((MediaItem) -> Unit)? = null
 ) {
     if (items.isEmpty()) return
 
@@ -142,7 +144,9 @@ fun MediaRow(
                     onToggleFavorite = if (onToggleFavorite != null) {
                         { onToggleFavorite(item) }
                     } else null,
-                    watchProgress = progress
+                    watchProgress = progress,
+                    onInfoClick = if (onInfoClick != null) { { onInfoClick(item) } } else null,
+                    onLongClick = if (onLongClick != null) { { onLongClick(item) } } else null
                 )
             }
         }

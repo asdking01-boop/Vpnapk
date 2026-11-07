@@ -484,4 +484,17 @@ interface MediaDao {
 
     @Query("DELETE FROM categories WHERE accountId = :accountId")
     suspend fun deleteCategoriesByAccount(accountId: String)
+
+    // Enriched Details Cache (7-day cache)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEnrichedMedia(entity: com.example.data.local.entity.EnrichedMediaEntity)
+
+    @Query("SELECT * FROM enriched_media_cache WHERE mediaKey = :mediaKey LIMIT 1")
+    suspend fun getEnrichedMedia(mediaKey: String): com.example.data.local.entity.EnrichedMediaEntity?
+
+    @Query("UPDATE media_items SET tmdbId = :tmdbId WHERE id = :id")
+    suspend fun updateTmdbId(id: String, tmdbId: Int)
+
+    @Query("DELETE FROM enriched_media_cache WHERE updatedAtMs < :cutoffMs")
+    suspend fun deleteExpiredEnrichedMedia(cutoffMs: Long)
 }

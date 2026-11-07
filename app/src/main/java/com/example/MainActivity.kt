@@ -57,6 +57,7 @@ import com.example.data.model.TmdbAuthStatus
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.AppUpdateDialogs
 import com.example.ui.components.BottomNavBar
+import com.example.ui.components.MediaPreviewSheet
 import com.example.ui.components.NavScreen
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.screens.*
@@ -167,6 +168,12 @@ class MainActivity : ComponentActivity() {
                 val updateState by viewModel.updateState.collectAsState()
                 val tmdbAccountState by viewModel.tmdbAccountState.collectAsState()
                 val navigateToSettingsFromAuth by viewModel.navigateToSettingsFromAuth.collectAsState()
+                val previewMediaItem by viewModel.previewMediaItem.collectAsState()
+                val previewEnrichedDetails by viewModel.previewEnrichedDetails.collectAsState()
+                val isPreviewLoading by viewModel.isPreviewLoading.collectAsState()
+                val fullDetailsMediaItem by viewModel.fullDetailsMediaItem.collectAsState()
+                val fullDetailsEnriched by viewModel.fullDetailsEnriched.collectAsState()
+                val isFullDetailsLoading by viewModel.isFullDetailsLoading.collectAsState()
 
                 LaunchedEffect(navigateToSettingsFromAuth) {
                     if (navigateToSettingsFromAuth) {

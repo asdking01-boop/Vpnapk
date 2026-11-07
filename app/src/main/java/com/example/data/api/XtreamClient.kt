@@ -935,6 +935,86 @@ class XtreamClient {
         }
     }
 
+    /**
+     * Fetches complete Xtream VOD details (plot, cast, director, genre, release date, rating, duration,
+     * backdrop, youtube_trailer, and tmdb_id) via action=get_vod_info&vod_id=ID.
+     */
+    suspend fun fetchVodDetails(
+        account: Account,
+        vodId: Int,
+        fallbackQuality: String = ""
+    ): XtreamVodDetails? = withContext(Dispatchers.IO) {
+        try {
+            val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_vod_info&vod_id=$vodId"
+            val request = Request.Builder().url(url).build()
+            val body = httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+            }
+            if (!body.startsWith("{")) return@withContext null
+
+            val json = try { JSONObject(body) } catch (e: Exception) { return@withContext null }
+            val info = json.optJSONObject("info") ?: JSONObject()
+            val movieData = json.optJSONObject("movie_data") ?: JSONObject()
+
+            val name = movieData.optString("name", info.optString("name", "Movie $vodId")).trim()
+            val streamIcon = info.optString("movie_image", movieData.optString("stream_icon", "")).trim()
+
+            val backdropArr = info.optJSONArray("backdrop_path")
+            val backdrop = if (backdropArr != null && backdropArr.length() > 0) {
+                backdropArr.optString(0, "").trim()
+            } else {
+                info.optString("backdrop_path", "").trim()
+            }
+
+            val plot = info.optString("plot", movieData.optString("plot", "")).trim()
+            val cast = info.optString("cast", movieData.optString("cast", "")).trim()
+            val director = info.optString("director", movieData.optString("director", "")).trim()
+            val genre = info.optString("genre", movieData.optString("genre", "")).trim()
+
+            val releaseDate = info.optString("releasedate", info.optString("release_date", movieData.optString("release_date", ""))).trim()
+
+            val ratingRaw = info.optDouble("rating", movieData.optDouble("rating", 7.0))
+            val rating = if (ratingRaw.isNaN() || ratingRaw <= 0.0) 7.0 else ratingRaw
+
+            val durationSecs = info.optInt("duration_secs", movieData.optInt("duration_secs", 0))
+            val duration = info.optString("duration", "").ifBlank {
+                if (durationSecs > 0) "${durationSecs / 60}m" else ""
+            }.trim()
+
+            val youtubeTrailer = info.optString("youtube_trailer", movieData.optString("youtube_trailer", "")).trim()
+
+            val tmdbId = info.optInt("tmdb_id", 0).let {
+                if (it > 0) it else info.optString("tmdb_id", "").trim().toIntOrNull() ?: info.optInt("tmdb", 0)
+            }
+
+            val ext = movieData.optString("container_extension", "mp4").ifBlank { "mp4" }
+            val detectedQuality = parseVideoAudioSpecsFromInfo(info, fallbackQuality.ifBlank {
+                QualityDetector.detectFromNameAndCategory(name, genre)
+            })
+
+            XtreamVodDetails(
+                vodId = vodId,
+                name = name,
+                streamIcon = streamIcon,
+                backdrop = backdrop,
+                plot = plot,
+                cast = cast,
+                director = director,
+                genre = genre,
+                releaseDate = releaseDate,
+                rating = rating,
+                duration = duration,
+                youtubeTrailer = youtubeTrailer,
+                tmdbId = tmdbId,
+                quality = detectedQuality,
+                containerExtension = ext
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
     // --- On-Demand Series Details (Fetched per series, not for the whole catalog) ---
     suspend fun getSeriesDetails(account: Account, seriesId: Int): SeriesDetails? = withContext(Dispatchers.IO) {
         try {
@@ -957,6 +1037,18 @@ class XtreamClient {
             val genre = info.optString("genre", "")
             val releaseDate = info.optString("releaseDate", "")
             val rating = info.optDouble("rating", 8.2)
+
+            val backdropArr = info.optJSONArray("backdrop_path")
+            val backdrop = if (backdropArr != null && backdropArr.length() > 0) {
+                backdropArr.optString(0, "").trim()
+            } else {
+                info.optString("backdrop_path", "").trim()
+            }
+
+            val youtubeTrailer = info.optString("youtube_trailer", "").trim()
+            val tmdbId = info.optInt("tmdb_id", 0).let {
+                if (it > 0) it else info.optString("tmdb_id", "").trim().toIntOrNull() ?: info.optInt("tmdb", 0)
+            }
 
             val seriesBaseQuality = parseVideoAudioSpecsFromInfo(
                 info,
@@ -984,6 +1076,7 @@ class XtreamClient {
                         val epInfo = epObj.optJSONObject("info")
                         val epPlot = epInfo?.optString("plot", "") ?: ""
                         val duration = epInfo?.optInt("duration_secs", 2700) ?: 2700
+                        val epCover = epInfo?.optString("movie_image", "")?.ifBlank { epObj.optString("cover", "") }.orEmpty().trim()
 
                         val epFallback = QualityDetector.detectFromNameAndCategory(epTitle, name, seriesBaseQuality)
                         val epQuality = parseVideoAudioSpecsFromInfo(epInfo, epFallback)
@@ -1004,6 +1097,7 @@ class XtreamClient {
                                 plot = epPlot,
                                 durationSec = duration,
                                 rating = 8.0,
+                                coverUrl = epCover,
                                 streamUrl = streamUrl,
                                 seriesId = seriesId,
                                 seasonNumber = seasonNum,
@@ -1029,6 +1123,7 @@ class XtreamClient {
                 seriesId = seriesId,
                 name = name,
                 cover = cover,
+                backdrop = backdrop,
                 plot = plot,
                 cast = cast,
                 director = director,
@@ -1036,7 +1131,9 @@ class XtreamClient {
                 releaseDate = releaseDate,
                 rating = rating,
                 seasons = seasonsList.sortedBy { it.seasonNumber },
-                quality = bestEpisodeQuality
+                quality = bestEpisodeQuality,
+                youtubeTrailer = youtubeTrailer,
+                tmdbId = tmdbId
             )
         } catch (e: Exception) {
             e.printStackTrace()
@@ -1044,3 +1141,21 @@ class XtreamClient {
         }
     }
 }
+
+data class XtreamVodDetails(
+    val vodId: Int,
+    val name: String,
+    val streamIcon: String,
+    val backdrop: String,
+    val plot: String,
+    val cast: String,
+    val director: String,
+    val genre: String,
+    val releaseDate: String,
+    val rating: Double,
+    val duration: String,
+    val youtubeTrailer: String,
+    val tmdbId: Int,
+    val quality: String,
+    val containerExtension: String
+)

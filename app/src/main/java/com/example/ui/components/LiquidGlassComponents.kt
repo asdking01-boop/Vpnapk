@@ -128,9 +128,11 @@ fun Modifier.liquidGlassPanel(
  * Hardware-accelerated press-scale interaction modifier using [graphicsLayer]
  * so card/button presses animate smoothly at 120Hz without triggering layout passes.
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 fun Modifier.liquidPressClickable(
     pressedScale: Float = 0.96f,
     enabled: Boolean = true,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit
 ): Modifier = composed {
     val interactionSource = remember { MutableInteractionSource() }
@@ -148,11 +150,23 @@ fun Modifier.liquidPressClickable(
             scaleX = scale
             scaleY = scale
         }
-        .clickable(
-            interactionSource = interactionSource,
-            indication = null,
-            enabled = enabled,
-            onClick = onClick
+        .then(
+            if (onLongClick != null) {
+                Modifier.combinedClickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    enabled = enabled,
+                    onLongClick = onLongClick,
+                    onClick = onClick
+                )
+            } else {
+                Modifier.clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    enabled = enabled,
+                    onClick = onClick
+                )
+            }
         )
 }
 

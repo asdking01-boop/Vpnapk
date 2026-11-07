@@ -194,7 +194,9 @@ fun MoviesScreen(
     latestMoviesByCategoryMap: Map<String, List<MediaItem>> = emptyMap(),
     availableYears: List<String> = emptyList(),
     onLoadMore: (() -> Unit)? = null,
-    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String, qualityFilter: String, sortByQuality: Boolean, sortOrder: MediaSortOrder) -> Unit)? = null
+    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String, qualityFilter: String, sortByQuality: Boolean, sortOrder: MediaSortOrder) -> Unit)? = null,
+    onInfoClick: ((MediaItem) -> Unit)? = null,
+    onLongClick: ((MediaItem) -> Unit)? = null
 ) {
     var selectedCategoryId by rememberSaveable { mutableStateOf("all") }
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -788,7 +790,9 @@ fun MoviesScreen(
                                 cardStyle = cardStyle,
                                 isFavorite = isFavorite(movie.id),
                                 onToggleFavorite = { onToggleFavorite(movie) },
-                                watchProgress = watchHistory.find { it.mediaId == movie.id }
+                                watchProgress = watchHistory.find { it.mediaId == movie.id },
+                                onInfoClick = if (onInfoClick != null) { { onInfoClick(movie) } } else null,
+                                onLongClick = if (onLongClick != null) { { onLongClick(movie) } } else null
                             )
                         }
                     }

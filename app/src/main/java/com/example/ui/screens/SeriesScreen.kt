@@ -57,7 +57,9 @@ fun SeriesScreen(
     availableYears: List<String> = emptyList(),
     watchHistory: List<WatchProgress> = emptyList(),
     onLoadMore: (() -> Unit)? = null,
-    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String, qualityFilter: String, sortByQuality: Boolean, sortOrder: MediaSortOrder) -> Unit)? = null
+    onFilterChanged: ((categoryId: String, query: String, minRating: Double, year: String, qualityFilter: String, sortByQuality: Boolean, sortOrder: MediaSortOrder) -> Unit)? = null,
+    onInfoClick: ((MediaItem) -> Unit)? = null,
+    onLongClick: ((MediaItem) -> Unit)? = null
 ) {
     var selectedCategoryId by rememberSaveable { mutableStateOf("all") }
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -564,7 +566,9 @@ fun SeriesScreen(
                         onClick = { onSeriesClick(s) },
                         cardStyle = cardStyle,
                         isFavorite = isFavorite(s.id),
-                        onToggleFavorite = { onToggleFavorite(s) }
+                        onToggleFavorite = { onToggleFavorite(s) },
+                        onInfoClick = if (onInfoClick != null) { { onInfoClick(s) } } else null,
+                        onLongClick = if (onLongClick != null) { { onLongClick(s) } } else null
                     )
                 }
             }
