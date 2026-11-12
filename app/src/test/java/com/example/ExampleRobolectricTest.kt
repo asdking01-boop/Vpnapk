@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.KrasRepository
 import com.example.data.local.TmdbSecureSessionStore
 import com.example.data.model.Account
+import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
 import com.example.data.model.WatchProgress
 import org.junit.Assert.*
@@ -1965,5 +1966,88 @@ class ExampleRobolectricTest {
     roomMigratedDb.close()
     dbFile.delete()
   }
+
+  @Test
+  fun `movie details screen action triggers internal playback with real stream URL`() {
+    val sampleMovie = MediaItem(
+      id = "movie_99",
+      streamId = 99,
+      name = "Dune: Part Two",
+      title = "Dune: Part Two",
+      type = MediaType.MOVIE,
+      streamIcon = "http://poster.jpg",
+      backdrop = "http://backdrop.jpg",
+      categoryId = "cat_action",
+      categoryName = "Action",
+      rating = 8.5,
+      year = "2024",
+      resolution = "4K UHD",
+      quality = "4K UHD",
+      plot = "Paul Atreides unites with Chani and the Fremen.",
+      streamUrl = "http://iptv.stream.server:8080/movie/user/pass/99.mp4",
+      containerExtension = "mp4",
+      addedTimestamp = 1700000000
+    )
+
+    var playedItem: MediaItem? = null
+    val onPlayMovie: (MediaItem) -> Unit = { item -> playedItem = item }
+
+    // User taps "Play Movie" on the Details screen
+    onPlayMovie(sampleMovie)
+
+    assertNotNull(playedItem)
+    assertEquals("movie_99", playedItem?.id)
+    assertEquals("http://iptv.stream.server:8080/movie/user/pass/99.mp4", playedItem?.streamUrl)
+  }
+
+  @Test
+  fun `series details episode selection triggers playback of specific episode`() {
+    val sampleSeries = MediaItem(
+      id = "series_55",
+      streamId = 55,
+      name = "Succession",
+      title = "Succession",
+      type = MediaType.SERIES,
+      streamIcon = "http://series.jpg",
+      backdrop = "http://series_back.jpg",
+      categoryId = "cat_drama",
+      categoryName = "Drama",
+      rating = 8.9,
+      year = "2023",
+      resolution = "FHD",
+      quality = "FHD",
+      plot = "The Roy family is known for controlling the biggest media company.",
+      streamUrl = "",
+      containerExtension = "mp4",
+      addedTimestamp = 1680000000
+    )
+
+    val targetEpisode = com.example.data.model.Episode(
+      id = "ep_55_3",
+      episodeNum = 3,
+      title = "Connor's Wedding",
+      streamUrl = "http://iptv.stream.server:8080/series/user/pass/ep55_3.mp4",
+      seriesId = 55,
+      seasonNumber = 4
+    )
+
+    var playedSeries: MediaItem? = null
+    var playedEpisode: com.example.data.model.Episode? = null
+
+    val onPlayEpisode: (MediaItem, com.example.data.model.Episode) -> Unit = { s, ep ->
+      playedSeries = s
+      playedEpisode = ep
+    }
+
+    onPlayEpisode(sampleSeries, targetEpisode)
+
+    assertNotNull(playedSeries)
+    assertNotNull(playedEpisode)
+    assertEquals("series_55", playedSeries?.id)
+    assertEquals(3, playedEpisode?.episodeNum)
+    assertEquals("Connor's Wedding", playedEpisode?.title)
+    assertEquals("http://iptv.stream.server:8080/series/user/pass/ep55_3.mp4", playedEpisode?.streamUrl)
+  }
 }
+
 

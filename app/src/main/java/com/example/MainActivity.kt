@@ -114,6 +114,7 @@ class MainActivity : ComponentActivity() {
                 var isSearchOpen by remember { mutableStateOf(false) }
                 var isLoginOpen by remember { mutableStateOf(false) }
                 var selectedSeriesForDetails by remember { mutableStateOf<MediaItem?>(null) }
+                var selectedMovieForDetails by remember { mutableStateOf<MediaItem?>(null) }
 
                 val activeAccount by viewModel.activeAccount.collectAsState()
                 val accounts by viewModel.accounts.collectAsState()
@@ -173,6 +174,7 @@ class MainActivity : ComponentActivity() {
                         isSearchOpen = false
                         isLoginOpen = false
                         selectedSeriesForDetails = null
+                        selectedMovieForDetails = null
                         currentScreen = NavScreen.SETTINGS
                         viewModel.consumeNavigateToSettingsFromAuth()
                     }
@@ -229,6 +231,7 @@ class MainActivity : ComponentActivity() {
                     when {
                         nowPlayingItem != null -> viewModel.stopPlayback()
                         currentScreen == NavScreen.LIVE_TV && isLiveFullscreen -> viewModel.setLiveFullscreen(false)
+                        selectedMovieForDetails != null -> selectedMovieForDetails = null
                         selectedSeriesForDetails != null -> selectedSeriesForDetails = null
                         isSearchOpen -> isSearchOpen = false
                         isLoginOpen -> isLoginOpen = false
@@ -384,7 +387,7 @@ class MainActivity : ComponentActivity() {
                                     viewModel.selectLiveChannel(item)
                                 }
                                 MediaType.MOVIE -> {
-                                    viewModel.startPlayback(item)
+                                    selectedMovieForDetails = item
                                 }
                             }
                         },
@@ -463,7 +466,7 @@ class MainActivity : ComponentActivity() {
                                                     viewModel.selectLiveChannel(item)
                                                 }
                                                 MediaType.MOVIE -> {
-                                                    viewModel.startPlayback(item)
+                                                    selectedMovieForDetails = item
                                                 }
                                             }
                                         },
@@ -482,7 +485,7 @@ class MainActivity : ComponentActivity() {
                                         watchHistory = watchHistory,
                                         isFavorite = { id -> viewModel.isFavorite(id) },
                                         onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
-                                        onMovieClick = { movie -> viewModel.startPlayback(movie) },
+                                        onMovieClick = { movie -> selectedMovieForDetails = movie },
                                         cardStyle = userSettings.cardStyle,
                                         totalCount = totalMoviesCount,
                                         latestMoviesForCategory = latestMoviesForCategory,
@@ -688,30 +691,72 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        // Series Details Bottom Sheet
-                        if (selectedSeriesForDetails != null && nowPlayingItem == null) {
-                            SeriesDetailsSheet(
-                                seriesItem = selectedSeriesForDetails!!,
-                                seriesDetails = currentSeriesDetails,
-                                isLoading = isSeriesDetailsLoading,
-                                onDismiss = { selectedSeriesForDetails = null },
-                                onPlayEpisode = { seriesItem, episode ->
-                                    selectedSeriesForDetails = null
-                                    viewModel.startPlayback(seriesItem, episode)
-                                },
-                                onDownloadEpisode = { seriesItem, episode ->
-                                    viewModel.downloadItem(
-                                        seriesItem.copy(
-                                            id = episode.id,
-                                            name = "${seriesItem.name} - ${episode.title}",
-                                            streamUrl = episode.streamUrl
+                        // Netflix-Style Movie Details Screen Overlay with Smooth Transitions
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = selectedMovieForDetails != null && nowPlayingItem == null,
+                            enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)),
+                            exit = fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            val activeMovie = selectedMovieForDetails
+                            if (activeMovie != null) {
+                                MovieDetailsScreen(
+                                    movie = activeMovie,
+                                    allMovies = movies,
+                                    isFavorite = viewModel.isFavorite(activeMovie.id),
+                                    onToggleFavorite = { viewModel.toggleFavorite(activeMovie) },
+                                    onPlayMovie = { movieToPlay ->
+                                        selectedMovieForDetails = null
+                                        viewModel.startPlayback(movieToPlay)
+                                    },
+                                    onMovieClick = { nextMovie ->
+                                        selectedMovieForDetails = nextMovie
+                                    },
+                                    onBack = { selectedMovieForDetails = null },
+                                    watchHistory = watchHistory,
+                                    isArabic = userSettings.language.equals("Arabic", ignoreCase = true)
+                                )
+                            }
+                        }
+
+                        // Netflix-Style Series Details Screen Overlay with Smooth Transitions
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = selectedSeriesForDetails != null && nowPlayingItem == null,
+                            enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)),
+                            exit = fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            val activeSeries = selectedSeriesForDetails
+                            if (activeSeries != null) {
+                                SeriesDetailsScreen(
+                                    seriesItem = activeSeries,
+                                    seriesDetails = currentSeriesDetails,
+                                    allSeries = series,
+                                    isLoading = isSeriesDetailsLoading,
+                                    onDismiss = { selectedSeriesForDetails = null },
+                                    onPlayEpisode = { seriesItem, episode ->
+                                        selectedSeriesForDetails = null
+                                        viewModel.startPlayback(seriesItem, episode)
+                                    },
+                                    onDownloadEpisode = { seriesItem, episode ->
+                                        viewModel.downloadItem(
+                                            seriesItem.copy(
+                                                id = episode.id,
+                                                name = "${seriesItem.name} - ${episode.title}",
+                                                streamUrl = episode.streamUrl
+                                            )
                                         )
-                                    )
-                                },
-                                isFavorite = viewModel.isFavorite(selectedSeriesForDetails!!.id),
-                                onToggleFavorite = { viewModel.toggleFavorite(selectedSeriesForDetails!!) },
-                                watchHistory = watchHistory
-                            )
+                                    },
+                                    isFavorite = viewModel.isFavorite(activeSeries.id),
+                                    onToggleFavorite = { viewModel.toggleFavorite(activeSeries) },
+                                    watchHistory = watchHistory,
+                                    onSeriesClick = { nextSeries ->
+                                        viewModel.loadSeriesDetails(nextSeries)
+                                        selectedSeriesForDetails = nextSeries
+                                    },
+                                    isArabic = userSettings.language.equals("Arabic", ignoreCase = true)
+                                )
+                            }
                         }
                     }
                     }
