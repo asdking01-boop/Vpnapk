@@ -1,4 +1,3 @@
-
 package com.example.ui.components
 
 import androidx.compose.animation.core.Spring
@@ -6,7 +5,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
@@ -130,11 +128,9 @@ fun Modifier.liquidGlassPanel(
  * Hardware-accelerated press-scale interaction modifier using [graphicsLayer]
  * so card/button presses animate smoothly at 120Hz without triggering layout passes.
  */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 fun Modifier.liquidPressClickable(
     pressedScale: Float = 0.96f,
     enabled: Boolean = true,
-    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit
 ): Modifier = composed {
     val interactionSource = remember { MutableInteractionSource() }
@@ -152,23 +148,11 @@ fun Modifier.liquidPressClickable(
             scaleX = scale
             scaleY = scale
         }
-        .then(
-            if (onLongClick != null) {
-                Modifier.combinedClickable(
-                    interactionSource = interactionSource,
-                    indication = null,
-                    enabled = enabled,
-                    onLongClick = onLongClick,
-                    onClick = onClick
-                )
-            } else {
-                Modifier.clickable(
-                    interactionSource = interactionSource,
-                    indication = null,
-                    enabled = enabled,
-                    onClick = onClick
-                )
-            }
+        .clickable(
+            interactionSource = interactionSource,
+            indication = null,
+            enabled = enabled,
+            onClick = onClick
         )
 }
 

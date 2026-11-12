@@ -1729,4 +1729,241 @@ class ExampleRobolectricTest {
     // Cleanup
     storeAfterRestart.clearSession(user2)
   }
+
+  @Test
+  fun `room database migration from v1 to v4 preserves user data and validates schema`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val dbFile = context.getDatabasePath("migration_test_v1_to_v4.db")
+    if (dbFile.exists()) dbFile.delete()
+
+    // 1. Create a legacy v1 database
+    val openHelper = androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory().create(
+      androidx.sqlite.db.SupportSQLiteOpenHelper.Configuration.builder(context)
+        .name(dbFile.name)
+        .callback(object : androidx.sqlite.db.SupportSQLiteOpenHelper.Callback(1) {
+          override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            // Original v1 schema without groupKey, seq, groupOrder, serverOrder, plot, genre, cast, director, tmdbId
+            db.execSQL("""
+              CREATE TABLE IF NOT EXISTS `media_items` (
+                `id` TEXT NOT NULL,
+                `accountId` TEXT NOT NULL,
+                `streamId` INTEGER NOT NULL,
+                `name` TEXT NOT NULL,
+                `title` TEXT NOT NULL,
+                `type` TEXT NOT NULL,
+                `posterUrl` TEXT NOT NULL,
+                `backdropUrl` TEXT NOT NULL,
+                `categoryId` TEXT NOT NULL,
+                `categoryName` TEXT NOT NULL,
+                `rating` REAL NOT NULL,
+                `year` TEXT NOT NULL,
+                `resolution` TEXT NOT NULL,
+                `quality` TEXT NOT NULL,
+                `streamUrl` TEXT NOT NULL,
+                `containerExtension` TEXT NOT NULL,
+                `addedTimestamp` INTEGER NOT NULL,
+                PRIMARY KEY(`id`)
+              )
+            """.trimIndent())
+            db.execSQL("""
+              CREATE TABLE IF NOT EXISTS `categories` (
+                `id` TEXT NOT NULL,
+                `accountId` TEXT NOT NULL,
+                `categoryId` TEXT NOT NULL,
+                `categoryName` TEXT NOT NULL,
+                `parentId` INTEGER NOT NULL,
+                `type` TEXT NOT NULL,
+                PRIMARY KEY(`id`)
+              )
+            """.trimIndent())
+
+            // Insert sample pre-existing data in v1
+            db.execSQL("""
+              INSERT INTO media_items (id, accountId, streamId, name, title, type, posterUrl, backdropUrl, categoryId, categoryName, rating, year, resolution, quality, streamUrl, containerExtension, addedTimestamp)
+              VALUES ('movie_101', 'acc_primary', 101, 'Interstellar', 'Interstellar', 'MOVIE', 'http://poster.jpg', 'http://backdrop.jpg', 'cat_sci_fi', 'Sci-Fi', 8.6, '2014', '1080p', '1080p', 'http://stream.mp4', 'mp4', 1600000000)
+            """.trimIndent())
+            db.execSQL("""
+              INSERT INTO categories (id, accountId, categoryId, categoryName, parentId, type)
+              VALUES ('acc_primary_MOVIE_cat_sci_fi', 'acc_primary', 'cat_sci_fi', 'Sci-Fi', 0, 'MOVIE')
+            """.trimIndent())
+          }
+
+          override fun onUpgrade(db: androidx.sqlite.db.SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+        })
+        .build()
+    )
+
+    // Open v1 and verify data is written
+    val v1Db = openHelper.writableDatabase
+    val cursorV1 = v1Db.query("SELECT COUNT(*) FROM media_items")
+    assertTrue(cursorV1.moveToFirst())
+    assertEquals(1, cursorV1.getInt(0))
+    cursorV1.close()
+    v1Db.close()
+
+    // 2. Open via Room at version 4 applying migrations (MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+    val roomMigratedDb = androidx.room.Room.databaseBuilder(
+      context,
+      com.example.data.local.db.KrasDatabase::class.java,
+      dbFile.name
+    )
+      .addMigrations(
+        com.example.data.local.db.KrasDatabase.MIGRATION_1_2,
+        com.example.data.local.db.KrasDatabase.MIGRATION_2_3,
+        com.example.data.local.db.KrasDatabase.MIGRATION_3_4,
+        com.example.data.local.db.KrasDatabase.MIGRATION_1_4,
+        com.example.data.local.db.KrasDatabase.MIGRATION_2_4
+      )
+      .build()
+
+    // Trigger migration by accessing DAO
+    val mediaDao = roomMigratedDb.mediaDao()
+    kotlinx.coroutines.runBlocking {
+      val mediaItem = mediaDao.getItemById("movie_101")
+      assertNotNull(mediaItem)
+      assertEquals("movie_101", mediaItem?.id)
+      assertEquals("acc_primary", mediaItem?.accountId)
+      assertEquals("Interstellar", mediaItem?.name)
+      assertEquals("1080p", mediaItem?.quality)
+      // Verify newly added columns receive their default non-null values
+      assertEquals("", mediaItem?.plot)
+      assertEquals("", mediaItem?.genre)
+      assertEquals("", mediaItem?.cast)
+      assertEquals("", mediaItem?.director)
+      assertEquals(0, mediaItem?.tmdbId)
+      assertEquals(0, mediaItem?.groupOrder)
+      assertEquals(0, mediaItem?.serverOrder)
+
+      // Verify categories preserved
+      val categories = mediaDao.getCategories("acc_primary", "MOVIE")
+      assertEquals(1, categories.size)
+      assertEquals("cat_sci_fi", categories[0].categoryId)
+      assertEquals("Sci-Fi", categories[0].categoryName)
+    }
+
+    roomMigratedDb.close()
+    dbFile.delete()
+  }
+
+  @Test
+  fun `room database migration from v3 to v4 preserves user data and validates schema`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val dbFile = context.getDatabasePath("migration_test_v3_to_v4.db")
+    if (dbFile.exists()) dbFile.delete()
+
+    // 1. Create a legacy v3 database
+    val openHelper = androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory().create(
+      androidx.sqlite.db.SupportSQLiteOpenHelper.Configuration.builder(context)
+        .name(dbFile.name)
+        .callback(object : androidx.sqlite.db.SupportSQLiteOpenHelper.Callback(3) {
+          override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            // v3 schema (has groupKey, seq, groupOrder, serverOrder, but lacks plot, genre, cast, director, tmdbId)
+            db.execSQL("""
+              CREATE TABLE IF NOT EXISTS `media_items` (
+                `id` TEXT NOT NULL,
+                `accountId` TEXT NOT NULL,
+                `streamId` INTEGER NOT NULL,
+                `name` TEXT NOT NULL,
+                `title` TEXT NOT NULL,
+                `type` TEXT NOT NULL,
+                `posterUrl` TEXT NOT NULL,
+                `backdropUrl` TEXT NOT NULL,
+                `categoryId` TEXT NOT NULL,
+                `categoryName` TEXT NOT NULL,
+                `rating` REAL NOT NULL,
+                `year` TEXT NOT NULL,
+                `resolution` TEXT NOT NULL,
+                `quality` TEXT NOT NULL,
+                `streamUrl` TEXT NOT NULL,
+                `containerExtension` TEXT NOT NULL,
+                `addedTimestamp` INTEGER NOT NULL,
+                `groupKey` TEXT NOT NULL DEFAULT '',
+                `seq` INTEGER NOT NULL DEFAULT 0,
+                `groupOrder` INTEGER NOT NULL DEFAULT 0,
+                `serverOrder` INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(`id`)
+              )
+            """.trimIndent())
+            db.execSQL("""
+              CREATE TABLE IF NOT EXISTS `categories` (
+                `id` TEXT NOT NULL,
+                `accountId` TEXT NOT NULL,
+                `categoryId` TEXT NOT NULL,
+                `categoryName` TEXT NOT NULL,
+                `parentId` INTEGER NOT NULL,
+                `type` TEXT NOT NULL,
+                PRIMARY KEY(`id`)
+              )
+            """.trimIndent())
+
+            // Insert sample pre-existing data in v3
+            db.execSQL("""
+              INSERT INTO media_items (id, accountId, streamId, name, title, type, posterUrl, backdropUrl, categoryId, categoryName, rating, year, resolution, quality, streamUrl, containerExtension, addedTimestamp, groupKey, seq, groupOrder, serverOrder)
+              VALUES ('series_202', 'acc_user2', 202, 'Breaking Bad', 'Breaking Bad', 'SERIES', 'http://bb.jpg', 'http://bb_back.jpg', 'cat_drama', 'Drama', 9.5, '2008', 'FHD', 'FHD', 'http://stream_bb.mp4', 'mp4', 1650000000, 'breaking_bad', 1, 10, 5)
+            """.trimIndent())
+            db.execSQL("""
+              INSERT INTO categories (id, accountId, categoryId, categoryName, parentId, type)
+              VALUES ('acc_user2_SERIES_cat_drama', 'acc_user2', 'cat_drama', 'Drama', 0, 'SERIES')
+            """.trimIndent())
+          }
+
+          override fun onUpgrade(db: androidx.sqlite.db.SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+        })
+        .build()
+    )
+
+    // Open v3 and verify data is written
+    val v3Db = openHelper.writableDatabase
+    val cursorV3 = v3Db.query("SELECT COUNT(*) FROM media_items")
+    assertTrue(cursorV3.moveToFirst())
+    assertEquals(1, cursorV3.getInt(0))
+    cursorV3.close()
+    v3Db.close()
+
+    // 2. Open via Room at version 4 applying MIGRATION_3_4
+    val roomMigratedDb = androidx.room.Room.databaseBuilder(
+      context,
+      com.example.data.local.db.KrasDatabase::class.java,
+      dbFile.name
+    )
+      .addMigrations(
+        com.example.data.local.db.KrasDatabase.MIGRATION_1_2,
+        com.example.data.local.db.KrasDatabase.MIGRATION_2_3,
+        com.example.data.local.db.KrasDatabase.MIGRATION_3_4,
+        com.example.data.local.db.KrasDatabase.MIGRATION_1_4,
+        com.example.data.local.db.KrasDatabase.MIGRATION_2_4
+      )
+      .build()
+
+    // Trigger migration by accessing DAO
+    val mediaDao = roomMigratedDb.mediaDao()
+    kotlinx.coroutines.runBlocking {
+      val mediaItem = mediaDao.getItemById("series_202")
+      assertNotNull(mediaItem)
+      assertEquals("series_202", mediaItem?.id)
+      assertEquals("acc_user2", mediaItem?.accountId)
+      assertEquals("Breaking Bad", mediaItem?.name)
+      assertEquals("breaking_bad", mediaItem?.groupKey)
+      assertEquals(1, mediaItem?.seq)
+      assertEquals(10, mediaItem?.groupOrder)
+      assertEquals(5, mediaItem?.serverOrder)
+      assertEquals("", mediaItem?.plot)
+      assertEquals(0, mediaItem?.tmdbId)
+
+      // Update with enriched TMDb metadata to verify writes after migration work seamlessly
+      val updatedItem = mediaItem!!.copy(
+        plot = "A chemistry teacher turned manufacturer.",
+        genre = "Crime, Drama",
+        tmdbId = 1396
+      )
+      mediaDao.insertAll(listOf(updatedItem))
+      val retrieved = mediaDao.getItemById("series_202")
+      assertEquals(1396, retrieved?.tmdbId)
+      assertEquals("Crime, Drama", retrieved?.genre)
+    }
+
+    roomMigratedDb.close()
+    dbFile.delete()
+  }
 }
+

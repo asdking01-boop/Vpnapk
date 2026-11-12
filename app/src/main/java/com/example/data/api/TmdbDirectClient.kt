@@ -1,8 +1,6 @@
 package com.example.data.api
 
-import com.example.data.model.CastMember
 import com.example.data.model.PendingTmdbMutation
-import com.example.data.model.SimilarMedia
 import com.example.data.model.TmdbAuthErrorType
 import com.example.data.model.TmdbAuthResult
 import com.example.data.model.TmdbMutationAction
@@ -583,378 +581,9 @@ class TmdbDirectClient(
         }
     }
 
-    data class TmdbCompleteDetails(
-        val tmdbId: Int,
-        val title: String,
-        val originalTitle: String = "",
-        val overview: String = "",
-        val posterUrl: String = "",
-        val backdropUrl: String = "",
-        val rating: Double = 0.0,
-        val releaseYear: String = "",
-        val releaseDate: String = "",
-        val duration: String = "",
-        val genres: List<String> = emptyList(),
-        val director: String = "",
-        val cast: List<CastMember> = emptyList(),
-        val youtubeTrailerKey: String = "",
-        val similar: List<SimilarMedia> = emptyList(),
-        val seasons: List<TmdbSeasonSummary> = emptyList()
-    )
-
     /**
-     * Cleans an IPTV title by removing prefixes ("AR |", "EN:", etc.), quality badges ("4K", "FHD", "HD", etc.),
-     * years in parens "(2024)", and bracketed tags like "[Dubbed]", "(Sub)", returning clean title and extracted year.
-     */
-    fun cleanMediaTitle(rawTitle: String): Pair<String, String> {
-        var text = rawTitle.trim()
-
-        // 1. Remove prefixes like "AR |", "EN:", "FR -", "TR |", "VIP |", "OSN |", "NETFLIX |", etc.
-        text = text.replace(Regex("""^(?:[A-Z]{2,3}|VIP|OSN|NETFLIX|BEIN|SHAHID)\s*[|:\-]\s*""", RegexOption.IGNORE_CASE), "")
-
-        // 2. Extract year if present in parens or brackets: (2024), [2023]
-        val yearMatch = Regex("""[\[\(](19\d{2}|20\d{2})[\]\)]""").find(text)
-        val extractedYear = yearMatch?.groupValues?.get(1) ?: ""
-        text = text.replace(Regex("""[\[\(](19\d{2}|20\d{2})[\]\)]"""), "")
-
-        // 3. Remove quality tags: 4K, UHD, FHD, HD, SD, 1080p, 720p, 2160p, HEVC, H.265, H.264, HDR, 10bit
-        text = text.replace(Regex("""\b(?:4K|UHD|FHD|HD|SD|1080p|720p|2160p|HEVC|H\.?265|H\.?264|HDR(?:10\+?)?|10bit|50\s*fps|60\s*fps)\b""", RegexOption.IGNORE_CASE), "")
-
-        // 4. Remove tags like [Dubbed], (Sub), (Arabic), [Multi], [Eng], etc.
-        text = text.replace(Regex("""[\[\(](?:dubbed|subbed?|arabic|english|french|hindi|multi(?:-audio)?|translated|original|bluray|web-?dl|remux)[\]\)]""", RegexOption.IGNORE_CASE), "")
-
-        // 5. Remove any leftover square brackets like [xyz]
-        text = text.replace(Regex("""\[[^\]]*\]"""), "")
-
-        // 6. Remove symbols, emojis, and trim
-        text = text.replace(Regex("""[\p{So}\p{Sk}]"""), "")
-        text = text.replace(Regex("""\s+"""), " ").trim()
-        text = text.trimEnd('-', '|', ':', ' ')
-
-        return Pair(text.ifBlank { rawTitle.trim() }, extractedYear)
-    }
-
-    /**
-     * Computes similarity between two titles using Dice bigram coefficient and token overlap.
-     */
-    fun calculateTitleSimilarity(s1: String, s2: String): Double {
-        val a = s1.lowercase().replace(PUNCTUATION_REGEX, " ").replace(Regex("\\s+"), " ").trim()
-        val b = s2.lowercase().replace(PUNCTUATION_REGEX, " ").replace(Regex("\\s+"), " ").trim()
-        if (a.isEmpty() || b.isEmpty()) return 0.0
-        if (a == b) return 1.0
-
-        val wordsA = a.split(" ").filter { it.length > 1 }.toSet()
-        val wordsB = b.split(" ").filter { it.length > 1 }.toSet()
-        if (wordsA.isNotEmpty() && wordsB.isNotEmpty()) {
-            val intersection = wordsA.intersect(wordsB).size
-            val tokenSim = (2.0 * intersection) / (wordsA.size + wordsB.size)
-            if (tokenSim >= 0.75) return tokenSim
-        }
-
-        val bigramsA = (0 until a.length - 1).map { a.substring(it, it + 2) }
-        val bigramsB = (0 until b.length - 1).map { b.substring(it, it + 2) }
-        if (bigramsA.isEmpty() || bigramsB.isEmpty()) {
-            return if (a.contains(b) || b.contains(a)) 0.7 else 0.0
-        }
-        val matches = bigramsA.intersect(bigramsB.toSet()).size
-        return (2.0 * matches) / (bigramsA.size + bigramsB.size)
-    }
-
-    /**
-     * Searches TMDb for matching title and year, enforcing title similarity >= 0.60
-     * and year within +/- 1 year. Returns matched tmdbId or -1 if no match found.
-     */
-    suspend fun findTmdbMatch(
-        apiKey: String,
-        rawTitle: String,
-        year: String = "",
-        isSeries: Boolean = false
-    ): Int = withContext(Dispatchers.IO) {
-        val cleanKey = apiKey.trim()
-        if (cleanKey.isEmpty()) return@withContext 0
-
-        val (cleanTitle, parsedYear) = cleanMediaTitle(rawTitle)
-        val targetYear = year.trim().takeIf { it.length == 4 } ?: parsedYear
-        if (cleanTitle.isBlank()) return@withContext -1
-
-        val typeSlug = if (isSeries) "tv" else "movie"
-        val encodedQuery = URLEncoder.encode(cleanTitle, "UTF-8")
-        val yearParam = if (targetYear.length == 4) {
-            if (isSeries) "&first_air_date_year=$targetYear" else "&year=$targetYear"
-        } else ""
-
-        val url = "$TMDB_BASE_URL/search/$typeSlug?api_key=$cleanKey&query=$encodedQuery$yearParam&page=1"
-        val request = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .get()
-            .build()
-
-        try {
-            var response = httpClient.newCall(request).execute()
-            if (response.code == 429) {
-                response.close()
-                delay(1500L)
-                response = httpClient.newCall(request).execute()
-            }
-
-            val body = response.use { resp ->
-                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-            }
-            if (body.isBlank()) return@withContext -1
-
-            val json = parseJsonObjectSafe(body) ?: return@withContext -1
-            val results = json.optJSONArray("results") ?: return@withContext -1
-            if (results.length() == 0) return@withContext -1
-
-            var bestMatchId = -1
-            var bestScore = 0.0
-
-            val targetYearInt = targetYear.toIntOrNull()
-
-            for (i in 0 until results.length()) {
-                val item = results.optJSONObject(i) ?: continue
-                val id = item.optInt("id", 0)
-                if (id <= 0) continue
-
-                val itemTitle = item.optString("title", item.optString("name", "")).trim()
-                val origTitle = item.optString("original_title", item.optString("original_name", "")).trim()
-                val releaseDate = item.optString("release_date", item.optString("first_air_date", "")).trim()
-                val itemYearInt = releaseDate.take(4).toIntOrNull()
-
-                // Year within 1 year check
-                if (targetYearInt != null && itemYearInt != null) {
-                    if (Math.abs(targetYearInt - itemYearInt) > 1) {
-                        continue // Reject if year deviates by more than 1 year
-                    }
-                }
-
-                val simTitle = calculateTitleSimilarity(cleanTitle, itemTitle)
-                val simOrig = calculateTitleSimilarity(cleanTitle, origTitle)
-                val maxSim = maxOf(simTitle, simOrig)
-
-                if (maxSim >= 0.60 && maxSim > bestScore) {
-                    bestScore = maxSim
-                    bestMatchId = id
-                }
-            }
-
-            bestMatchId
-        } catch (_: Exception) {
-            -1
-        }
-    }
-
-    /**
-     * Fetches complete media details including credits (cast & director), videos (YouTube trailer),
-     * and similar media. If language is Arabic and overview is empty, falls back to English overview.
-     */
-    suspend fun fetchCompleteMediaDetails(
-        apiKey: String,
-        tmdbId: Int,
-        isSeries: Boolean,
-        language: String = "en-US"
-    ): TmdbCompleteDetails? = withContext(Dispatchers.IO) {
-        val cleanKey = apiKey.trim()
-        if (cleanKey.isEmpty() || tmdbId <= 0) return@withContext null
-
-        val typeSlug = if (isSeries) "tv" else "movie"
-        val url = "$TMDB_BASE_URL/$typeSlug/$tmdbId?api_key=$cleanKey&language=$language&append_to_response=credits,videos,similar"
-        val request = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .get()
-            .build()
-
-        try {
-            var response = httpClient.newCall(request).execute()
-            if (response.code == 429) {
-                response.close()
-                delay(1500L)
-                response = httpClient.newCall(request).execute()
-            }
-
-            val body = response.use { resp ->
-                if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-            }
-            if (body.isBlank()) return@withContext null
-
-            val json = parseJsonObjectSafe(body) ?: return@withContext null
-            var parsed = parseCompleteDetailsJson(json, isSeries)
-
-            // Fallback for Arabic: if overview is empty, fetch English overview
-            if (language.startsWith("ar", ignoreCase = true) && parsed?.overview.isNullOrBlank()) {
-                val enUrl = "$TMDB_BASE_URL/$typeSlug/$tmdbId?api_key=$cleanKey&language=en-US"
-                val enReq = Request.Builder().url(enUrl).header("Accept", "application/json").get().build()
-                try {
-                    val enBody = httpClient.newCall(enReq).execute().use { resp ->
-                        if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
-                    }
-                    val enJson = parseJsonObjectSafe(enBody)
-                    val enOverview = enJson?.optString("overview", "").orEmpty().trim()
-                    if (enOverview.isNotBlank() && parsed != null) {
-                        parsed = parsed.copy(overview = enOverview)
-                    }
-                } catch (_: Exception) {
-                }
-            }
-
-            parsed
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun parseCompleteDetailsJson(json: JSONObject, isSeries: Boolean): TmdbCompleteDetails? {
-        val tmdbId = json.optInt("id", 0)
-        val title = json.optString("title", json.optString("name", "")).trim()
-        val origTitle = json.optString("original_title", json.optString("original_name", "")).trim()
-        if (tmdbId <= 0 && title.isEmpty()) return null
-
-        val posterPath = json.optString("poster_path", "").trim()
-        val backdropPath = json.optString("backdrop_path", "").trim()
-        val posterUrl = if (posterPath.isNotBlank()) "https://image.tmdb.org/t/p/w500$posterPath" else ""
-        val backdropUrl = if (backdropPath.isNotBlank()) "https://image.tmdb.org/t/p/w780$backdropPath" else ""
-
-        val releaseDate = json.optString("release_date", json.optString("first_air_date", "")).trim()
-        val releaseYear = releaseDate.take(4)
-
-        val genresList = mutableListOf<String>()
-        val genresArr = json.optJSONArray("genres")
-        if (genresArr != null) {
-            for (i in 0 until genresArr.length()) {
-                val g = genresArr.optJSONObject(i)?.optString("name", "").orEmpty().trim()
-                if (g.isNotEmpty()) genresList.add(g)
-            }
-        }
-
-        val credits = json.optJSONObject("credits")
-        val castList = mutableListOf<CastMember>()
-        val castArr = credits?.optJSONArray("cast")
-        if (castArr != null) {
-            for (i in 0 until minOf(15, castArr.length())) {
-                val cObj = castArr.optJSONObject(i) ?: continue
-                val cId = cObj.optInt("id", 0)
-                val cName = cObj.optString("name", "").trim()
-                val cChar = cObj.optString("character", "").trim()
-                val cProfile = cObj.optString("profile_path", "").trim()
-                val profileUrl = if (cProfile.isNotEmpty()) "https://image.tmdb.org/t/p/w185$cProfile" else ""
-                if (cName.isNotEmpty()) {
-                    castList.add(CastMember(cId, cName, cChar, profileUrl))
-                }
-            }
-        }
-
-        var director = ""
-        val crewArr = credits?.optJSONArray("crew")
-        if (crewArr != null) {
-            for (i in 0 until crewArr.length()) {
-                val crewObj = crewArr.optJSONObject(i) ?: continue
-                if (crewObj.optString("job", "").equals("Director", ignoreCase = true)) {
-                    director = crewObj.optString("name", "").trim()
-                    break
-                }
-            }
-        }
-
-        // Extract YouTube trailer key
-        var youtubeTrailerKey = ""
-        val videos = json.optJSONObject("videos")
-        val videoResults = videos?.optJSONArray("results")
-        if (videoResults != null) {
-            for (i in 0 until videoResults.length()) {
-                val vObj = videoResults.optJSONObject(i) ?: continue
-                val site = vObj.optString("site", "")
-                val type = vObj.optString("type", "")
-                val key = vObj.optString("key", "")
-                if (site.equals("YouTube", ignoreCase = true) && key.isNotBlank()) {
-                    if (type.equals("Trailer", ignoreCase = true)) {
-                        youtubeTrailerKey = key
-                        break
-                    } else if (youtubeTrailerKey.isEmpty() && type.equals("Teaser", ignoreCase = true)) {
-                        youtubeTrailerKey = key
-                    }
-                }
-            }
-        }
-
-        // Extract similar media
-        val similarList = mutableListOf<SimilarMedia>()
-        val similarObj = json.optJSONObject("similar")
-        val similarResults = similarObj?.optJSONArray("results")
-        if (similarResults != null) {
-            for (i in 0 until minOf(12, similarResults.length())) {
-                val sObj = similarResults.optJSONObject(i) ?: continue
-                val sId = sObj.optInt("id", 0)
-                if (sId <= 0) continue
-                val sTitle = sObj.optString("title", sObj.optString("name", "")).trim()
-                val sPoster = sObj.optString("poster_path", "").trim()
-                val sBackdrop = sObj.optString("backdrop_path", "").trim()
-                val sDate = sObj.optString("release_date", sObj.optString("first_air_date", "")).trim()
-                val sRating = sObj.optDouble("vote_average", 0.0).let { if (it.isNaN()) 0.0 else it }
-                val sOverview = sObj.optString("overview", "").trim()
-                similarList.add(
-                    SimilarMedia(
-                        tmdbId = sId,
-                        title = sTitle,
-                        posterUrl = if (sPoster.isNotEmpty()) "https://image.tmdb.org/t/p/w500$sPoster" else "",
-                        backdropUrl = if (sBackdrop.isNotEmpty()) "https://image.tmdb.org/t/p/w780$sBackdrop" else "",
-                        rating = sRating,
-                        releaseYear = sDate.take(4),
-                        overview = sOverview,
-                        isSeries = isSeries
-                    )
-                )
-            }
-        }
-
-        val runtimeMinutes = json.optInt("runtime", 0)
-        val duration = if (runtimeMinutes > 0) "${runtimeMinutes}m" else ""
-
-        val seasons = mutableListOf<TmdbSeasonSummary>()
-        val seasonsArr = json.optJSONArray("seasons")
-        if (seasonsArr != null) {
-            for (i in 0 until seasonsArr.length()) {
-                val sObj = seasonsArr.optJSONObject(i) ?: continue
-                val sNum = sObj.optInt("season_number", 0)
-                if (sNum >= 1) {
-                    val sPoster = sObj.optString("poster_path", "").trim()
-                    seasons.add(
-                        TmdbSeasonSummary(
-                            seasonNumber = sNum,
-                            name = sObj.optString("name", "Season $sNum"),
-                            episodeCount = sObj.optInt("episode_count", 0),
-                            overview = sObj.optString("overview", ""),
-                            posterUrl = if (sPoster.isNotEmpty()) "https://image.tmdb.org/t/p/w500$sPoster" else "",
-                            airDate = sObj.optString("air_date", "")
-                        )
-                    )
-                }
-            }
-        }
-
-        return TmdbCompleteDetails(
-            tmdbId = tmdbId,
-            title = title,
-            originalTitle = origTitle,
-            overview = json.optString("overview", "").trim(),
-            posterUrl = posterUrl,
-            backdropUrl = backdropUrl,
-            rating = json.optDouble("vote_average", 0.0).let { if (it.isNaN()) 0.0 else it },
-            releaseYear = releaseYear,
-            releaseDate = releaseDate,
-            duration = duration,
-            genres = genresList,
-            director = director,
-            cast = castList,
-            youtubeTrailerKey = youtubeTrailerKey,
-            similar = similarList,
-            seasons = seasons
-        )
-    }
-
-    /**
-     * Searches TMDb directly for a title and year, evaluating confidence score to match IPTV media accurately.
+     * Searches TMDb (/search/movie or /search/tv) by cleaned title and year,
+     * returning matched metadata if found. Used for syncing and matching IPTV items.
      */
     suspend fun searchAndMatchMedia(
         apiKey: String,
@@ -962,134 +591,219 @@ class TmdbDirectClient(
         year: String = "",
         isSeries: Boolean = false,
         language: String = "en-US"
-    ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
+    ): TmdbMatchedMediaMetadata? = withContext(Dispatchers.IO) {
         val cleanKey = apiKey.trim()
-        if (cleanKey.isEmpty()) return@withContext null
+        if (cleanKey.isEmpty() || rawTitle.isBlank()) return@withContext null
 
-        val matchedId = findTmdbMatch(cleanKey, rawTitle, year, isSeries)
-        if (matchedId > 0) {
-            return@withContext fetchMediaDetails(cleanKey, matchedId, isSeries, language)
+        val cleanedTitle = cleanTitleForSearch(rawTitle)
+        if (cleanedTitle.isBlank()) return@withContext null
+
+        val endpoint = if (isSeries) "search/tv" else "search/movie"
+        val cleanYear = year.filter { it.isDigit() }.take(4)
+
+        val urlBuilder = StringBuilder("$TMDB_BASE_URL/$endpoint?api_key=${URLEncoder.encode(cleanKey, "UTF-8")}")
+            .append("&query=${URLEncoder.encode(cleanedTitle, "UTF-8")}")
+            .append("&language=${URLEncoder.encode(language, "UTF-8")}")
+            .append("&include_adult=false")
+
+        if (cleanYear.length == 4) {
+            if (isSeries) {
+                urlBuilder.append("&first_air_date_year=$cleanYear")
+            } else {
+                urlBuilder.append("&year=$cleanYear")
+            }
         }
-        null
-    }
 
-    /**
-     * Fetches detailed media metadata by TMDb ID.
-     */
-    suspend fun fetchMediaDetails(
-        apiKey: String,
-        tmdbId: Int,
-        isSeries: Boolean,
-        language: String = "en-US"
-    ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
-        val complete = fetchCompleteMediaDetails(apiKey, tmdbId, isSeries, language) ?: return@withContext null
-        TmdbMediaMetadata(
-            tmdbId = complete.tmdbId,
-            title = complete.title,
-            overview = complete.overview,
-            posterUrl = complete.posterUrl,
-            backdropUrl = complete.backdropUrl,
-            rating = complete.rating,
-            releaseYear = complete.releaseYear,
-            releaseDate = complete.releaseDate,
-            genres = complete.genres.joinToString(", "),
-            cast = complete.cast.take(6).joinToString(", ") { it.name },
-            director = complete.director,
-            runtimeMinutes = complete.duration.replace("m", "").trim().toIntOrNull() ?: 0,
-            seasons = complete.seasons
-        )
-    }
-
-    private fun fetchPagedList(
-        url: String,
-        mediaType: String,
-        isFavorite: Boolean,
-        inWatchlist: Boolean,
-        isRatingList: Boolean = false
-    ): List<TmdbSyncItem> {
         val request = Request.Builder()
-            .url(url)
+            .url(urlBuilder.toString())
             .header("Accept", "application/json")
             .get()
             .build()
 
-        httpClient.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) return emptyList()
-            val body = resp.body?.string().orEmpty()
-            val json = parseJsonObjectSafe(body) ?: return emptyList()
-            val results = json.optJSONArray("results") ?: return emptyList()
-            val items = ArrayList<TmdbSyncItem>(results.length())
+        try {
+            httpClient.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val body = resp.body?.string().orEmpty()
+                val json = parseJsonObjectSafe(body) ?: return@withContext null
+                val results = json.optJSONArray("results") ?: return@withContext null
+                if (results.length() == 0) return@withContext null
 
-            for (i in 0 until results.length()) {
-                val obj = results.optJSONObject(i) ?: continue
-                val tmdbId = obj.optInt("id", 0)
-                if (tmdbId <= 0) continue
+                // Pick the best match (first result)
+                val first = results.optJSONObject(0) ?: return@withContext null
+                val tmdbId = first.optInt("id", 0)
+                if (tmdbId <= 0) return@withContext null
 
-                val title = obj.optString("title", obj.optString("name", "")).trim()
-                val posterPath = obj.optString("poster_path", "").trim()
-                val posterUrl = if (posterPath.isNotEmpty()) "https://image.tmdb.org/t/p/w500$posterPath" else ""
-                val releaseDate = obj.optString("release_date", obj.optString("first_air_date", "")).trim()
-                val userRating = if (isRatingList) obj.optDouble("rating", 0.0).let { if (it.isNaN()) 0.0 else it } else 0.0
-                val tmdbRating = obj.optDouble("vote_average", 0.0).let { if (it.isNaN()) 0.0 else it }
+                val title = if (isSeries) {
+                    first.optString("name", "").ifBlank { first.optString("original_name", "") }
+                } else {
+                    first.optString("title", "").ifBlank { first.optString("original_title", "") }
+                }
+                val releaseDate = if (isSeries) {
+                    first.optString("first_air_date", "")
+                } else {
+                    first.optString("release_date", "")
+                }
+                val matchedYear = releaseDate.take(4)
+                val overview = first.optString("overview", "")
+                val posterPath = first.optString("poster_path", "")
+                val backdropPath = first.optString("backdrop_path", "")
+                val voteAverage = first.optDouble("vote_average", 0.0)
 
-                items.add(
-                    TmdbSyncItem(
-                        tmdbId = tmdbId,
-                        mediaType = mediaType,
-                        title = title,
-                        posterUrl = posterUrl,
-                        releaseYear = releaseDate.take(4),
-                        rating = tmdbRating,
-                        userRating = userRating,
-                        favorite = isFavorite,
-                        watchlist = inWatchlist
-                    )
+                val posterUrl = if (posterPath.isNotBlank()) "https://image.tmdb.org/t/p/w500$posterPath" else ""
+                val backdropUrl = if (backdropPath.isNotBlank()) "https://image.tmdb.org/t/p/w780$backdropPath" else ""
+
+                TmdbMatchedMediaMetadata(
+                    tmdbId = tmdbId,
+                    title = title,
+                    releaseYear = matchedYear,
+                    overview = overview,
+                    posterUrl = posterUrl,
+                    backdropUrl = backdropUrl,
+                    rating = voteAverage,
+                    genres = "",
+                    cast = "",
+                    director = ""
                 )
             }
-            return items
-        }
-    }
-
-    private fun mapNetworkExceptionToAuthError(e: Exception): TmdbAuthResult.Error {
-        return when (e) {
-            is UnknownHostException,
-            is SocketTimeoutException,
-            is ConnectException -> TmdbAuthResult.Error(
-                message = "No internet connection. Please check your network and try again.",
-                authErrorType = TmdbAuthErrorType.NO_INTERNET
-            )
-            is IOException -> TmdbAuthResult.Error(
-                message = "Network error connecting to TMDb. Please try again.",
-                authErrorType = TmdbAuthErrorType.NETWORK_ERROR
-            )
-            else -> TmdbAuthResult.Error(
-                message = e.localizedMessage ?: "Unexpected error during TMDb authentication.",
-                authErrorType = TmdbAuthErrorType.SERVICE_UNAVAILABLE
-            )
-        }
-    }
-
-    private fun parseJsonObjectSafe(raw: String): JSONObject? {
-        val trimmed = raw.trim()
-        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null
-        return try {
-            JSONObject(trimmed)
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun hasWordOverlap(a: String, b: String): Boolean {
-        val wordsA = a.split(" ").filter { it.length > 2 }.toSet()
-        val wordsB = b.split(" ").filter { it.length > 2 }.toSet()
-        if (wordsA.isEmpty() || wordsB.isEmpty()) return false
-        val intersection = wordsA.intersect(wordsB)
-        return intersection.size >= minOf(wordsA.size, wordsB.size)
+    /**
+     * Cleans titles by removing bracketed qualities, release tags, and prefixes.
+     */
+    private fun cleanTitleForSearch(raw: String): String {
+        var s = raw.trim()
+        // Remove prefixes like "AR |", "EN:", "FR -", etc.
+        s = s.replace(Regex("^(?:[A-Za-z]{2,3}\\s*[:|\\-]\\s*)+", RegexOption.IGNORE_CASE), "")
+        // Remove common resolution & quality tags in brackets or parentheses
+        s = s.replace(Regex("[\\[\\(]?(?:4K|UHD|FHD|HD|SD|1080p|720p|480p|BluRay|WEB-DL|HDR|HEVC|x264|x265)[\\]\\)]?", RegexOption.IGNORE_CASE), "")
+        // Remove 4-digit years in parentheses like (2024)
+        s = s.replace(Regex("\\(\\d{4}\\)"), "")
+        // Clean multiple spaces and non-word edge chars
+        s = s.replace(Regex("\\s+"), " ").trim { it <= ' ' || it == '|' || it == '-' || it == ':' }
+        return s
+    }
+
+    private suspend fun fetchPagedList(
+        url: String,
+        mediaType: String,
+        isFavorite: Boolean,
+        inWatchlist: Boolean,
+        isRatingList: Boolean = false
+    ): List<TmdbSyncItem> = withContext(Dispatchers.IO) {
+        val items = mutableListOf<TmdbSyncItem>()
+        var page = 1
+        var totalPages = 1
+        val maxPagesToFetch = 5 // Fetch up to first 5 pages (100 items) to prevent high bandwidth/latency
+
+        while (page <= totalPages && page <= maxPagesToFetch) {
+            val pageUrl = if (url.contains("?")) "$url&page=$page" else "$url?page=$page"
+            val req = Request.Builder()
+                .url(pageUrl)
+                .header("Accept", "application/json")
+                .get()
+                .build()
+
+            try {
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@withContext items
+                    val body = resp.body?.string().orEmpty()
+                    val json = parseJsonObjectSafe(body) ?: return@withContext items
+
+                    totalPages = json.optInt("total_pages", 1)
+                    val results = json.optJSONArray("results") ?: return@withContext items
+                    val isTv = mediaType.equals("SERIES", ignoreCase = true) || mediaType.equals("tv", ignoreCase = true)
+
+                    for (i in 0 until results.length()) {
+                        val obj = results.optJSONObject(i) ?: continue
+                        val tmdbId = obj.optInt("id", 0)
+                        if (tmdbId <= 0) continue
+
+                        val title = if (isTv) {
+                            obj.optString("name", "").ifBlank { obj.optString("original_name", "") }
+                        } else {
+                            obj.optString("title", "").ifBlank { obj.optString("original_title", "") }
+                        }
+                        val releaseDate = if (isTv) {
+                            obj.optString("first_air_date", "")
+                        } else {
+                            obj.optString("release_date", "")
+                        }
+                        val year = releaseDate.take(4)
+                        val posterPath = obj.optString("poster_path", "")
+                        val posterUrl = if (posterPath.isNotBlank()) "https://image.tmdb.org/t/p/w500$posterPath" else ""
+                        val rating = obj.optDouble("vote_average", 0.0)
+                        val userRating = if (isRatingList) obj.optDouble("rating", 0.0) else 0.0
+
+                        items.add(
+                            TmdbSyncItem(
+                                tmdbId = tmdbId,
+                                mediaType = if (isTv) "SERIES" else "MOVIE",
+                                title = title,
+                                posterUrl = posterUrl,
+                                releaseYear = year,
+                                rating = rating,
+                                userRating = userRating,
+                                favorite = isFavorite,
+                                watchlist = inWatchlist
+                            )
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+                break
+            }
+            page++
+        }
+
+        items
     }
 
     companion object {
-        const val TMDB_BASE_URL = "https://api.themoviedb.org/3"
+        private const val TMDB_BASE_URL = "https://api.themoviedb.org/3"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-        private val PUNCTUATION_REGEX = Regex("[^a-zA-Z0-9\\s]")
+
+        private fun parseJsonObjectSafe(raw: String): JSONObject? {
+            if (raw.isBlank()) return null
+            return try {
+                JSONObject(raw)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        private fun mapNetworkExceptionToAuthError(e: Exception): TmdbAuthResult.Error {
+            val isOffline = e is UnknownHostException || e is SocketTimeoutException || e is ConnectException
+            return if (isOffline) {
+                TmdbAuthResult.Error(
+                    message = "No internet connection. Please check your network and try again.",
+                    authErrorType = TmdbAuthErrorType.NO_INTERNET
+                )
+            } else {
+                TmdbAuthResult.Error(
+                    message = "Network error connecting to TMDb: ${e.localizedMessage ?: "Unknown error"}",
+                    authErrorType = TmdbAuthErrorType.NETWORK_ERROR
+                )
+            }
+        }
     }
 }
+
+/**
+ * Matched metadata returned by searchAndMatchMedia.
+ */
+data class TmdbMatchedMediaMetadata(
+    val tmdbId: Int,
+    val title: String,
+    val releaseYear: String = "",
+    val overview: String = "",
+    val posterUrl: String = "",
+    val backdropUrl: String = "",
+    val rating: Double = 0.0,
+    val genres: String = "",
+    val cast: String = "",
+    val director: String = ""
+)
+

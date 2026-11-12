@@ -42,9 +42,7 @@ fun SearchScreen(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     liveChannelOrder: LiveChannelOrder = LiveChannelOrder.SMART,
-    onSearchQueryChanged: ((String) -> Unit)? = null,
-    onInfoClick: ((MediaItem) -> Unit)? = null,
-    onLongClick: ((MediaItem) -> Unit)? = null
+    onSearchQueryChanged: ((String) -> Unit)? = null
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var selectedTab by rememberSaveable { mutableStateOf("All") }
@@ -216,9 +214,7 @@ fun SearchScreen(
                         onClick = { onMediaClick(item) },
                         cardStyle = CardStyle.POSTER,
                         isFavorite = isFavorite(item.id),
-                        onToggleFavorite = { onToggleFavorite(item) },
-                        onInfoClick = if (onInfoClick != null) { { onInfoClick(item) } } else null,
-                        onLongClick = if (onLongClick != null) { { onLongClick(item) } } else null
+                        onToggleFavorite = { onToggleFavorite(item) }
                     )
                 }
             }

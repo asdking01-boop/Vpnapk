@@ -42,8 +42,6 @@ import com.example.data.model.MediaType
 import com.example.data.model.WatchProgress
 import com.example.ui.theme.*
 
-import androidx.compose.material.icons.filled.Info
-
 private fun Modifier.cardGlassRim(cornerRadius: Dp = 14.dp): Modifier = this.drawWithCache {
     val r = cornerRadius.toPx()
     val corner = CornerRadius(r, r)
@@ -89,15 +87,13 @@ fun MediaCard(
     cardStyle: CardStyle = CardStyle.POSTER,
     isFavorite: Boolean = false,
     onToggleFavorite: (() -> Unit)? = null,
-    watchProgress: WatchProgress? = null,
-    onInfoClick: (() -> Unit)? = null,
-    onLongClick: (() -> Unit)? = null
+    watchProgress: WatchProgress? = null
 ) {
     when (cardStyle) {
-        CardStyle.POSTER -> PosterCard(item, onClick, isFavorite, onToggleFavorite, watchProgress, onInfoClick, onLongClick, modifier)
-        CardStyle.WIDE -> WideCard(item, onClick, isFavorite, onToggleFavorite, watchProgress, onInfoClick, onLongClick, modifier)
+        CardStyle.POSTER -> PosterCard(item, onClick, isFavorite, onToggleFavorite, watchProgress, modifier)
+        CardStyle.WIDE -> WideCard(item, onClick, isFavorite, onToggleFavorite, watchProgress, modifier)
         CardStyle.COMPACT -> CompactCard(item, onClick, isFavorite, onToggleFavorite, watchProgress, modifier)
-        CardStyle.BILLBOARD -> BillboardCard(item, onClick, isFavorite, onToggleFavorite, watchProgress, onInfoClick, onLongClick, modifier)
+        CardStyle.BILLBOARD -> BillboardCard(item, onClick, isFavorite, onToggleFavorite, watchProgress, modifier)
     }
 }
 
@@ -108,8 +104,6 @@ private fun PosterCard(
     isFavorite: Boolean,
     onToggleFavorite: (() -> Unit)?,
     watchProgress: WatchProgress?,
-    onInfoClick: (() -> Unit)?,
-    onLongClick: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     val effectiveQuality = resolveItemQuality(item)
@@ -120,10 +114,7 @@ private fun PosterCard(
             .clip(RoundedCornerShape(14.dp))
             .background(CinemaCard)
             .cardGlassRim(14.dp)
-            .liquidPressClickable(
-                onClick = onClick,
-                onLongClick = onLongClick ?: onInfoClick
-            )
+            .liquidPressClickable(onClick = onClick)
             .testTag("media_card_${item.id}")
     ) {
         // Poster Image
@@ -175,7 +166,7 @@ private fun PosterCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Resolution badge
+            // Resolution badge (empty Box preserves SpaceBetween layout if no badge is known)
             Box(modifier = Modifier.weight(1f, fill = false)) {
                 ResolutionBadge(
                     resolution = effectiveQuality,
@@ -184,45 +175,22 @@ private fun PosterCard(
                 )
             }
 
-            // Action icons (Info & Favorite)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                if (onInfoClick != null) {
-                    Box(
-                        modifier = Modifier
-                            .size(26.dp)
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.55f))
-                            .clickable(onClick = onInfoClick),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = "Details",
-                            tint = Color.White,
-                            modifier = Modifier.size(15.dp)
-                        )
-                    }
-                }
-
-                if (onToggleFavorite != null) {
-                    Box(
-                        modifier = Modifier
-                            .size(26.dp)
-                            .clip(CircleShape)
-                            .background(Color.Black.copy(alpha = 0.55f))
-                            .clickable(onClick = onToggleFavorite),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                            contentDescription = "Favorite",
-                            tint = if (isFavorite) KrasRed else Color.White,
-                            modifier = Modifier.size(15.dp)
-                        )
-                    }
+            // Favorite toggle
+            if (onToggleFavorite != null) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .clickable(onClick = onToggleFavorite),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        contentDescription = "Favorite",
+                        tint = if (isFavorite) KrasRed else Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
         }
@@ -298,8 +266,6 @@ private fun WideCard(
     isFavorite: Boolean,
     onToggleFavorite: (() -> Unit)?,
     watchProgress: WatchProgress?,
-    onInfoClick: (() -> Unit)?,
-    onLongClick: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     val effectiveQuality = resolveItemQuality(item)
@@ -310,10 +276,7 @@ private fun WideCard(
             .clip(RoundedCornerShape(14.dp))
             .background(CinemaCard)
             .cardGlassRim(14.dp)
-            .liquidPressClickable(
-                onClick = onClick,
-                onLongClick = onLongClick ?: onInfoClick
-            )
+            .liquidPressClickable(onClick = onClick)
             .testTag("media_card_wide_${item.id}")
     ) {
         val imageUrl = item.backdrop.ifBlank { item.streamIcon }.takeIf { it.isNotBlank() }
@@ -590,8 +553,6 @@ private fun BillboardCard(
     isFavorite: Boolean,
     onToggleFavorite: (() -> Unit)?,
     watchProgress: WatchProgress?,
-    onInfoClick: (() -> Unit)?,
-    onLongClick: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     val effectiveQuality = resolveItemQuality(item)
@@ -602,10 +563,7 @@ private fun BillboardCard(
             .clip(RoundedCornerShape(16.dp))
             .background(CinemaCard)
             .cardGlassRim(16.dp)
-            .liquidPressClickable(
-                onClick = onClick,
-                onLongClick = onLongClick ?: onInfoClick
-            )
+            .liquidPressClickable(onClick = onClick)
             .testTag("media_card_billboard_${item.id}")
     ) {
         val imageUrl = item.backdrop.ifBlank { item.streamIcon }.takeIf { it.isNotBlank() }
