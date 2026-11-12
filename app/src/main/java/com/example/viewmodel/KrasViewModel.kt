@@ -1845,7 +1845,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         previewJob = viewModelScope.launch {
             delay(120L) // Small debounce for visible items
             try {
-                val apiKey = tmdbSessionStore.getApiKey()
+                val apiKey = tmdbSessionStore.getSavedApiKey()
                 val isArabic = _userSettings.value.language.equals("Arabic", ignoreCase = true)
                 val details = repository.getOrFetchEnrichedMediaDetails(
                     item = item,
@@ -1894,7 +1894,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         fullDetailsJob?.cancel()
         fullDetailsJob = viewModelScope.launch {
             try {
-                val apiKey = tmdbSessionStore.getApiKey()
+                val apiKey = tmdbSessionStore.getSavedApiKey()
                 val isArabic = _userSettings.value.language.equals("Arabic", ignoreCase = true)
                 val details = repository.getOrFetchEnrichedMediaDetails(
                     item = item,
