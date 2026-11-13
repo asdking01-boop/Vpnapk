@@ -7,6 +7,7 @@ import androidx.media3.common.MediaItem as Media3Item
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
@@ -21,6 +22,8 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.abs
+import kotlin.math.roundToLong
 
 /**
  * Unified Media3 ExoPlayer UI state machine.
@@ -53,8 +56,55 @@ data class PlayerTrackOption(
     val isOff: Boolean = false
 )
 
+sealed class SeekResult {
+    data class Seeked(val targetPositionMs: Long, val durationMs: Long) : SeekResult()
+    data object NotSeekable : SeekResult()
+}
+
 @OptIn(UnstableApi::class)
 class ExoPlayerWrapper(private val context: Context) {
+
+    companion object {
+        const val SEEK_SETTLE_TOLERANCE_MS = 2_500L
+        const val SEEK_SETTLE_TIMEOUT_MS = 3_000L
+
+        fun isPlayerSeekable(
+            isCommandAvailable: Boolean,
+            isCurrentMediaItemSeekable: Boolean,
+            durationMs: Long
+        ): Boolean {
+            return isCommandAvailable &&
+                isCurrentMediaItemSeekable &&
+                durationMs != C.TIME_UNSET &&
+                durationMs > 0L
+        }
+
+        fun computeSeekTargetMs(targetMs: Long, durationMs: Long): Long {
+            return if (durationMs != C.TIME_UNSET && durationMs > 0L) {
+                targetMs.coerceIn(0L, durationMs)
+            } else {
+                targetMs.coerceAtLeast(0L)
+            }
+        }
+
+        fun computeRelativeSeekTargetMs(
+            currentPositionMs: Long,
+            deltaMs: Long,
+            durationMs: Long
+        ): Long {
+            val safeCurrent = currentPositionMs.coerceAtLeast(0L)
+            val rawTarget = safeCurrent + deltaMs
+            return computeSeekTargetMs(rawTarget, durationMs)
+        }
+
+        fun computeFractionSeekTargetMs(fraction: Float, durationMs: Long): Long {
+            if (durationMs == C.TIME_UNSET || durationMs <= 0L) return 0L
+            val clamped = fraction.coerceIn(0f, 1f)
+            return (clamped.toDouble() * durationMs.toDouble())
+                .roundToLong()
+                .coerceIn(0L, durationMs)
+        }
+    }
 
     private val appContext = context.applicationContext
 
@@ -94,6 +144,9 @@ class ExoPlayerWrapper(private val context: Context) {
 
     private val _duration = MutableStateFlow(0L)
     val duration = _duration.asStateFlow()
+
+    private val _isSeekable = MutableStateFlow(false)
+    val isSeekable = _isSeekable.asStateFlow()
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage = _errorMessage.asStateFlow()
@@ -138,25 +191,38 @@ class ExoPlayerWrapper(private val context: Context) {
     private var wasPlayingBeforeLifecycleStop = false
     private var isBackgroundAudioOnly = false
 
+    @Volatile
+    private var pendingSeekTargetMs: Long? = null
+
+    @Volatile
+    private var pendingSeekTimestampMs: Long = 0L
+
+    @Volatile
+    private var isUserScrubbing: Boolean = false
+
     private val playerListener = object : Player.Listener {
         override fun onRenderedFirstFrame() {
             _hasRenderedFirstFrame.value = true
             _isBuffering.value = false
             _errorMessage.value = null
-            exoPlayer?.let { syncPlayerUiState(it) }
+            exoPlayer?.let {
+                refreshSeekabilityAndDuration(it)
+                syncPlayerUiState(it)
+            }
         }
 
         override fun onPlaybackStateChanged(state: Int) {
             val player = exoPlayer ?: return
+            refreshSeekabilityAndDuration(player)
             when (state) {
                 Player.STATE_BUFFERING -> {
                     _isBuffering.value = true
                 }
                 Player.STATE_READY -> {
                     _isBuffering.value = false
-                    _duration.value = player.duration.coerceAtLeast(0L)
                     _errorMessage.value = null
                     retryCount = 0
+                    syncPositionWithPendingGuard(player)
                     val hasSelectedVideo = player.currentTracks.groups.any {
                         it.type == C.TRACK_TYPE_VIDEO && it.isSelected
                     }
@@ -168,12 +234,48 @@ class ExoPlayerWrapper(private val context: Context) {
                 Player.STATE_ENDED -> {
                     _isBuffering.value = false
                     _isPlaying.value = false
+                    syncPositionWithPendingGuard(player)
                 }
                 Player.STATE_IDLE -> {
                     _isBuffering.value = false
                 }
             }
             syncPlayerUiState(player)
+        }
+
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+            exoPlayer?.let { refreshSeekabilityAndDuration(it) }
+        }
+
+        override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
+            exoPlayer?.let { refreshSeekabilityAndDuration(it) }
+        }
+
+        override fun onMediaItemTransition(mediaItem: Media3Item?, reason: Int) {
+            pendingSeekTargetMs = null
+            pendingSeekTimestampMs = 0L
+            exoPlayer?.let { refreshSeekabilityAndDuration(it) }
+        }
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int
+        ) {
+            val player = exoPlayer ?: return
+            refreshSeekabilityAndDuration(player)
+            if (reason == Player.DISCONTINUITY_REASON_SEEK ||
+                reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
+            ) {
+                val resolvedPos = newPosition.positionMs.coerceAtLeast(0L)
+                if (reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
+                    pendingSeekTargetMs = resolvedPos
+                    pendingSeekTimestampMs = System.currentTimeMillis()
+                }
+                if (!isUserScrubbing) {
+                    _currentPosition.value = resolvedPos
+                }
+            }
         }
 
         override fun onIsPlayingChanged(playing: Boolean) {
@@ -301,8 +403,65 @@ class ExoPlayerWrapper(private val context: Context) {
         }
 
         exoPlayer = player
+        refreshSeekabilityAndDuration(player)
         ensureMediaControllerConnected()
         return player
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun attachPlayerForTesting(player: ExoPlayer) {
+        if (attachedListenerPlayer !== player) {
+            attachedListenerPlayer?.removeListener(playerListener)
+            player.addListener(playerListener)
+            attachedListenerPlayer = player
+        }
+        exoPlayer = player
+        refreshSeekabilityAndDuration(player)
+    }
+
+    private fun refreshSeekabilityAndDuration(player: Player) {
+        val rawDuration = player.duration
+        val validDuration = if (rawDuration != C.TIME_UNSET && rawDuration > 0L) rawDuration else 0L
+        if (validDuration > 0L) {
+            _duration.value = validDuration
+        } else if (player.mediaItemCount == 0 || player.playbackState == Player.STATE_IDLE) {
+            _duration.value = 0L
+        } else if (rawDuration == C.TIME_UNSET && player.playbackState == Player.STATE_READY) {
+            // Live / unbounded stream with unknown duration once ready
+            _duration.value = 0L
+        }
+
+        val effectiveDuration = if (validDuration > 0L) validDuration else _duration.value
+        val canSeek = player.mediaItemCount > 0 &&
+            player.playbackState != Player.STATE_IDLE &&
+            isPlayerSeekable(
+                isCommandAvailable = player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM),
+                isCurrentMediaItemSeekable = player.isCurrentMediaItemSeekable,
+                durationMs = effectiveDuration
+            )
+        _isSeekable.value = canSeek
+    }
+
+    private fun syncPositionWithPendingGuard(player: Player) {
+        if (isUserScrubbing) return
+        val rawPos = player.currentPosition.coerceAtLeast(0L)
+        val pending = pendingSeekTargetMs
+        if (pending != null) {
+            val elapsed = System.currentTimeMillis() - pendingSeekTimestampMs
+            val settledNearTarget = abs(rawPos - pending) <= SEEK_SETTLE_TOLERANCE_MS
+            val timedOut = elapsed >= SEEK_SETTLE_TIMEOUT_MS
+            val isReadyAndSettled = player.playbackState == Player.STATE_READY && (settledNearTarget || timedOut)
+            val isEndedAfterSeek = player.playbackState == Player.STATE_ENDED && (settledNearTarget || timedOut)
+            if (isReadyAndSettled || isEndedAfterSeek || (timedOut && player.playbackState != Player.STATE_BUFFERING)) {
+                pendingSeekTargetMs = null
+                pendingSeekTimestampMs = 0L
+                _currentPosition.value = rawPos
+            } else {
+                _currentPosition.value = pending
+            }
+            return
+        }
+        _currentPosition.value = rawPos
     }
 
     private fun syncPlayerUiState(player: ExoPlayer) {
@@ -647,10 +806,16 @@ class ExoPlayerWrapper(private val context: Context) {
      */
     fun setPreparingState() {
         retryCount = 0
+        pendingSeekTargetMs = null
+        pendingSeekTimestampMs = 0L
+        isUserScrubbing = false
         _hasRenderedFirstFrame.value = false
         _errorMessage.value = null
         _isBuffering.value = true
         _isPlaying.value = false
+        _isSeekable.value = false
+        _duration.value = 0L
+        _currentPosition.value = 0L
         _playerUiState.value = PlayerUiState.PREPARING
     }
 
@@ -658,6 +823,10 @@ class ExoPlayerWrapper(private val context: Context) {
      * Fails gracefully into ERROR state so the user is never left on an infinite spinner.
      */
     fun failWithError(message: String) {
+        pendingSeekTargetMs = null
+        pendingSeekTimestampMs = 0L
+        isUserScrubbing = false
+        _isSeekable.value = false
         exoPlayer?.stop()
         _isBuffering.value = false
         _isPlaying.value = false
@@ -717,8 +886,18 @@ class ExoPlayerWrapper(private val context: Context) {
             _hasRenderedFirstFrame.value = false
         }
         _isBuffering.value = true
-        _currentPosition.value = startPositionMs.coerceAtLeast(0L)
+        val clampedStart = startPositionMs.coerceAtLeast(0L)
+        _currentPosition.value = clampedStart
         _duration.value = 0L
+        _isSeekable.value = false
+        isUserScrubbing = false
+        if (clampedStart > 0L) {
+            pendingSeekTargetMs = clampedStart
+            pendingSeekTimestampMs = System.currentTimeMillis()
+        } else {
+            pendingSeekTargetMs = null
+            pendingSeekTimestampMs = 0L
+        }
         _playerUiState.value = if (keepLastFrameUntilReady && _hasRenderedFirstFrame.value) {
             PlayerUiState.BUFFERING
         } else {
@@ -729,13 +908,15 @@ class ExoPlayerWrapper(private val context: Context) {
         val effectiveMetadata = metadata ?: KrasMediaPlaybackService.currentMetadata
         if (!isSameUrl || player.mediaItemCount == 0) {
             val mediaItem = KrasMediaPlaybackService.buildMedia3Item(url, effectiveMetadata)
-            player.setMediaItem(mediaItem)
+            player.setMediaItem(mediaItem, clampedStart)
         } else if (metadata != null && player.mediaItemCount > 0) {
             val mediaItem = KrasMediaPlaybackService.buildMedia3Item(url, metadata)
             player.replaceMediaItem(player.currentMediaItemIndex, mediaItem)
-        }
-        if (startPositionMs > 0L) {
-            player.seekTo(startPositionMs)
+            if (clampedStart > 0L) {
+                player.seekTo(clampedStart)
+            }
+        } else if (clampedStart > 0L) {
+            player.seekTo(clampedStart)
         }
         player.playWhenReady = true
         player.prepare()
@@ -771,25 +952,122 @@ class ExoPlayerWrapper(private val context: Context) {
         player.prepare()
     }
 
-    fun seekTo(positionMs: Long) {
-        val target = positionMs.coerceAtLeast(0L)
+    fun setScrubbing(scrubbing: Boolean) {
+        isUserScrubbing = scrubbing
+    }
+
+    fun canSeekCurrentMedia(): Boolean {
+        val player = exoPlayer ?: return false
+        refreshSeekabilityAndDuration(player)
+        val rawDuration = player.duration
+        val effectiveDuration = if (rawDuration != C.TIME_UNSET && rawDuration > 0L) rawDuration else _duration.value
+        return player.mediaItemCount > 0 &&
+            player.playbackState != Player.STATE_IDLE &&
+            isPlayerSeekable(
+                isCommandAvailable = player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM),
+                isCurrentMediaItemSeekable = player.isCurrentMediaItemSeekable,
+                durationMs = effectiveDuration
+            )
+    }
+
+    fun seekTo(positionMs: Long): SeekResult {
+        val player = exoPlayer ?: return SeekResult.NotSeekable
+        refreshSeekabilityAndDuration(player)
+
+        val rawDuration = player.duration
+        val effectiveDuration = if (rawDuration != C.TIME_UNSET && rawDuration > 0L) rawDuration else _duration.value
+        val canSeek = player.mediaItemCount > 0 &&
+            player.playbackState != Player.STATE_IDLE &&
+            isPlayerSeekable(
+                isCommandAvailable = player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM),
+                isCurrentMediaItemSeekable = player.isCurrentMediaItemSeekable,
+                durationMs = effectiveDuration
+            )
+        if (!canSeek) {
+            return SeekResult.NotSeekable
+        }
+
+        val target = computeSeekTargetMs(positionMs, effectiveDuration)
+        pendingSeekTargetMs = target
+        pendingSeekTimestampMs = System.currentTimeMillis()
+        _duration.value = effectiveDuration
         _currentPosition.value = target
-        getActivePlayer().seekTo(target)
+        player.seekTo(target)
+        return SeekResult.Seeked(targetPositionMs = target, durationMs = effectiveDuration)
     }
 
-    fun seekForward(ms: Long = 10_000L) {
-        val active = getActivePlayer()
-        val current = active.currentPosition.takeIf { it >= 0L } ?: _currentPosition.value
-        val dur = active.duration.takeIf { it > 0L } ?: _duration.value
-        val target = if (dur > 0) (current + ms).coerceAtMost(dur) else current + ms
-        seekTo(target)
+    fun seekToFraction(fraction: Float): SeekResult {
+        val player = exoPlayer ?: return SeekResult.NotSeekable
+        refreshSeekabilityAndDuration(player)
+
+        val rawDuration = player.duration
+        val effectiveDuration = if (rawDuration != C.TIME_UNSET && rawDuration > 0L) rawDuration else _duration.value
+        val canSeek = player.mediaItemCount > 0 &&
+            player.playbackState != Player.STATE_IDLE &&
+            isPlayerSeekable(
+                isCommandAvailable = player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM),
+                isCurrentMediaItemSeekable = player.isCurrentMediaItemSeekable,
+                durationMs = effectiveDuration
+            )
+        if (!canSeek) {
+            return SeekResult.NotSeekable
+        }
+
+        val target = computeFractionSeekTargetMs(fraction, effectiveDuration)
+        return seekTo(target)
     }
 
-    fun seekBackward(ms: Long = 10_000L) {
-        val active = getActivePlayer()
-        val current = active.currentPosition.takeIf { it >= 0L } ?: _currentPosition.value
-        val target = (current - ms).coerceAtLeast(0L)
-        seekTo(target)
+    fun seekForward(ms: Long = 10_000L): SeekResult {
+        val player = exoPlayer ?: return SeekResult.NotSeekable
+        refreshSeekabilityAndDuration(player)
+
+        val rawDuration = player.duration
+        val effectiveDuration = if (rawDuration != C.TIME_UNSET && rawDuration > 0L) rawDuration else _duration.value
+        val canSeek = player.mediaItemCount > 0 &&
+            player.playbackState != Player.STATE_IDLE &&
+            isPlayerSeekable(
+                isCommandAvailable = player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM),
+                isCurrentMediaItemSeekable = player.isCurrentMediaItemSeekable,
+                durationMs = effectiveDuration
+            )
+        if (!canSeek) {
+            return SeekResult.NotSeekable
+        }
+
+        val basePos = resolveBaseSeekPosition(player)
+        val target = computeRelativeSeekTargetMs(basePos, ms.coerceAtLeast(0L), effectiveDuration)
+        return seekTo(target)
+    }
+
+    fun seekBackward(ms: Long = 10_000L): SeekResult {
+        val player = exoPlayer ?: return SeekResult.NotSeekable
+        refreshSeekabilityAndDuration(player)
+
+        val rawDuration = player.duration
+        val effectiveDuration = if (rawDuration != C.TIME_UNSET && rawDuration > 0L) rawDuration else _duration.value
+        val canSeek = player.mediaItemCount > 0 &&
+            player.playbackState != Player.STATE_IDLE &&
+            isPlayerSeekable(
+                isCommandAvailable = player.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM),
+                isCurrentMediaItemSeekable = player.isCurrentMediaItemSeekable,
+                durationMs = effectiveDuration
+            )
+        if (!canSeek) {
+            return SeekResult.NotSeekable
+        }
+
+        val basePos = resolveBaseSeekPosition(player)
+        val target = computeRelativeSeekTargetMs(basePos, -ms.coerceAtLeast(0L), effectiveDuration)
+        return seekTo(target)
+    }
+
+    private fun resolveBaseSeekPosition(player: ExoPlayer): Long {
+        val rawPos = player.currentPosition.coerceAtLeast(0L)
+        val pending = pendingSeekTargetMs ?: return rawPos
+        val elapsed = System.currentTimeMillis() - pendingSeekTimestampMs
+        val isRecentUnsettledSeek = elapsed < SEEK_SETTLE_TIMEOUT_MS &&
+            (player.playbackState == Player.STATE_BUFFERING || abs(rawPos - pending) > SEEK_SETTLE_TOLERANCE_MS)
+        return if (isRecentUnsettledSeek) pending else rawPos
     }
 
     fun togglePlayPause() {
@@ -798,18 +1076,20 @@ class ExoPlayerWrapper(private val context: Context) {
             retry()
             return
         }
-        val active = getActivePlayer()
         if (player.playbackState == Player.STATE_ENDED) {
-            active.seekTo(0L)
-            active.playWhenReady = true
-            active.play()
+            pendingSeekTargetMs = 0L
+            pendingSeekTimestampMs = System.currentTimeMillis()
+            _currentPosition.value = 0L
+            player.seekTo(0L)
+            player.playWhenReady = true
+            player.play()
             return
         }
         if (player.isPlaying) {
-            active.pause()
+            player.pause()
         } else {
-            active.playWhenReady = true
-            active.play()
+            player.playWhenReady = true
+            player.play()
         }
     }
 
@@ -817,7 +1097,7 @@ class ExoPlayerWrapper(private val context: Context) {
         val player = exoPlayer ?: return
         wasPlayingBeforeLifecycleStop = player.isPlaying || player.playWhenReady
         if (player.isPlaying || player.playWhenReady) {
-            getActivePlayer().pause()
+            player.pause()
         }
     }
 
@@ -825,26 +1105,26 @@ class ExoPlayerWrapper(private val context: Context) {
         val player = exoPlayer ?: return
         if (wasPlayingBeforeLifecycleStop && _playerUiState.value != PlayerUiState.ERROR) {
             wasPlayingBeforeLifecycleStop = false
-            getActivePlayer().playWhenReady = true
-            getActivePlayer().play()
+            player.playWhenReady = true
+            player.play()
         }
     }
 
     fun setPlaybackSpeed(speed: Float) {
-        getActivePlayer().playbackParameters = PlaybackParameters(speed)
+        exoPlayer?.playbackParameters = PlaybackParameters(speed)
     }
 
     fun updatePosition() {
-        exoPlayer?.let {
-            _currentPosition.value = it.currentPosition.coerceAtLeast(0L)
-            if (it.duration > 0) {
-                _duration.value = it.duration
-            }
-        }
+        val player = exoPlayer ?: return
+        refreshSeekabilityAndDuration(player)
+        syncPositionWithPendingGuard(player)
     }
 
     fun stop() {
         wasPlayingBeforeLifecycleStop = false
+        pendingSeekTargetMs = null
+        pendingSeekTimestampMs = 0L
+        isUserScrubbing = false
         if (isBackgroundAudioOnly) {
             setBackgroundAudioOnlyMode(false)
         }
@@ -853,6 +1133,9 @@ class ExoPlayerWrapper(private val context: Context) {
         lastMediaUrl = null
         _isPlaying.value = false
         _isBuffering.value = false
+        _isSeekable.value = false
+        _duration.value = 0L
+        _currentPosition.value = 0L
         _hasRenderedFirstFrame.value = false
         _errorMessage.value = null
         _playerUiState.value = PlayerUiState.PREPARING
@@ -860,6 +1143,9 @@ class ExoPlayerWrapper(private val context: Context) {
 
     fun release() {
         wasPlayingBeforeLifecycleStop = false
+        pendingSeekTargetMs = null
+        pendingSeekTimestampMs = 0L
+        isUserScrubbing = false
         controllerFuture?.let { MediaController.releaseFuture(it) }
         controllerFuture = null
         _mediaController.value = null

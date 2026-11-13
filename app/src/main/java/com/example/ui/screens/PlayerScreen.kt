@@ -29,6 +29,8 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -54,11 +56,16 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -76,6 +83,7 @@ import com.example.data.local.KrasRepository
 import com.example.data.model.*
 import com.example.player.ExoPlayerWrapper
 import com.example.player.PlayerUiState
+import com.example.player.SeekResult
 import com.example.player.VideoQualityVariant
 import com.example.player.PlayerImmersiveHelper
 import androidx.activity.compose.BackHandler
@@ -204,6 +212,7 @@ fun PlayerScreen(
     val isBuffering by playerWrapper.isBuffering.collectAsState()
     val currentPos by playerWrapper.currentPosition.collectAsState()
     val duration by playerWrapper.duration.collectAsState()
+    val isSeekable by playerWrapper.isSeekable.collectAsState()
     val errorMessage by playerWrapper.errorMessage.collectAsState()
     val realResolutionOverlay by playerWrapper.realResolutionOverlay.collectAsState()
     val detectedQualityBadge by playerWrapper.detectedQualityBadge.collectAsState()
@@ -305,12 +314,30 @@ fun PlayerScreen(
     // Interactive scrubbing state for smooth timeline seeking
     var isScrubbing by remember { mutableStateOf(false) }
     var scrubFraction by remember { mutableFloatStateOf(0f) }
+    var lastSeekInteractionTick by remember { mutableIntStateOf(0) }
 
-    // Subtle visual cue when 10s rewind / forward is triggered
+    DisposableEffect(Unit) {
+        onDispose {
+            playerWrapper.setScrubbing(false)
+        }
+    }
+
+    // Smoothly refresh timeline position while controls are visible and playing
+    LaunchedEffect(controlsVisible, isPlaying, isScrubbing, mediaItem.id, episode?.id) {
+        if (controlsVisible && isPlaying && !isScrubbing) {
+            while (true) {
+                playerWrapper.updatePosition()
+                delay(300L)
+            }
+        }
+    }
+
+    // Subtle visual cue when 10s rewind / forward is triggered (or stream is unseekable)
     var seekFeedbackText by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(seekFeedbackText) {
-        if (seekFeedbackText != null) {
-            delay(650)
+        val text = seekFeedbackText
+        if (text != null) {
+            delay(if (text.length > 8) 1400L else 650L)
             seekFeedbackText = null
         }
     }
@@ -325,7 +352,7 @@ fun PlayerScreen(
     val anyModalOpen = showSpeedDialog || showQualityDialog || showAudioSubtitleDialog || showPlaylistDialog || showCastDialog || showRotationDialog
 
     // Auto-hide controls after 3.5 seconds of inactivity while video is actively playing
-    LaunchedEffect(controlsVisible, playerUiState, isPlaying, isScrubbing, anyModalOpen) {
+    LaunchedEffect(controlsVisible, playerUiState, isPlaying, isScrubbing, anyModalOpen, lastSeekInteractionTick) {
         if (controlsVisible && playerUiState == PlayerUiState.PLAYING && isPlaying && !isScrubbing && !anyModalOpen) {
             delay(3500L)
             controlsVisible = false
@@ -880,9 +907,18 @@ fun PlayerScreen(
                             CenterSeekButton(
                                 icon = Icons.Default.Replay10,
                                 contentDescription = "Rewind 10 seconds",
+                                enabled = isSeekable,
                                 onClick = {
-                                    playerWrapper.seekBackward(10_000)
-                                    seekFeedbackText = "-10s"
+                                    lastSeekInteractionTick++
+                                    when (val result = playerWrapper.seekBackward(10_000L)) {
+                                        is SeekResult.Seeked -> {
+                                            scrubFraction = (result.targetPositionMs.toFloat() / result.durationMs.coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
+                                            seekFeedbackText = "-10s"
+                                        }
+                                        SeekResult.NotSeekable -> {
+                                            seekFeedbackText = "Seeking not supported"
+                                        }
+                                    }
                                 },
                                 modifier = Modifier.testTag("player_rewind_button")
                             )
@@ -900,9 +936,18 @@ fun PlayerScreen(
                             CenterSeekButton(
                                 icon = Icons.Default.Forward10,
                                 contentDescription = "Forward 10 seconds",
+                                enabled = isSeekable,
                                 onClick = {
-                                    playerWrapper.seekForward(10_000)
-                                    seekFeedbackText = "+10s"
+                                    lastSeekInteractionTick++
+                                    when (val result = playerWrapper.seekForward(10_000L)) {
+                                        is SeekResult.Seeked -> {
+                                            scrubFraction = (result.targetPositionMs.toFloat() / result.durationMs.coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
+                                            seekFeedbackText = "+10s"
+                                        }
+                                        SeekResult.NotSeekable -> {
+                                            seekFeedbackText = "Seeking not supported"
+                                        }
+                                    }
                                 },
                                 modifier = Modifier.testTag("player_forward_button")
                             )
@@ -1003,21 +1048,24 @@ fun PlayerScreen(
                     }
 
                     // PLAYBACK TIMELINE: Current Time | Thin Red Progress Bar + Smooth Circular Handle | Total Duration
-                    val safeDuration = duration.coerceAtLeast(1L)
+                    val actualDuration = duration.coerceAtLeast(0L)
+                    val hasKnownDuration = actualDuration > 0L
+                    val canSeek = isSeekable && hasKnownDuration
+                    val safeDuration = actualDuration.coerceAtLeast(1L)
                     val safePosition = currentPos.coerceIn(0L, safeDuration)
-                    val liveProgressFraction = if (mediaItem.type == MediaType.LIVE && duration <= 0L) {
-                        1f
-                    } else {
-                        (safePosition.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
+                    val liveProgressFraction = when {
+                        !hasKnownDuration && mediaItem.type == MediaType.LIVE -> 1f
+                        !hasKnownDuration -> 0f
+                        else -> (safePosition.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
                     }
-                    val displayedFraction = if (isScrubbing) scrubFraction else liveProgressFraction
+                    val displayedFraction = if (isScrubbing && canSeek) scrubFraction else liveProgressFraction
                     val smoothFraction by animateFloatAsState(
                         targetValue = displayedFraction,
-                        animationSpec = tween(durationMillis = if (isScrubbing) 0 else 150),
+                        animationSpec = tween(durationMillis = if (isScrubbing) 0 else 120),
                         label = "timeline_progress"
                     )
-                    val displayedTimeMs = if (isScrubbing) {
-                        (scrubFraction * safeDuration).toLong()
+                    val displayedTimeMs = if (isScrubbing && canSeek) {
+                        ExoPlayerWrapper.computeFractionSeekTargetMs(scrubFraction, actualDuration)
                     } else {
                         currentPos.coerceAtLeast(0L)
                     }
@@ -1037,97 +1085,141 @@ fun PlayerScreen(
                             modifier = Modifier.widthIn(min = 44.dp)
                         )
 
-                        // Thin elegant progress bar with Red indicator and smooth circular seek handle
+                        // Interactive 48dp touch-target progress bar supporting both tapping and dragging
+                        val thumbScale by animateFloatAsState(
+                            targetValue = if (isScrubbing) 1.35f else 1.0f,
+                            animationSpec = spring(stiffness = Spring.StiffnessMedium),
+                            label = "thumb_scale"
+                        )
+
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .height(28.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            val thumbScale by animateFloatAsState(
-                                targetValue = if (isScrubbing) 1.35f else 1.0f,
-                                animationSpec = spring(stiffness = Spring.StiffnessMedium),
-                                label = "thumb_scale"
-                            )
-
-                            // Custom sleek track & glowing circular thumb drawn behind the interactive Slider
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(22.dp)
-                                    .drawWithCache {
-                                        val trackHeight = 4.dp.toPx()
-                                        val trackRadius = CornerRadius(trackHeight / 2f, trackHeight / 2f)
-                                        val activeGrad = Brush.horizontalGradient(
-                                            colors = listOf(KrasRedDark, KrasRed, KrasRedBright)
+                                .height(48.dp)
+                                .testTag("player_seek_bar")
+                                .semantics {
+                                    progressBarRangeInfo = ProgressBarRangeInfo(
+                                        current = displayedFraction,
+                                        range = 0f..1f
+                                    )
+                                    if (canSeek) {
+                                        setProgress { targetFrac ->
+                                            val clamped = targetFrac.coerceIn(0f, 1f)
+                                            scrubFraction = clamped
+                                            lastSeekInteractionTick++
+                                            playerWrapper.seekToFraction(clamped) is SeekResult.Seeked
+                                        }
+                                    }
+                                }
+                                .pointerInput(canSeek, actualDuration) {
+                                    detectTapGestures(
+                                        onTap = { offset ->
+                                            lastSeekInteractionTick++
+                                            if (!canSeek || size.width <= 0) {
+                                                seekFeedbackText = "Seeking not supported"
+                                                return@detectTapGestures
+                                            }
+                                            val frac = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                            scrubFraction = frac
+                                            if (playerWrapper.seekToFraction(frac) is SeekResult.NotSeekable) {
+                                                seekFeedbackText = "Seeking not supported"
+                                            }
+                                        }
+                                    )
+                                }
+                                .pointerInput(canSeek, actualDuration) {
+                                    detectHorizontalDragGestures(
+                                        onDragStart = { offset ->
+                                            lastSeekInteractionTick++
+                                            if (!canSeek || size.width <= 0) {
+                                                seekFeedbackText = "Seeking not supported"
+                                                return@detectHorizontalDragGestures
+                                            }
+                                            isScrubbing = true
+                                            playerWrapper.setScrubbing(true)
+                                            scrubFraction = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                        },
+                                        onHorizontalDrag = { change, _ ->
+                                            if (!canSeek || size.width <= 0) return@detectHorizontalDragGestures
+                                            change.consume()
+                                            isScrubbing = true
+                                            playerWrapper.setScrubbing(true)
+                                            scrubFraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                        },
+                                        onDragEnd = {
+                                            if (!canSeek) {
+                                                playerWrapper.setScrubbing(false)
+                                                isScrubbing = false
+                                                return@detectHorizontalDragGestures
+                                            }
+                                            lastSeekInteractionTick++
+                                            val finalFrac = scrubFraction.coerceIn(0f, 1f)
+                                            val result = playerWrapper.seekToFraction(finalFrac)
+                                            playerWrapper.setScrubbing(false)
+                                            isScrubbing = false
+                                            if (result is SeekResult.NotSeekable) {
+                                                seekFeedbackText = "Seeking not supported"
+                                            }
+                                        },
+                                        onDragCancel = {
+                                            playerWrapper.setScrubbing(false)
+                                            isScrubbing = false
+                                        }
+                                    )
+                                }
+                                .drawWithCache {
+                                    val trackHeight = 4.dp.toPx()
+                                    val trackRadius = CornerRadius(trackHeight / 2f, trackHeight / 2f)
+                                    val activeGrad = Brush.horizontalGradient(
+                                        colors = listOf(KrasRedDark, KrasRed, KrasRedBright)
+                                    )
+                                    onDrawBehind {
+                                        val cy = size.height / 2f
+                                        val trackTop = cy - trackHeight / 2f
+                                        // Inactive track
+                                        drawRoundRect(
+                                            color = Color.White.copy(alpha = 0.24f),
+                                            topLeft = Offset(0f, trackTop),
+                                            size = androidx.compose.ui.geometry.Size(size.width, trackHeight),
+                                            cornerRadius = trackRadius
                                         )
-                                        onDrawBehind {
-                                            val cy = size.height / 2f
-                                            val trackTop = cy - trackHeight / 2f
-                                            // Inactive track
+                                        // Active red progress indicator
+                                        val activeWidth = (size.width * smoothFraction).coerceIn(0f, size.width)
+                                        if (activeWidth > 0f) {
                                             drawRoundRect(
-                                                color = Color.White.copy(alpha = 0.24f),
+                                                brush = activeGrad,
                                                 topLeft = Offset(0f, trackTop),
-                                                size = androidx.compose.ui.geometry.Size(size.width, trackHeight),
+                                                size = androidx.compose.ui.geometry.Size(activeWidth, trackHeight),
                                                 cornerRadius = trackRadius
                                             )
-                                            // Active red progress indicator
-                                            val activeWidth = (size.width * smoothFraction).coerceIn(0f, size.width)
-                                            if (activeWidth > 0f) {
-                                                drawRoundRect(
-                                                    brush = activeGrad,
-                                                    topLeft = Offset(0f, trackTop),
-                                                    size = androidx.compose.ui.geometry.Size(activeWidth, trackHeight),
-                                                    cornerRadius = trackRadius
-                                                )
-                                            }
+                                        }
+                                        if (canSeek || mediaItem.type != MediaType.LIVE) {
+                                            val handleAlpha = if (canSeek) 1f else 0.45f
                                             // Subtle red glow halo around circular seek handle
                                             val thumbX = activeWidth.coerceIn(6.dp.toPx(), (size.width - 6.dp.toPx()).coerceAtLeast(6.dp.toPx()))
                                             drawCircle(
-                                                color = KrasRed.copy(alpha = 0.42f),
+                                                color = KrasRed.copy(alpha = 0.42f * handleAlpha),
                                                 radius = 10.dp.toPx() * thumbScale,
                                                 center = Offset(thumbX, cy)
                                             )
                                             // Crisp circular seek handle with white core & red rim
                                             drawCircle(
-                                                color = KrasRedBright,
+                                                color = KrasRedBright.copy(alpha = handleAlpha),
                                                 radius = 6.5.dp.toPx() * thumbScale,
                                                 center = Offset(thumbX, cy)
                                             )
                                             drawCircle(
-                                                color = Color.White,
+                                                color = Color.White.copy(alpha = handleAlpha),
                                                 radius = 3.dp.toPx() * thumbScale,
                                                 center = Offset(thumbX, cy)
                                             )
                                         }
                                     }
-                            )
-
-                            // Functional ExoPlayer Slider (transparent colors so our custom track/handle shines while preserving full touch/drag & testTag)
-                            Slider(
-                                value = displayedFraction,
-                                onValueChange = { frac ->
-                                    isScrubbing = true
-                                    scrubFraction = frac.coerceIn(0f, 1f)
-                                    val target = (scrubFraction * safeDuration).toLong()
-                                    playerWrapper.seekTo(target)
-                                },
-                                onValueChangeFinished = {
-                                    isScrubbing = false
-                                },
-                                colors = SliderDefaults.colors(
-                                    thumbColor = Color.Transparent,
-                                    activeTrackColor = Color.Transparent,
-                                    inactiveTrackColor = Color.Transparent
-                                ),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("player_seek_bar")
-                            )
-                        }
+                                }
+                        )
 
                         // Total duration on the right (or LIVE badge if live stream has no fixed duration)
-                        if (mediaItem.type == MediaType.LIVE && duration <= 0L) {
+                        if (mediaItem.type == MediaType.LIVE && !hasKnownDuration) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -1153,7 +1245,7 @@ fun PlayerScreen(
                             }
                         } else {
                             Text(
-                                text = formatTime(safeDuration),
+                                text = formatTime(actualDuration),
                                 color = TextSecondary,
                                 fontSize = 12.sp,
                                 fontFamily = OutfitFontFamily,
@@ -1948,12 +2040,13 @@ private fun CenterSeekButton(
     icon: ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.88f else 1f,
+        targetValue = if (isPressed && enabled) 0.88f else 1f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMedium
@@ -1967,6 +2060,7 @@ private fun CenterSeekButton(
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
+                alpha = if (enabled) 1f else 0.45f
             }
             .clip(CircleShape)
             .drawWithCache {

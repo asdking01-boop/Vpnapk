@@ -24,6 +24,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -315,6 +316,8 @@ class KrasMediaPlaybackService : MediaSessionService() {
                 .setAllowCrossProtocolRedirects(true)
 
             val dataSourceFactory = DefaultDataSource.Factory(appContext, httpDataSourceFactory)
+            val extractorsFactory = DefaultExtractorsFactory()
+                .setConstantBitrateSeekingEnabled(true)
             val loadControl = createLoadControl(bufferSetting)
             val selector = getOrCreateTrackSelector(appContext)
 
@@ -326,7 +329,9 @@ class KrasMediaPlaybackService : MediaSessionService() {
             val player = ExoPlayer.Builder(appContext)
                 .setTrackSelector(selector)
                 .setLoadControl(loadControl)
-                .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+                .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory))
+                .setSeekBackIncrementMs(10_000L)
+                .setSeekForwardIncrementMs(10_000L)
                 .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
                 .setHandleAudioBecomingNoisy(true)
                 .setWakeMode(C.WAKE_MODE_NETWORK)

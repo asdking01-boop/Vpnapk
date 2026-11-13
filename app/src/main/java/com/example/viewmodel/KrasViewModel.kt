@@ -1920,16 +1920,38 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             _activeLiveChannel.value = null
             _isLiveFullscreen.value = false
+            KrasMediaPlaybackService.updateChannelNavigationSupport(
+                canSkipPrevNext = false,
+                onPrevious = null,
+                onNext = null,
+                onStop = { stopPlayback() }
+            )
         }
         _nowPlayingItem.value = mediaItem
         _nowPlayingEpisode.value = episode
+
+        fun buildMetadataFor(ep: Episode?): PlaybackNotificationMetadata {
+            val isLive = mediaItem.type == MediaType.LIVE && ep == null
+            return PlaybackNotificationMetadata(
+                mediaId = ep?.id ?: mediaItem.id,
+                title = ep?.title?.ifBlank { mediaItem.name } ?: mediaItem.name,
+                subtitle = when {
+                    ep != null -> "${mediaItem.name} • S${ep.seasonNumber}:E${ep.episodeNum}"
+                    isLive -> "KRAS TV • ${mediaItem.categoryName.ifBlank { "Live Broadcast" }}"
+                    else -> "KRAS TV • ${mediaItem.categoryName.ifBlank { "Cinema" }}"
+                },
+                artworkUrl = ep?.coverUrl?.ifBlank { mediaItem.streamIcon }
+                    ?: mediaItem.streamIcon.ifBlank { mediaItem.backdrop },
+                isLive = isLive
+            )
+        }
 
         val urlToPlay = (episode?.streamUrl?.takeIf { it.isNotBlank() } ?: mediaItem.streamUrl).trim()
         val previousProgress = _watchHistory.value.find { it.mediaId == (episode?.id ?: mediaItem.id) }
         val startPos = previousProgress?.positionMs ?: 0L
 
         if (urlToPlay.isNotBlank()) {
-            playerWrapper.play(urlToPlay, startPos)
+            playerWrapper.play(urlToPlay, startPos, metadata = buildMetadataFor(episode))
             startPositionTracker()
         } else if (mediaItem.type == MediaType.SERIES) {
             // Immediately enter the unified player in PREPARING state and resolve the episode URL in-place
@@ -1960,7 +1982,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     if (resolvedEpisode != null && resolvedEpisode.streamUrl.isNotBlank()) {
                         _nowPlayingEpisode.value = resolvedEpisode
                         val epProgress = _watchHistory.value.find { it.mediaId == resolvedEpisode.id }
-                        playerWrapper.play(resolvedEpisode.streamUrl, epProgress?.positionMs ?: startPos)
+                        playerWrapper.play(
+                            url = resolvedEpisode.streamUrl,
+                            startPositionMs = epProgress?.positionMs ?: startPos,
+                            metadata = buildMetadataFor(resolvedEpisode)
+                        )
                         startPositionTracker()
                     } else {
                         playerWrapper.failWithError("Unable to load episode stream URL.")
@@ -1973,7 +1999,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         } else {
-            playerWrapper.play(urlToPlay, startPos)
+            playerWrapper.play(urlToPlay, startPos, metadata = buildMetadataFor(episode))
             startPositionTracker()
         }
 

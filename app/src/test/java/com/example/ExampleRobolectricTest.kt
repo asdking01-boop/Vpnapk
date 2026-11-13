@@ -2048,6 +2048,183 @@ class ExampleRobolectricTest {
     assertEquals("Connor's Wedding", playedEpisode?.title)
     assertEquals("http://iptv.stream.server:8080/series/user/pass/ep55_3.mp4", playedEpisode?.streamUrl)
   }
+
+  private class FakeExoPlayerController(
+    var mediaItemCount: Int = 1,
+    var playbackState: Int = androidx.media3.common.Player.STATE_READY,
+    var currentPositionMs: Long = 0L,
+    var durationMs: Long = 120_000L,
+    var isSeekableItem: Boolean = true,
+    var seekCommandAvailable: Boolean = true
+  ) {
+    val seekCalls = mutableListOf<Long>()
+    val listeners = mutableListOf<androidx.media3.common.Player.Listener>()
+
+    fun asExoPlayer(): androidx.media3.exoplayer.ExoPlayer {
+      val handler = java.lang.reflect.InvocationHandler { _, method, args ->
+        when (method.name) {
+          "addListener" -> {
+            (args?.getOrNull(0) as? androidx.media3.common.Player.Listener)?.let { listeners.add(it) }
+            Unit
+          }
+          "removeListener" -> {
+            (args?.getOrNull(0) as? androidx.media3.common.Player.Listener)?.let { listeners.remove(it) }
+            Unit
+          }
+          "getMediaItemCount" -> mediaItemCount
+          "getPlaybackState" -> playbackState
+          "getCurrentPosition" -> currentPositionMs
+          "getDuration" -> durationMs
+          "isCurrentMediaItemSeekable" -> isSeekableItem
+          "isCommandAvailable" -> {
+            val cmd = args?.getOrNull(0) as? Int ?: -1
+            if (cmd == androidx.media3.common.Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM) {
+              seekCommandAvailable
+            } else {
+              true
+            }
+          }
+          "seekTo" -> {
+            val pos = when (args?.size ?: 0) {
+              1 -> (args?.get(0) as? Long) ?: 0L
+              2 -> (args?.get(1) as? Long) ?: 0L
+              else -> 0L
+            }
+            seekCalls.add(pos)
+            Unit
+          }
+          "getCurrentTracks" -> androidx.media3.common.Tracks.EMPTY
+          "getPlayWhenReady" -> true
+          "isPlaying" -> playbackState == androidx.media3.common.Player.STATE_READY
+          else -> when (method.returnType) {
+            java.lang.Boolean.TYPE -> false
+            java.lang.Integer.TYPE -> 0
+            java.lang.Long.TYPE -> 0L
+            java.lang.Float.TYPE -> 0f
+            java.lang.Double.TYPE -> 0.0
+            else -> null
+          }
+        }
+      }
+      return java.lang.reflect.Proxy.newProxyInstance(
+        androidx.media3.exoplayer.ExoPlayer::class.java.classLoader,
+        arrayOf(androidx.media3.exoplayer.ExoPlayer::class.java),
+        handler
+      ) as androidx.media3.exoplayer.ExoPlayer
+    }
+  }
+
+  @Test
+  fun `exoPlayerWrapper forward and rewind 10s seek accurately and clamp to duration`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val wrapper = com.example.player.ExoPlayerWrapper(context)
+    val fake = FakeExoPlayerController(
+      currentPositionMs = 25_000L,
+      durationMs = 120_000L,
+      isSeekableItem = true,
+      seekCommandAvailable = true
+    )
+    wrapper.attachPlayerForTesting(fake.asExoPlayer())
+
+    assertTrue(wrapper.isSeekable.value)
+
+    // Forward 10s from 25_000 -> 35_000
+    val fwdResult = wrapper.seekForward(10_000L)
+    assertTrue(fwdResult is com.example.player.SeekResult.Seeked)
+    assertEquals(35_000L, (fwdResult as com.example.player.SeekResult.Seeked).targetPositionMs)
+    assertEquals(35_000L, wrapper.currentPosition.value)
+    assertEquals(listOf(35_000L), fake.seekCalls)
+
+    // Rewind 10s from updated position (simulate settled player at 35_000)
+    fake.currentPositionMs = 35_000L
+    val rewResult = wrapper.seekBackward(10_000L)
+    assertTrue(rewResult is com.example.player.SeekResult.Seeked)
+    assertEquals(25_000L, (rewResult as com.example.player.SeekResult.Seeked).targetPositionMs)
+    assertEquals(25_000L, wrapper.currentPosition.value)
+
+    // Rewind 10s near start clamps to 0L
+    wrapper.seekTo(4_000L)
+    fake.currentPositionMs = 4_000L
+    val clampStartResult = wrapper.seekBackward(10_000L) as com.example.player.SeekResult.Seeked
+    assertEquals(0L, clampStartResult.targetPositionMs)
+
+    // Forward 10s near end clamps to duration (120_000L)
+    wrapper.seekTo(115_000L)
+    fake.currentPositionMs = 115_000L
+    val clampEndResult = wrapper.seekForward(10_000L) as com.example.player.SeekResult.Seeked
+    assertEquals(120_000L, clampEndResult.targetPositionMs)
+  }
+
+  @Test
+  fun `exoPlayerWrapper progress bar fraction seek calculates exact position and guards tracker override`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val wrapper = com.example.player.ExoPlayerWrapper(context)
+    val fake = FakeExoPlayerController(
+      playbackState = androidx.media3.common.Player.STATE_READY,
+      currentPositionMs = 10_000L,
+      durationMs = 200_000L,
+      isSeekableItem = true,
+      seekCommandAvailable = true
+    )
+    wrapper.attachPlayerForTesting(fake.asExoPlayer())
+
+    // Simulate tap/drag seek to 50% (100_000ms) while ExoPlayer enters BUFFERING and temporarily reports pre-seek 10_000ms
+    val seekResult = wrapper.seekToFraction(0.5f)
+    assertEquals(com.example.player.SeekResult.Seeked(100_000L, 200_000L), seekResult)
+    assertEquals(100_000L, wrapper.currentPosition.value)
+
+    fake.playbackState = androidx.media3.common.Player.STATE_BUFFERING
+    fake.currentPositionMs = 10_000L
+    // Periodic tracker tick MUST NOT reset currentPosition back to 10_000ms while seek is settling
+    wrapper.updatePosition()
+    assertEquals(100_000L, wrapper.currentPosition.value)
+
+    // Chaining a second +10s tap while still buffering advances from pending 100_000 -> 110_000
+    val secondFwd = wrapper.seekForward(10_000L) as com.example.player.SeekResult.Seeked
+    assertEquals(110_000L, secondFwd.targetPositionMs)
+    assertEquals(110_000L, wrapper.currentPosition.value)
+
+    // Once player settles to STATE_READY near 110_000ms, updatePosition follows live playback
+    fake.playbackState = androidx.media3.common.Player.STATE_READY
+    fake.currentPositionMs = 110_400L
+    wrapper.updatePosition()
+    assertEquals(110_400L, wrapper.currentPosition.value)
+  }
+
+  @Test
+  fun `exoPlayerWrapper does not falsely enable seeking for non-seekable or live streams`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val wrapper = com.example.player.ExoPlayerWrapper(context)
+
+    // Case 1: Live stream with TIME_UNSET duration & non-seekable item
+    val liveFake = FakeExoPlayerController(
+      currentPositionMs = 45_000L,
+      durationMs = androidx.media3.common.C.TIME_UNSET,
+      isSeekableItem = false,
+      seekCommandAvailable = false
+    )
+    wrapper.attachPlayerForTesting(liveFake.asExoPlayer())
+
+    assertFalse(wrapper.isSeekable.value)
+    assertFalse(wrapper.canSeekCurrentMedia())
+    assertEquals(com.example.player.SeekResult.NotSeekable, wrapper.seekForward(10_000L))
+    assertEquals(com.example.player.SeekResult.NotSeekable, wrapper.seekBackward(10_000L))
+    assertEquals(com.example.player.SeekResult.NotSeekable, wrapper.seekToFraction(0.5f))
+    assertTrue(liveFake.seekCalls.isEmpty())
+
+    // Case 2: Duration known but COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM unavailable
+    val lockedFake = FakeExoPlayerController(
+      currentPositionMs = 10_000L,
+      durationMs = 90_000L,
+      isSeekableItem = true,
+      seekCommandAvailable = false
+    )
+    wrapper.attachPlayerForTesting(lockedFake.asExoPlayer())
+    assertFalse(wrapper.isSeekable.value)
+    assertEquals(com.example.player.SeekResult.NotSeekable, wrapper.seekForward(10_000L))
+    assertTrue(lockedFake.seekCalls.isEmpty())
+  }
 }
+
 
 
