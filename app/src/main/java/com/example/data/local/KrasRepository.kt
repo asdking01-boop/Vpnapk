@@ -1306,6 +1306,15 @@ class KrasRepository(context: Context) {
         }
     }
 
+    suspend fun getItemById(id: String): MediaItem? = withContext(Dispatchers.IO) {
+        if (id.isBlank()) return@withContext null
+        try {
+            mediaDao.getItemById(id)?.toMediaItem()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     suspend fun getUnenrichedMedia(
         accountId: String,
         type: String,

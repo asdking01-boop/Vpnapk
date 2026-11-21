@@ -2224,7 +2224,300 @@ class ExampleRobolectricTest {
     assertEquals(com.example.player.SeekResult.NotSeekable, wrapper.seekForward(10_000L))
     assertTrue(lockedFake.seekCalls.isEmpty())
   }
+
+  @Test
+  fun `tmdbMetadataMatcher cleans iptv category labels quality tags and validates real synopses`() {
+    val q1 = com.example.data.api.TmdbMetadataMatcher.cleanIptvTitle("NETFLIX | EN | Inception (2010) 4K UHD HEVC [MULTI-SUB]")
+    assertEquals("Inception", q1.cleanTitle)
+    assertEquals("2010", q1.extractedYear)
+
+    val q2 = com.example.data.api.TmdbMetadataMatcher.cleanIptvTitle("AR | أفلام: Dune Part Two (2024) FHD مترجم")
+    assertEquals("Dune Part Two", q2.cleanTitle)
+    assertEquals("2024", q2.extractedYear)
+
+    val q3 = com.example.data.api.TmdbMetadataMatcher.cleanIptvTitle("EN | 1917 [1080p]")
+    assertEquals("1917", q3.cleanTitle)
+
+    // Generic / placeholder synopses MUST be rejected
+    assertFalse(
+      com.example.data.api.TmdbMetadataMatcher.isValidSynopsis(
+        "Experience an extraordinary cinematic story with stunning visuals and immersive audio.",
+        "Inception"
+      )
+    )
+    assertFalse(
+      com.example.data.api.TmdbMetadataMatcher.isValidSynopsis(
+        "An extraordinary story unfolding across space and time with high-stakes conflicts.",
+        "Breaking Bad"
+      )
+    )
+    assertFalse(com.example.data.api.TmdbMetadataMatcher.isValidSynopsis("Story synopsis not available", "Inception"))
+    assertFalse(com.example.data.api.TmdbMetadataMatcher.isValidSynopsis("N/A", "Inception"))
+    assertFalse(com.example.data.api.TmdbMetadataMatcher.isValidSynopsis("Inception", "Inception"))
+    assertFalse(com.example.data.api.TmdbMetadataMatcher.isValidSynopsis("استمتع بمشاهدة هذا الفيلم بجودة عالية وتجربة سينمائية مميزة.", "فيلم"))
+
+    // Real synopses (English & Arabic) MUST be accepted
+    assertTrue(
+      com.example.data.api.TmdbMetadataMatcher.isValidSynopsis(
+        "Cobb, a skilled thief who commits corporate espionage by infiltrating the subconscious of his targets is offered a chance to regain his old life.",
+        "Inception"
+      )
+    )
+    assertTrue(
+      com.example.data.api.TmdbMetadataMatcher.isValidSynopsis(
+        "يدور الفيلم حول لص محترف يتسلل إلى أحلام الآخرين لسرقة أسرارهم من العقل الباطن.",
+        "Inception"
+      )
+    )
+
+    // Strict matching prevents wrong movies/remakes/sequels
+    assertTrue(
+      com.example.data.api.TmdbMetadataMatcher.isConfidentMatch(
+        queryTitle = "EN | Dune (2021) 4K",
+        queryYear = "2021",
+        candidateTitle = "Dune",
+        candidateOriginalTitle = "Dune",
+        candidateYear = "2021"
+      )
+    )
+    // Reject remake from different year
+    assertFalse(
+      com.example.data.api.TmdbMetadataMatcher.isConfidentMatch(
+        queryTitle = "Dune",
+        queryYear = "2021",
+        candidateTitle = "Dune",
+        candidateOriginalTitle = "Dune",
+        candidateYear = "1984"
+      )
+    )
+    // Reject sequel mismatch
+    assertFalse(
+      com.example.data.api.TmdbMetadataMatcher.isConfidentMatch(
+        queryTitle = "Dune",
+        queryYear = "2021",
+        candidateTitle = "Dune: Part Two",
+        candidateOriginalTitle = "Dune: Part Two",
+        candidateYear = "2024"
+      )
+    )
+    // Reject unrelated title
+    assertFalse(
+      com.example.data.api.TmdbMetadataMatcher.isConfidentMatch(
+        queryTitle = "Inception",
+        queryYear = "2010",
+        candidateTitle = "The Deception",
+        candidateOriginalTitle = "The Deception",
+        candidateYear = "2010"
+      )
+    )
+  }
+
+  @Test
+  fun `tmdbDirectClient retrieves arabic overview falls back to english rejects wrong match and caches results`() {
+    var networkCalls = 0
+    val mockHttpClient = okhttp3.OkHttpClient.Builder()
+      .addInterceptor { chain ->
+        networkCalls++
+        val url = chain.request().url.toString()
+        val body = when {
+          url.contains("/search/movie") && url.contains("Inception") -> """
+            {
+              "results": [
+                { "id": 99999, "title": "Inception Documentary", "original_title": "Inception Documentary", "release_date": "2010-08-01", "overview": "A behind the scenes making of featurette." },
+                { "id": 27205, "title": "Inception", "original_title": "Inception", "release_date": "2010-07-15", "overview": "A thief who steals corporate secrets through dream-sharing technology." }
+              ]
+            }
+          """.trimIndent()
+          url.contains("/movie/27205") && url.contains("language=ar") -> """
+            {
+              "id": 27205,
+              "title": "بداية",
+              "original_title": "Inception",
+              "release_date": "2010-07-15",
+              "overview": "",
+              "poster_path": "/inception.jpg",
+              "backdrop_path": "/inception_bg.jpg",
+              "vote_average": 8.4,
+              "runtime": 148,
+              "genres": [{"name": "خيال علمي"}],
+              "credits": { "cast": [{"name": "Leonardo DiCaprio"}], "crew": [{"job": "Director", "name": "Christopher Nolan"}] }
+            }
+          """.trimIndent()
+          url.contains("/movie/27205") && url.contains("language=en-US") -> """
+            {
+              "id": 27205,
+              "title": "Inception",
+              "original_title": "Inception",
+              "release_date": "2010-07-15",
+              "overview": "Cobb, a skilled thief who commits corporate espionage by infiltrating the subconscious of his targets is offered a chance to regain his old life.",
+              "poster_path": "/inception.jpg",
+              "backdrop_path": "/inception_bg.jpg",
+              "vote_average": 8.4,
+              "runtime": 148,
+              "genres": [{"name": "Science Fiction"}],
+              "credits": { "cast": [{"name": "Leonardo DiCaprio"}], "crew": [{"job": "Director", "name": "Christopher Nolan"}] }
+            }
+          """.trimIndent()
+          url.contains("/search/movie") && url.contains("Nonexistent") -> """
+            {
+              "results": [
+                { "id": 555, "title": "Completely Different Film", "original_title": "Completely Different Film", "release_date": "2020-01-01", "overview": "Wrong movie plot that must never be shown." }
+              ]
+            }
+          """.trimIndent()
+          else -> """{"results":[]}"""
+        }
+        okhttp3.Response.Builder()
+          .request(chain.request())
+          .protocol(okhttp3.Protocol.HTTP_1_1)
+          .code(200)
+          .message("OK")
+          .body(okhttp3.ResponseBody.Companion.run { body.toResponseBody(okhttp3.MediaType.Companion.run { "application/json".toMediaType() }) })
+          .build()
+      }
+      .build()
+
+    val directClient = com.example.data.api.TmdbDirectClient(mockHttpClient)
+
+    // 1. Arabic requested -> empty Arabic overview automatically falls back to English by matched ID 27205
+    val result = kotlinx.coroutines.runBlocking {
+      directClient.fetchAccurateMediaMetadata(
+        apiKey = "test_key",
+        rawTitle = "NETFLIX | EN | Inception (2010) 4K HEVC",
+        year = "2010",
+        isSeries = false,
+        tmdbId = 0,
+        preferArabic = true
+      )
+    }
+    assertNotNull(result)
+    assertEquals(27205, result!!.tmdbId)
+    assertTrue(result.overview.contains("infiltrating the subconscious"))
+    assertEquals("Christopher Nolan", result.director)
+
+    // 2. Second lookup hits cache with zero extra network calls
+    val callsAfterFirst = networkCalls
+    val cachedResult = kotlinx.coroutines.runBlocking {
+      directClient.fetchAccurateMediaMetadata(
+        apiKey = "test_key",
+        rawTitle = "NETFLIX | EN | Inception (2010) 4K HEVC",
+        year = "2010",
+        isSeries = false,
+        tmdbId = 0,
+        preferArabic = true
+      )
+    }
+    assertEquals(callsAfterFirst, networkCalls)
+    assertEquals(result.overview, cachedResult?.overview)
+
+    // 3. Unrelated candidate is strictly rejected (returns null rather than wrong overview)
+    val rejected = kotlinx.coroutines.runBlocking {
+      directClient.fetchAccurateMediaMetadata(
+        apiKey = "test_key",
+        rawTitle = "EN | Nonexistent Mystery Film (2024)",
+        year = "2024",
+        isSeries = false,
+        tmdbId = 0,
+        preferArabic = false
+      )
+    }
+    assertNull(rejected)
+  }
+
+  @Test
+  fun `tmdbProxyClient preserves valid iptv plot first and falls back to verified tmdb overview with arabic fallback`() {
+    val mockHttpClient = okhttp3.OkHttpClient.Builder()
+      .addInterceptor { chain ->
+        val url = chain.request().url.toString()
+        val body = when {
+          url.contains("/api/tmdb/tv") && url.contains("language=ar") -> """
+            {
+              "tmdbId": 1396,
+              "title": "اختلال ضال",
+              "originalTitle": "Breaking Bad",
+              "releaseYear": "2008",
+              "overview": "يتحول معلم كيمياء في مدرسة ثانوية بعد تشخيص إصابته بالسرطان إلى عالم الجريمة لتأمين مستقبل عائلته."
+            }
+          """.trimIndent()
+          url.contains("/api/tmdb/movie") && url.contains("WrongMatchTest") -> """
+            {
+              "tmdbId": 888,
+              "title": "Some Unrelated Comedy",
+              "originalTitle": "Some Unrelated Comedy",
+              "releaseYear": "2015",
+              "overview": "A totally unrelated movie synopsis that should be rejected."
+            }
+          """.trimIndent()
+          else -> "{}"
+        }
+        okhttp3.Response.Builder()
+          .request(chain.request())
+          .protocol(okhttp3.Protocol.HTTP_1_1)
+          .code(200)
+          .message("OK")
+          .body(okhttp3.ResponseBody.Companion.run { body.toResponseBody(okhttp3.MediaType.Companion.run { "application/json".toMediaType() }) })
+          .build()
+      }
+      .build()
+
+    val proxyClient = com.example.data.api.TmdbProxyClient(mockHttpClient)
+
+    // 1. Arabic TV series lookup returns verified Arabic synopsis
+    val arSeriesMeta = kotlinx.coroutines.runBlocking {
+      proxyClient.fetchAccurateMediaMetadata(
+        rawProxyUrl = "https://kras-tmdb-proxy.asdking01.workers.dev",
+        rawTitle = "US | Breaking Bad (2008) FHD",
+        year = "2008",
+        isSeries = true,
+        tmdbId = 0,
+        preferArabic = true
+      )
+    }
+    assertNotNull(arSeriesMeta)
+    assertEquals(1396, arSeriesMeta!!.tmdbId)
+    assertTrue(com.example.data.api.TmdbMetadataMatcher.containsArabicScript(arSeriesMeta.overview))
+
+    // 2. Valid IPTV plot is preserved first when enriching by default
+    val movieWithIptvPlot = com.example.data.model.MediaItem(
+      id = "vod_1",
+      streamId = 1,
+      name = "Breaking Bad",
+      type = MediaType.SERIES,
+      plot = "A high school chemistry teacher diagnosed with inoperable lung cancer turns to manufacturing methamphetamine to secure his family's future."
+    )
+    val enrichedPreservingIptv = com.example.data.api.TmdbProxyClient.enrichMediaItem(
+      item = movieWithIptvPlot,
+      tmdb = arSeriesMeta,
+      overrideValidExistingPlot = false
+    )
+    assertTrue(enrichedPreservingIptv.plot.contains("high school chemistry teacher"))
+
+    // 3. Generic IPTV plot is replaced by verified TMDb overview
+    val movieWithGenericPlot = movieWithIptvPlot.copy(
+      plot = "An extraordinary story unfolding across space and time with high-stakes conflicts."
+    )
+    val enrichedReplacingGeneric = com.example.data.api.TmdbProxyClient.enrichMediaItem(
+      item = movieWithGenericPlot,
+      tmdb = arSeriesMeta,
+      overrideValidExistingPlot = false
+    )
+    assertTrue(com.example.data.api.TmdbMetadataMatcher.containsArabicScript(enrichedReplacingGeneric.plot))
+
+    // 4. Mismatched proxy response without explicit tmdbId is strictly rejected
+    val rejectedProxyMatch = kotlinx.coroutines.runBlocking {
+      proxyClient.fetchAccurateMediaMetadata(
+        rawProxyUrl = "https://kras-tmdb-proxy.asdking01.workers.dev",
+        rawTitle = "EN | WrongMatchTest (2024)",
+        year = "2024",
+        isSeries = false,
+        tmdbId = 0,
+        preferArabic = false
+      )
+    }
+    assertNull(rejectedProxyMatch)
+  }
 }
+
 
 
 

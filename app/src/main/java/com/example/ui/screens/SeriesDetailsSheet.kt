@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.data.model.*
+import com.example.ui.components.DetailsOverviewSection
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.theme.*
 
@@ -257,11 +258,13 @@ fun SeriesDetailsSheet(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Synopsis & Cast
-                    Text(
-                        text = details.plot.ifEmpty { "An extraordinary story unfolding across space and time with high-stakes conflicts." },
-                        color = TextSecondary,
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp
+                    DetailsOverviewSection(
+                        itemKey = "${seriesItem.id}_${details.seriesId}",
+                        mediaTitle = details.name,
+                        sectionTitle = "Overview",
+                        plot = details.plot,
+                        isLoading = isLoading,
+                        isArabic = false
                     )
 
                     if (details.cast.isNotEmpty()) {

@@ -113,8 +113,10 @@ class MainActivity : ComponentActivity() {
                 var currentScreen by remember { mutableStateOf(NavScreen.HOME) }
                 var isSearchOpen by remember { mutableStateOf(false) }
                 var isLoginOpen by remember { mutableStateOf(false) }
-                var selectedSeriesForDetails by remember { mutableStateOf<MediaItem?>(null) }
-                var selectedMovieForDetails by remember { mutableStateOf<MediaItem?>(null) }
+
+                val selectedMovieForDetails by viewModel.selectedMovieForDetails.collectAsState()
+                val selectedSeriesForDetails by viewModel.selectedSeriesForDetails.collectAsState()
+                val isMovieDetailsLoading by viewModel.isMovieDetailsLoading.collectAsState()
 
                 val activeAccount by viewModel.activeAccount.collectAsState()
                 val accounts by viewModel.accounts.collectAsState()
@@ -173,8 +175,7 @@ class MainActivity : ComponentActivity() {
                     if (navigateToSettingsFromAuth) {
                         isSearchOpen = false
                         isLoginOpen = false
-                        selectedSeriesForDetails = null
-                        selectedMovieForDetails = null
+                        viewModel.dismissMediaDetails()
                         currentScreen = NavScreen.SETTINGS
                         viewModel.consumeNavigateToSettingsFromAuth()
                     }
@@ -231,8 +232,8 @@ class MainActivity : ComponentActivity() {
                     when {
                         nowPlayingItem != null -> viewModel.stopPlayback()
                         currentScreen == NavScreen.LIVE_TV && isLiveFullscreen -> viewModel.setLiveFullscreen(false)
-                        selectedMovieForDetails != null -> selectedMovieForDetails = null
-                        selectedSeriesForDetails != null -> selectedSeriesForDetails = null
+                        selectedMovieForDetails != null -> viewModel.dismissMovieDetails()
+                        selectedSeriesForDetails != null -> viewModel.dismissSeriesDetails()
                         isSearchOpen -> isSearchOpen = false
                         isLoginOpen -> isLoginOpen = false
                         currentScreen != NavScreen.HOME -> {
@@ -377,17 +378,13 @@ class MainActivity : ComponentActivity() {
                         onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                         onMediaClick = { item ->
                             when (item.type) {
-                                MediaType.SERIES -> {
-                                    viewModel.loadSeriesDetails(item)
-                                    selectedSeriesForDetails = item
+                                MediaType.SERIES, MediaType.MOVIE -> {
+                                    viewModel.showMediaDetails(item)
                                 }
                                 MediaType.LIVE -> {
                                     isSearchOpen = false
                                     currentScreen = NavScreen.LIVE_TV
                                     viewModel.selectLiveChannel(item)
-                                }
-                                MediaType.MOVIE -> {
-                                    selectedMovieForDetails = item
                                 }
                             }
                         },
@@ -457,16 +454,12 @@ class MainActivity : ComponentActivity() {
                                         onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                                         onMediaClick = { item ->
                                             when (item.type) {
-                                                MediaType.SERIES -> {
-                                                    viewModel.loadSeriesDetails(item)
-                                                    selectedSeriesForDetails = item
+                                                MediaType.SERIES, MediaType.MOVIE -> {
+                                                    viewModel.showMediaDetails(item)
                                                 }
                                                 MediaType.LIVE -> {
                                                     currentScreen = NavScreen.LIVE_TV
                                                     viewModel.selectLiveChannel(item)
-                                                }
-                                                MediaType.MOVIE -> {
-                                                    selectedMovieForDetails = item
                                                 }
                                             }
                                         },
@@ -485,7 +478,7 @@ class MainActivity : ComponentActivity() {
                                         watchHistory = watchHistory,
                                         isFavorite = { id -> viewModel.isFavorite(id) },
                                         onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
-                                        onMovieClick = { movie -> selectedMovieForDetails = movie },
+                                        onMovieClick = { movie -> viewModel.showMediaDetails(movie) },
                                         cardStyle = userSettings.cardStyle,
                                         totalCount = totalMoviesCount,
                                         latestMoviesForCategory = latestMoviesForCategory,
@@ -503,8 +496,7 @@ class MainActivity : ComponentActivity() {
                                         isFavorite = { id -> viewModel.isFavorite(id) },
                                         onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
                                         onSeriesClick = { s ->
-                                            viewModel.loadSeriesDetails(s)
-                                            selectedSeriesForDetails = s
+                                            viewModel.showMediaDetails(s)
                                         },
                                         cardStyle = userSettings.cardStyle,
                                         totalCount = totalSeriesCount,
@@ -690,75 +682,75 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
+                    }
+                    }
 
-                        // Netflix-Style Movie Details Screen Overlay with Smooth Transitions
-                        androidx.compose.animation.AnimatedVisibility(
-                            visible = selectedMovieForDetails != null && nowPlayingItem == null,
-                            enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)),
-                            exit = fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            val activeMovie = selectedMovieForDetails
-                            if (activeMovie != null) {
-                                MovieDetailsScreen(
-                                    movie = activeMovie,
-                                    allMovies = movies,
-                                    isFavorite = viewModel.isFavorite(activeMovie.id),
-                                    onToggleFavorite = { viewModel.toggleFavorite(activeMovie) },
-                                    onPlayMovie = { movieToPlay ->
-                                        selectedMovieForDetails = null
-                                        viewModel.startPlayback(movieToPlay)
-                                    },
-                                    onMovieClick = { nextMovie ->
-                                        selectedMovieForDetails = nextMovie
-                                    },
-                                    onBack = { selectedMovieForDetails = null },
-                                    watchHistory = watchHistory,
-                                    isArabic = userSettings.language.equals("Arabic", ignoreCase = true)
-                                )
-                            }
-                        }
-
-                        // Netflix-Style Series Details Screen Overlay with Smooth Transitions
-                        androidx.compose.animation.AnimatedVisibility(
-                            visible = selectedSeriesForDetails != null && nowPlayingItem == null,
-                            enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)),
-                            exit = fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
-                            modifier = Modifier.fillMaxSize()
-                        ) {
-                            val activeSeries = selectedSeriesForDetails
-                            if (activeSeries != null) {
-                                SeriesDetailsScreen(
-                                    seriesItem = activeSeries,
-                                    seriesDetails = currentSeriesDetails,
-                                    allSeries = series,
-                                    isLoading = isSeriesDetailsLoading,
-                                    onDismiss = { selectedSeriesForDetails = null },
-                                    onPlayEpisode = { seriesItem, episode ->
-                                        selectedSeriesForDetails = null
-                                        viewModel.startPlayback(seriesItem, episode)
-                                    },
-                                    onDownloadEpisode = { seriesItem, episode ->
-                                        viewModel.downloadItem(
-                                            seriesItem.copy(
-                                                id = episode.id,
-                                                name = "${seriesItem.name} - ${episode.title}",
-                                                streamUrl = episode.streamUrl
-                                            )
-                                        )
-                                    },
-                                    isFavorite = viewModel.isFavorite(activeSeries.id),
-                                    onToggleFavorite = { viewModel.toggleFavorite(activeSeries) },
-                                    watchHistory = watchHistory,
-                                    onSeriesClick = { nextSeries ->
-                                        viewModel.loadSeriesDetails(nextSeries)
-                                        selectedSeriesForDetails = nextSeries
-                                    },
-                                    isArabic = userSettings.language.equals("Arabic", ignoreCase = true)
-                                )
-                            }
+                    // Netflix-Style Movie Details Screen Overlay (works across Home, Search, Movies, Favorites & Recommendations)
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = !isSplashActive && selectedMovieForDetails != null && nowPlayingItem == null,
+                        enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)),
+                        exit = fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        val activeMovie = selectedMovieForDetails
+                        if (activeMovie != null) {
+                            MovieDetailsScreen(
+                                movie = activeMovie,
+                                allMovies = movies,
+                                isFavorite = viewModel.isFavorite(activeMovie.id),
+                                onToggleFavorite = { viewModel.toggleFavorite(activeMovie) },
+                                onPlayMovie = { movieToPlay ->
+                                    viewModel.dismissMovieDetails()
+                                    viewModel.startPlayback(movieToPlay)
+                                },
+                                onMovieClick = { nextMovie ->
+                                    viewModel.showMediaDetails(nextMovie)
+                                },
+                                onBack = { viewModel.dismissMovieDetails() },
+                                watchHistory = watchHistory,
+                                isLoadingDetails = isMovieDetailsLoading,
+                                isArabic = userSettings.language.equals("Arabic", ignoreCase = true)
+                            )
                         }
                     }
+
+                    // Netflix-Style Series Details Screen Overlay (works across Home, Search, Series, Favorites & Recommendations)
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = !isSplashActive && selectedSeriesForDetails != null && nowPlayingItem == null,
+                        enter = fadeIn(animationSpec = tween(220, easing = FastOutSlowInEasing)),
+                        exit = fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        val activeSeries = selectedSeriesForDetails
+                        if (activeSeries != null) {
+                            SeriesDetailsScreen(
+                                seriesItem = activeSeries,
+                                seriesDetails = currentSeriesDetails,
+                                allSeries = series,
+                                isLoading = isSeriesDetailsLoading,
+                                onDismiss = { viewModel.dismissSeriesDetails() },
+                                onPlayEpisode = { seriesItem, episode ->
+                                    viewModel.dismissSeriesDetails()
+                                    viewModel.startPlayback(seriesItem, episode)
+                                },
+                                onDownloadEpisode = { seriesItem, episode ->
+                                    viewModel.downloadItem(
+                                        seriesItem.copy(
+                                            id = episode.id,
+                                            name = "${seriesItem.name} - ${episode.title}",
+                                            streamUrl = episode.streamUrl
+                                        )
+                                    )
+                                },
+                                isFavorite = viewModel.isFavorite(activeSeries.id),
+                                onToggleFavorite = { viewModel.toggleFavorite(activeSeries) },
+                                watchHistory = watchHistory,
+                                onSeriesClick = { nextSeries ->
+                                    viewModel.showMediaDetails(nextSeries)
+                                },
+                                isArabic = userSettings.language.equals("Arabic", ignoreCase = true)
+                            )
+                        }
                     }
 
                     // Unified Seamless Fullscreen Video Player Overlay

@@ -89,7 +89,8 @@ data class TmdbMediaMetadata(
     val cast: String,
     val director: String,
     val runtimeMinutes: Int = 0,
-    val seasons: List<TmdbSeasonSummary> = emptyList()
+    val seasons: List<TmdbSeasonSummary> = emptyList(),
+    val originalTitle: String = ""
 )
 
 data class TmdbRequestTokenResult(
@@ -158,6 +159,7 @@ class TmdbProxyClient(
     private val movieCache = ConcurrentHashMap<String, TmdbMediaMetadata>()
     private val tvCache = ConcurrentHashMap<String, TmdbMediaMetadata>()
     private val seasonEpisodesCache = ConcurrentHashMap<String, List<TmdbEpisodeMetadata>>()
+    private val negativeLookupCache = ConcurrentHashMap<String, Long>()
 
     /**
      * Parses, deduplicates, normalizes, and validates a backend proxy URL.
@@ -1188,7 +1190,117 @@ class TmdbProxyClient(
         }
     }
 
+    /**
+     * Retrieves verified TMDb metadata for a movie or TV series with:
+     * - Direct ID lookup when [tmdbId] > 0, or cleaned title + year search otherwise.
+     * - Strict candidate validation via [TmdbMetadataMatcher.isConfidentMatch] when searching by title
+     *   so an overview from a wrong movie/series is never returned.
+     * - Arabic-first (`language=ar`) lookup with automatic English (`language=en-US`) fallback
+     *   whenever [preferArabic] is true and the Arabic overview is missing/empty/generic.
+     */
+    suspend fun fetchAccurateMediaMetadata(
+        rawProxyUrl: String,
+        rawTitle: String,
+        year: String = "",
+        isSeries: Boolean = false,
+        tmdbId: Int = 0,
+        preferArabic: Boolean = false
+    ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
+        val cleaned = extractTmdbQuery(rawTitle)
+        val effectiveTitle = cleaned.cleanTitle.ifBlank { rawTitle.trim() }
+        val effectiveYear = year.filter { it.isDigit() }.take(4).ifBlank { cleaned.extractedYear }
+        val primaryLang = if (preferArabic) "ar" else "en-US"
+        val typeKey = if (isSeries) "tv" else "movie"
+
+        val accurateKey = "accurate:$typeKey:$tmdbId:${effectiveTitle.lowercase()}:$effectiveYear:$primaryLang"
+        val targetCache = if (isSeries) tvCache else movieCache
+        targetCache[accurateKey]?.let { return@withContext it }
+
+        val negativeTs = negativeLookupCache[accurateKey]
+        if (negativeTs != null && (System.currentTimeMillis() - negativeTs) < NEGATIVE_CACHE_TTL_MS) {
+            return@withContext null
+        }
+
+        suspend fun fetchSingle(targetId: Int, lang: String): TmdbMediaMetadata? {
+            val raw = if (targetId > 0) {
+                if (isSeries) {
+                    fetchTvDetailsById(rawProxyUrl, targetId, lang)
+                        ?: fetchTvMetadata(rawProxyUrl, effectiveTitle, effectiveYear, targetId, lang)
+                } else {
+                    fetchMovieDetailsById(rawProxyUrl, targetId, lang)
+                        ?: fetchMovieMetadata(rawProxyUrl, effectiveTitle, effectiveYear, targetId, lang)
+                }
+            } else {
+                if (isSeries) {
+                    fetchTvMetadata(rawProxyUrl, effectiveTitle, effectiveYear, 0, lang)
+                } else {
+                    fetchMovieMetadata(rawProxyUrl, effectiveTitle, effectiveYear, 0, lang)
+                }
+            } ?: return null
+
+            // When searching without an explicit TMDb ID, strictly verify that the returned candidate
+            // actually matches the cleaned title & release year.
+            if (targetId <= 0 && !TmdbMetadataMatcher.isConfidentMatch(
+                    queryTitle = effectiveTitle,
+                    queryYear = effectiveYear,
+                    candidateTitle = raw.title,
+                    candidateOriginalTitle = raw.originalTitle,
+                    candidateYear = raw.releaseYear
+                )
+            ) {
+                return null
+            }
+            return raw
+        }
+
+        val primary = fetchSingle(tmdbId, primaryLang)
+        val resolvedId = primary?.tmdbId?.takeIf { it > 0 } ?: tmdbId
+
+        val finalMeta = if (preferArabic) {
+            val validArabicOverview = TmdbMetadataMatcher.sanitizeSynopsis(primary?.overview, effectiveTitle)
+            if (primary != null && validArabicOverview.isNotEmpty()) {
+                primary.copy(overview = validArabicOverview)
+            } else {
+                val englishFallback = fetchSingle(resolvedId, "en-US")
+                when {
+                    primary == null -> englishFallback?.copy(
+                        overview = TmdbMetadataMatcher.sanitizeSynopsis(englishFallback.overview, effectiveTitle)
+                    )
+                    englishFallback == null -> primary.copy(overview = validArabicOverview)
+                    else -> {
+                        val validEnglishOverview = TmdbMetadataMatcher.sanitizeSynopsis(englishFallback.overview, effectiveTitle)
+                        primary.copy(
+                            tmdbId = if (primary.tmdbId > 0) primary.tmdbId else englishFallback.tmdbId,
+                            overview = validArabicOverview.ifEmpty { validEnglishOverview },
+                            posterUrl = primary.posterUrl.ifBlank { englishFallback.posterUrl },
+                            backdropUrl = primary.backdropUrl.ifBlank { englishFallback.backdropUrl },
+                            genres = primary.genres.ifBlank { englishFallback.genres },
+                            cast = primary.cast.ifBlank { englishFallback.cast },
+                            director = primary.director.ifBlank { englishFallback.director },
+                            releaseYear = primary.releaseYear.ifBlank { englishFallback.releaseYear },
+                            releaseDate = primary.releaseDate.ifBlank { englishFallback.releaseDate },
+                            rating = if (primary.rating > 0.0) primary.rating else englishFallback.rating,
+                            runtimeMinutes = if (primary.runtimeMinutes > 0) primary.runtimeMinutes else englishFallback.runtimeMinutes,
+                            seasons = primary.seasons.ifEmpty { englishFallback.seasons },
+                            originalTitle = primary.originalTitle.ifBlank { englishFallback.originalTitle }
+                        )
+                    }
+                }
+            }
+        } else {
+            primary?.copy(overview = TmdbMetadataMatcher.sanitizeSynopsis(primary.overview, effectiveTitle))
+        }
+
+        if (finalMeta != null) {
+            targetCache[accurateKey] = finalMeta
+        } else {
+            negativeLookupCache[accurateKey] = System.currentTimeMillis()
+        }
+        finalMeta
+    }
+
     companion object {
+        private const val NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000L
         const val CANONICAL_BACKEND_BASE_URL = "https://kras-tmdb-proxy.asdking01.workers.dev"
         const val DEFAULT_CLOUDFLARE_WORKER_URL = CANONICAL_BACKEND_BASE_URL
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
@@ -1459,44 +1571,7 @@ class TmdbProxyClient(
         }
 
         fun extractTmdbQuery(rawName: String): CleanedTmdbQuery {
-            var working = rawName.trim()
-            if (working.isEmpty()) return CleanedTmdbQuery("", "")
-
-            var extractedYear = ""
-            val bracketYearMatch = BRACKETED_YEAR_REGEX.find(working)
-            if (bracketYearMatch != null) {
-                extractedYear = bracketYearMatch.groupValues[1]
-            }
-
-            working = LEADING_COUNTRY_PREFIX_REGEX.replace(working, "")
-            working = SEASON_EPISODE_TAG_REGEX.replace(working, "")
-            working = BRACKET_NOISE_REGEX.replace(working, " ")
-            working = QUALITY_AND_CODEC_TAGS_REGEX.replace(working, " ")
-
-            val trimmedBeforeYear = working.trim().trimEnd('-', '|', ':', '.')
-            if (extractedYear.isEmpty()) {
-                val trailingYearMatch = TRAILING_YEAR_REGEX.find(trimmedBeforeYear)
-                if (trailingYearMatch != null) {
-                    val candidateYear = trailingYearMatch.groupValues[1]
-                    val withoutYear = trimmedBeforeYear.removeSuffix(candidateYear).trim()
-                    if (withoutYear.isNotEmpty()) {
-                        extractedYear = candidateYear
-                        working = withoutYear
-                    }
-                }
-            } else {
-                working = trimmedBeforeYear.removeSuffix(extractedYear)
-            }
-
-            val finalTitle = MULTI_SPACE_REGEX.replace(working, " ")
-                .trim()
-                .trim('-', '|', ':', '.', '_')
-                .trim()
-
-            return CleanedTmdbQuery(
-                cleanTitle = finalTitle.ifEmpty { rawName.trim() },
-                extractedYear = extractedYear
-            )
+            return TmdbMetadataMatcher.cleanIptvTitle(rawName)
         }
 
         private fun jsonFieldAsJoinedString(json: JSONObject, key: String): String {
@@ -1541,6 +1616,11 @@ class TmdbProxyClient(
             val releaseYear = source.optString("releaseYear", source.optString("year", "")).trim()
                 .ifBlank { releaseDate.take(4) }
 
+            val originalTitle = source.optString(
+                "originalTitle",
+                source.optString("original_title", source.optString("original_name", ""))
+            ).trim()
+
             return TmdbMediaMetadata(
                 tmdbId = tmdbId,
                 title = title,
@@ -1554,7 +1634,8 @@ class TmdbProxyClient(
                 cast = jsonFieldAsJoinedString(source, "cast"),
                 director = source.optString("director", "").trim(),
                 runtimeMinutes = source.optInt("runtimeMinutes", 0),
-                seasons = seasons
+                seasons = seasons,
+                originalTitle = originalTitle
             )
         }
 
@@ -1579,11 +1660,23 @@ class TmdbProxyClient(
             return list
         }
 
-        fun enrichMediaItem(item: MediaItem, tmdb: TmdbMediaMetadata): MediaItem {
+        fun enrichMediaItem(
+            item: MediaItem,
+            tmdb: TmdbMediaMetadata,
+            overrideValidExistingPlot: Boolean = false
+        ): MediaItem {
+            val validExistingPlot = TmdbMetadataMatcher.sanitizeSynopsis(item.plot, item.name)
+            val validTmdbOverview = TmdbMetadataMatcher.sanitizeSynopsis(tmdb.overview, item.name)
+            val resolvedPlot = if (overrideValidExistingPlot) {
+                validTmdbOverview.ifEmpty { validExistingPlot }
+            } else {
+                validExistingPlot.ifEmpty { validTmdbOverview }
+            }
+
             return item.copy(
                 streamIcon = tmdb.posterUrl.ifBlank { item.streamIcon },
                 backdrop = tmdb.backdropUrl.ifBlank { tmdb.posterUrl.ifBlank { item.backdrop } },
-                plot = tmdb.overview.ifBlank { item.plot },
+                plot = resolvedPlot,
                 genre = tmdb.genres.ifBlank { item.genre },
                 rating = if (tmdb.rating > 0.0) tmdb.rating else item.rating,
                 year = tmdb.releaseYear.ifBlank { item.year },
@@ -1597,7 +1690,8 @@ class TmdbProxyClient(
         fun enrichSeriesDetails(
             details: SeriesDetails,
             metadata: TmdbMediaMetadata,
-            seasonEpisodesMap: Map<Int, List<TmdbEpisodeMetadata>> = emptyMap()
+            seasonEpisodesMap: Map<Int, List<TmdbEpisodeMetadata>> = emptyMap(),
+            overrideValidExistingPlot: Boolean = false
         ): SeriesDetails {
             val tmdbSeasonMap = metadata.seasons.associateBy { it.seasonNumber }
 
@@ -1613,7 +1707,8 @@ class TmdbProxyClient(
                         if (tmdbEp != null) {
                             ep.copy(
                                 title = tmdbEp.title.ifBlank { ep.title },
-                                plot = tmdbEp.overview.ifBlank { ep.plot },
+                                plot = TmdbMetadataMatcher.sanitizeSynopsis(ep.plot, ep.title)
+                                    .ifEmpty { TmdbMetadataMatcher.sanitizeSynopsis(tmdbEp.overview, ep.title) },
                                 coverUrl = tmdbEp.stillUrl.ifBlank { ep.coverUrl },
                                 rating = if (tmdbEp.rating > 0.0) tmdbEp.rating else ep.rating,
                                 durationSec = if (tmdbEp.durationSec > 0) tmdbEp.durationSec else ep.durationSec
@@ -1641,7 +1736,7 @@ class TmdbProxyClient(
                                 id = "ep_${details.seriesId}_${tmdbSeason.seasonNumber}_${tmdbEp.episodeNumber}",
                                 episodeNum = tmdbEp.episodeNumber,
                                 title = tmdbEp.title,
-                                plot = tmdbEp.overview,
+                                plot = TmdbMetadataMatcher.sanitizeSynopsis(tmdbEp.overview, tmdbEp.title),
                                 durationSec = if (tmdbEp.durationSec > 0) tmdbEp.durationSec else 2700,
                                 rating = if (tmdbEp.rating > 0.0) tmdbEp.rating else 8.0,
                                 coverUrl = tmdbEp.stillUrl,
@@ -1657,16 +1752,25 @@ class TmdbProxyClient(
                 details.seasons
             }
 
+            val validExistingPlot = TmdbMetadataMatcher.sanitizeSynopsis(details.plot, details.name)
+            val validTmdbOverview = TmdbMetadataMatcher.sanitizeSynopsis(metadata.overview, details.name)
+            val resolvedPlot = if (overrideValidExistingPlot) {
+                validTmdbOverview.ifEmpty { validExistingPlot }
+            } else {
+                validExistingPlot.ifEmpty { validTmdbOverview }
+            }
+
             return details.copy(
                 cover = metadata.posterUrl.ifBlank { details.cover },
                 backdrop = metadata.backdropUrl.ifBlank { metadata.posterUrl.ifBlank { details.backdrop } },
-                plot = metadata.overview.ifBlank { details.plot },
+                plot = resolvedPlot,
                 cast = metadata.cast.ifBlank { details.cast },
                 director = metadata.director.ifBlank { details.director },
                 genre = metadata.genres.ifBlank { details.genre },
                 releaseDate = metadata.releaseDate.ifBlank { metadata.releaseYear.ifBlank { details.releaseDate } },
                 rating = if (metadata.rating > 0.0) metadata.rating else details.rating,
-                seasons = enrichedSeasons
+                seasons = enrichedSeasons,
+                tmdbId = if (metadata.tmdbId > 0) metadata.tmdbId else details.tmdbId
             )
         }
     }

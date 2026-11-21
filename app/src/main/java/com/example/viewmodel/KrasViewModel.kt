@@ -8,9 +8,11 @@ import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
 import com.example.KrasApplication
 import com.example.data.api.M3uPlaylistParser
-import com.example.data.api.TmdbDirectClient
 import com.example.data.api.TmdbConnectionState
+import com.example.data.api.TmdbDirectClient
 import com.example.data.api.TmdbHealthResult
+import com.example.data.api.TmdbMediaMetadata
+import com.example.data.api.TmdbMetadataMatcher
 import com.example.data.api.TmdbProxyClient
 import com.example.data.api.XtreamClient
 import com.example.data.local.ChannelNameNormalizer
@@ -127,12 +129,27 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     val searchResults = _searchResults.asStateFlow()
     private var currentSearchQuery = ""
 
-    // Active Series Details (loaded on demand)
+    // Active Movie & Series Details (loaded on demand with IPTV-first + TMDb fallback & caching)
+    private val _selectedMovieForDetails = MutableStateFlow<MediaItem?>(null)
+    val selectedMovieForDetails = _selectedMovieForDetails.asStateFlow()
+
+    private val _selectedSeriesForDetails = MutableStateFlow<MediaItem?>(null)
+    val selectedSeriesForDetails = _selectedSeriesForDetails.asStateFlow()
+
+    private val _isMovieDetailsLoading = MutableStateFlow(false)
+    val isMovieDetailsLoading = _isMovieDetailsLoading.asStateFlow()
+
     private val _currentSeriesDetails = MutableStateFlow<SeriesDetails?>(null)
     val currentSeriesDetails = _currentSeriesDetails.asStateFlow()
 
     private val _isSeriesDetailsLoading = MutableStateFlow(false)
     val isSeriesDetailsLoading = _isSeriesDetailsLoading.asStateFlow()
+
+    // In-memory language-aware caches so reopening details screens loads immediately
+    private val enrichedMediaDetailsCache = ConcurrentHashMap<String, MediaItem>()
+    private val enrichedSeriesDetailsCache = ConcurrentHashMap<String, SeriesDetails>()
+    private var movieDetailsJob: Job? = null
+    private var seriesDetailsJob: Job? = null
 
     // Favorites & History & Downloads
     private val _favorites = MutableStateFlow<List<FavoriteItem>>(emptyList())
@@ -1209,28 +1226,44 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun enrichCatalogWithTmdb(account: Account) = withContext(Dispatchers.IO) {
         val settings = _userSettings.value
         val proxyUrl = canonicalTmdbProxyUrl(settings.tmdbProxyUrl)
-        if (!settings.tmdbAutoEnrichEnabled || proxyUrl.isBlank()) return@withContext
+        val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
+        if (!settings.tmdbAutoEnrichEnabled || (proxyUrl.isBlank() && savedApiKey.isBlank())) return@withContext
 
-        val health = tmdbProxyClient.verifyConnection(proxyUrl)
-        _tmdbHealthState.value = health
-        if (health.state != TmdbConnectionState.CONNECTED) return@withContext
+        if (savedApiKey.isBlank() && proxyUrl.isNotBlank()) {
+            val health = tmdbProxyClient.verifyConnection(proxyUrl)
+            _tmdbHealthState.value = health
+            if (health.state != TmdbConnectionState.CONNECTED) return@withContext
+        }
+
+        val preferArabic = settings.language.equals("Arabic", ignoreCase = true)
 
         try {
             val moviesToEnrich = (
-                _movies.value.filter { it.tmdbId == 0 || it.plot.isBlank() || it.streamIcon.isBlank() } +
-                    repository.getUnenrichedMedia(account.id, "MOVIE", 25)
+                _movies.value.filter {
+                    it.tmdbId == 0 || !TmdbMetadataMatcher.isValidSynopsis(it.plot, it.name) || it.streamIcon.isBlank()
+                } + repository.getUnenrichedMedia(account.id, "MOVIE", 25)
                 ).distinctBy { it.id }.take(25)
 
             var updatedAny = false
             for (movie in moviesToEnrich) {
-                val meta = tmdbProxyClient.fetchMovieMetadata(
-                    rawProxyUrl = proxyUrl,
+                val meta = fetchAccurateTmdbMetadata(
                     rawTitle = movie.name,
                     year = movie.year,
-                    tmdbId = movie.tmdbId
+                    isSeries = false,
+                    tmdbId = movie.tmdbId,
+                    preferArabic = preferArabic
                 )
                 if (meta != null) {
-                    val enriched = TmdbProxyClient.enrichMediaItem(movie, meta)
+                    val existingValid = TmdbMetadataMatcher.isValidSynopsis(movie.plot, movie.name)
+                    val upgradeToArabic = preferArabic &&
+                        existingValid &&
+                        !TmdbMetadataMatcher.containsArabicScript(movie.plot) &&
+                        TmdbMetadataMatcher.containsArabicScript(meta.overview)
+                    val enriched = TmdbProxyClient.enrichMediaItem(
+                        item = movie,
+                        tmdb = meta,
+                        overrideValidExistingPlot = upgradeToArabic
+                    )
                     repository.updateTmdbMetadata(enriched)
                     applyEnrichedTmdbItemToState(enriched)
                     updatedAny = true
@@ -1238,19 +1271,30 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             val seriesToEnrich = (
-                _series.value.filter { it.tmdbId == 0 || it.plot.isBlank() || it.streamIcon.isBlank() } +
-                    repository.getUnenrichedMedia(account.id, "SERIES", 25)
+                _series.value.filter {
+                    it.tmdbId == 0 || !TmdbMetadataMatcher.isValidSynopsis(it.plot, it.name) || it.streamIcon.isBlank()
+                } + repository.getUnenrichedMedia(account.id, "SERIES", 25)
                 ).distinctBy { it.id }.take(25)
 
             for (seriesItem in seriesToEnrich) {
-                val meta = tmdbProxyClient.fetchTvMetadata(
-                    rawProxyUrl = proxyUrl,
+                val meta = fetchAccurateTmdbMetadata(
                     rawTitle = seriesItem.name,
                     year = seriesItem.year,
-                    tmdbId = seriesItem.tmdbId
+                    isSeries = true,
+                    tmdbId = seriesItem.tmdbId,
+                    preferArabic = preferArabic
                 )
                 if (meta != null) {
-                    val enriched = TmdbProxyClient.enrichMediaItem(seriesItem, meta)
+                    val existingValid = TmdbMetadataMatcher.isValidSynopsis(seriesItem.plot, seriesItem.name)
+                    val upgradeToArabic = preferArabic &&
+                        existingValid &&
+                        !TmdbMetadataMatcher.containsArabicScript(seriesItem.plot) &&
+                        TmdbMetadataMatcher.containsArabicScript(meta.overview)
+                    val enriched = TmdbProxyClient.enrichMediaItem(
+                        item = seriesItem,
+                        tmdb = meta,
+                        overrideValidExistingPlot = upgradeToArabic
+                    )
                     repository.updateTmdbMetadata(enriched)
                     applyEnrichedTmdbItemToState(enriched)
                     updatedAny = true
@@ -1285,6 +1329,16 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (_searchResults.value.any { it.id == enriched.id }) {
             _searchResults.value = _searchResults.value.map { if (it.id == enriched.id) enriched else it }
+        }
+        _selectedMovieForDetails.value?.let { current ->
+            if (current.id == enriched.id) {
+                _selectedMovieForDetails.value = enriched
+            }
+        }
+        _selectedSeriesForDetails.value?.let { current ->
+            if (current.id == enriched.id) {
+                _selectedSeriesForDetails.value = enriched
+            }
         }
         _nowPlayingItem.value?.let { current ->
             if (current.id == enriched.id) {
@@ -1708,15 +1762,276 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- On-Demand Series Details (Xtream Codes + M3U + Server-Side TMDb Proxy Enrichment) ---
+    // --- Unified On-Demand Movie & Series Details (IPTV-First + Accurate TMDb Fallback + Bilingual Caching) ---
+
+    private fun currentOverviewLanguageKey(): String {
+        return if (_userSettings.value.language.equals("Arabic", ignoreCase = true)) "ar" else "en"
+    }
+
+    /**
+     * Opens the Movie or TV Series Details screen from any section (Home, Search, Movies, Series,
+     * Favorites, or Recommendations) and ensures real, verified plot synopses and metadata are loaded
+     * and cached without ever showing generic placeholder text.
+     */
+    fun showMediaDetails(mediaItem: MediaItem) {
+        val langKey = currentOverviewLanguageKey()
+        when (mediaItem.type) {
+            MediaType.MOVIE -> {
+                _selectedSeriesForDetails.value = null
+                val cached = enrichedMediaDetailsCache["${mediaItem.id}:$langKey"]
+                val sanitizedInitial = (cached ?: mediaItem).let {
+                    it.copy(plot = TmdbMetadataMatcher.sanitizeSynopsis(it.plot, it.name))
+                }
+                _selectedMovieForDetails.value = sanitizedInitial
+
+                if (cached != null && TmdbMetadataMatcher.isValidSynopsis(cached.plot, cached.name)) {
+                    _isMovieDetailsLoading.value = false
+                    return
+                }
+
+                movieDetailsJob?.cancel()
+                movieDetailsJob = viewModelScope.launch {
+                    _isMovieDetailsLoading.value = true
+                    try {
+                        val enriched = getOrFetchEnrichedMediaDetails(mediaItem)
+                        if (_selectedMovieForDetails.value?.id == mediaItem.id) {
+                            _selectedMovieForDetails.value = enriched
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    } finally {
+                        if (_selectedMovieForDetails.value?.id == mediaItem.id) {
+                            _isMovieDetailsLoading.value = false
+                        }
+                    }
+                }
+            }
+
+            MediaType.SERIES -> {
+                _selectedMovieForDetails.value = null
+                val cachedItem = enrichedMediaDetailsCache["${mediaItem.id}:$langKey"]
+                val sanitizedInitial = (cachedItem ?: mediaItem).let {
+                    it.copy(plot = TmdbMetadataMatcher.sanitizeSynopsis(it.plot, it.name))
+                }
+                _selectedSeriesForDetails.value = sanitizedInitial
+                loadSeriesDetails(sanitizedInitial)
+            }
+
+            MediaType.LIVE -> {
+                selectLiveChannel(mediaItem)
+            }
+        }
+    }
+
+    fun dismissMovieDetails() {
+        movieDetailsJob?.cancel()
+        _selectedMovieForDetails.value = null
+        _isMovieDetailsLoading.value = false
+    }
+
+    fun dismissSeriesDetails() {
+        seriesDetailsJob?.cancel()
+        _selectedSeriesForDetails.value = null
+        _isSeriesDetailsLoading.value = false
+    }
+
+    fun dismissMediaDetails() {
+        dismissMovieDetails()
+        dismissSeriesDetails()
+    }
+
+    /**
+     * Retrieves or fetches verified enriched details for a movie or series:
+     * 1. Checks in-memory language-aware cache and persisted Room metadata.
+     * 2. Uses IPTV / Xtream Codes plot (`get_vod_info`) first if it contains a valid synopsis.
+     * 3. If the plot is missing, empty, or generic (or Arabic is selected and current plot is non-Arabic),
+     *    retrieves the verified overview from TMDb (Direct API v3 when user API key is configured,
+     *    or KRAS TMDb Proxy otherwise), requesting Arabic first when Arabic is selected and falling back
+     *    to English if Arabic is unavailable.
+     * 4. Caches verified metadata in memory and Room so reopening details loads quickly.
+     */
+    suspend fun getOrFetchEnrichedMediaDetails(
+        mediaItem: MediaItem,
+        forceRefresh: Boolean = false
+    ): MediaItem = withContext(Dispatchers.IO) {
+        val preferArabic = _userSettings.value.language.equals("Arabic", ignoreCase = true)
+        val langKey = if (preferArabic) "ar" else "en"
+        val cacheKey = "${mediaItem.id}:$langKey"
+
+        if (!forceRefresh) {
+            enrichedMediaDetailsCache[cacheKey]?.let { return@withContext it }
+        }
+
+        // Start by merging any previously persisted metadata from Room
+        val persisted = repository.getItemById(mediaItem.id)
+        var working = if (persisted != null) {
+            val persistedPlot = TmdbMetadataMatcher.sanitizeSynopsis(persisted.plot, mediaItem.name)
+            val currentPlot = TmdbMetadataMatcher.sanitizeSynopsis(mediaItem.plot, mediaItem.name)
+            mediaItem.copy(
+                streamIcon = mediaItem.streamIcon.ifBlank { persisted.streamIcon },
+                backdrop = mediaItem.backdrop.ifBlank { persisted.backdrop },
+                plot = currentPlot.ifEmpty { persistedPlot },
+                genre = mediaItem.genre.ifBlank { persisted.genre },
+                cast = mediaItem.cast.ifBlank { persisted.cast },
+                director = mediaItem.director.ifBlank { persisted.director },
+                duration = mediaItem.duration.ifBlank { persisted.duration },
+                year = mediaItem.year.ifBlank { persisted.year },
+                rating = if (mediaItem.rating > 0.0) mediaItem.rating else persisted.rating,
+                tmdbId = if (mediaItem.tmdbId > 0) mediaItem.tmdbId else persisted.tmdbId
+            )
+        } else {
+            mediaItem.copy(plot = TmdbMetadataMatcher.sanitizeSynopsis(mediaItem.plot, mediaItem.name))
+        }
+
+        // Step 1: Fetch real Xtream VOD details first for Movies on Xtream accounts
+        val active = _activeAccount.value
+        if (working.type == MediaType.MOVIE &&
+            active != null &&
+            !active.isDemo &&
+            !M3uPlaylistParser.isM3uPlaylistUrl(active.serverUrl) &&
+            working.streamId > 0
+        ) {
+            val needsXtreamFetch = !TmdbMetadataMatcher.isValidSynopsis(working.plot, working.name) ||
+                working.tmdbId <= 0 ||
+                working.cast.isBlank() ||
+                working.director.isBlank() ||
+                working.duration.isBlank()
+
+            if (needsXtreamFetch) {
+                val vodDetails = apiClient.fetchVodDetails(
+                    account = active,
+                    vodId = working.streamId,
+                    fallbackQuality = working.quality.ifBlank { working.resolution }
+                )
+                if (vodDetails != null) {
+                    val validXtreamPlot = TmdbMetadataMatcher.sanitizeSynopsis(vodDetails.plot, working.name)
+                    val existingValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(working.plot, working.name)
+                    working = working.copy(
+                        streamIcon = working.streamIcon.ifBlank { vodDetails.streamIcon },
+                        backdrop = vodDetails.backdrop.ifBlank { working.backdrop },
+                        plot = validXtreamPlot.ifEmpty { existingValidPlot },
+                        cast = vodDetails.cast.ifBlank { working.cast },
+                        director = vodDetails.director.ifBlank { working.director },
+                        genre = vodDetails.genre.ifBlank { working.genre },
+                        year = vodDetails.releaseDate.take(4).ifBlank { working.year },
+                        rating = if (vodDetails.rating > 0.0 && working.rating <= 0.0) vodDetails.rating else working.rating,
+                        duration = vodDetails.duration.ifBlank { working.duration },
+                        tmdbId = if (vodDetails.tmdbId > 0) vodDetails.tmdbId else working.tmdbId,
+                        quality = vodDetails.quality.ifBlank { working.quality }
+                    )
+                }
+            }
+        }
+
+        // Step 2: If plot is missing/empty/generic (or Arabic is selected and current plot is non-Arabic),
+        // fetch accurate verified overview & metadata from TMDb
+        val hasValidPlot = TmdbMetadataMatcher.isValidSynopsis(working.plot, working.name)
+        val wantsArabicUpgrade = preferArabic && hasValidPlot && !TmdbMetadataMatcher.containsArabicScript(working.plot)
+        val needsMetadataFill = working.backdrop.isBlank() || working.cast.isBlank() || working.genre.isBlank()
+
+        if (!hasValidPlot || wantsArabicUpgrade || needsMetadataFill) {
+            val tmdbMeta = fetchAccurateTmdbMetadata(
+                rawTitle = working.name,
+                year = working.year,
+                isSeries = working.type == MediaType.SERIES,
+                tmdbId = working.tmdbId,
+                preferArabic = preferArabic
+            )
+            if (tmdbMeta != null) {
+                val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(tmdbMeta.overview) &&
+                    TmdbMetadataMatcher.isValidSynopsis(tmdbMeta.overview, working.name)
+                val overridePlot = !hasValidPlot || (wantsArabicUpgrade && tmdbHasArabicOverview)
+                working = TmdbProxyClient.enrichMediaItem(
+                    item = working,
+                    tmdb = tmdbMeta,
+                    overrideValidExistingPlot = overridePlot
+                )
+            }
+        }
+
+        // Step 3: Final strict sanitization (never allow placeholder text) & persist/cache
+        val finalCleanPlot = TmdbMetadataMatcher.sanitizeSynopsis(working.plot, working.name)
+        val finalItem = working.copy(plot = finalCleanPlot)
+        enrichedMediaDetailsCache[cacheKey] = finalItem
+
+        if (finalItem.tmdbId > 0 || finalItem.plot.isNotEmpty() || finalItem.cast.isNotBlank() || finalItem.backdrop.isNotBlank()) {
+            // Avoid wiping an existing valid persisted plot with an empty string if lookup failed
+            val persistedValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(persisted?.plot, finalItem.name)
+            val itemToPersist = if (finalItem.plot.isEmpty() && persistedValidPlot.isNotEmpty()) {
+                finalItem.copy(plot = persistedValidPlot)
+            } else {
+                finalItem
+            }
+            repository.updateTmdbMetadata(itemToPersist)
+            applyEnrichedTmdbItemToState(finalItem)
+        }
+
+        finalItem
+    }
+
+    /**
+     * Resolves verified TMDb metadata using Direct TMDb API v3 when a user API key is configured,
+     * falling back automatically to the server-side KRAS TMDb Proxy when needed.
+     */
+    private suspend fun fetchAccurateTmdbMetadata(
+        rawTitle: String,
+        year: String,
+        isSeries: Boolean,
+        tmdbId: Int,
+        preferArabic: Boolean
+    ): TmdbMediaMetadata? {
+        val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
+        if (savedApiKey.isNotEmpty()) {
+            val directMeta = tmdbDirectClient.fetchAccurateMediaMetadata(
+                apiKey = savedApiKey,
+                rawTitle = rawTitle,
+                year = year,
+                isSeries = isSeries,
+                tmdbId = tmdbId,
+                preferArabic = preferArabic
+            )
+            if (directMeta != null) return directMeta
+        }
+
+        val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
+        if (proxyUrl.isNotBlank()) {
+            return tmdbProxyClient.fetchAccurateMediaMetadata(
+                rawProxyUrl = proxyUrl,
+                rawTitle = rawTitle,
+                year = year,
+                isSeries = isSeries,
+                tmdbId = tmdbId,
+                preferArabic = preferArabic
+            )
+        }
+        return null
+    }
+
+    // --- On-Demand Series Details (Xtream Codes + M3U + Accurate TMDb Fallback & Bilingual Caching) ---
     fun loadSeriesDetails(seriesItem: MediaItem) {
+        val preferArabic = _userSettings.value.language.equals("Arabic", ignoreCase = true)
+        val langKey = if (preferArabic) "ar" else "en"
+        val detailsCacheKey = "${seriesItem.streamId}:$langKey"
+
+        val cachedDetails = enrichedSeriesDetailsCache[detailsCacheKey]
+        if (cachedDetails != null && TmdbMetadataMatcher.isValidSynopsis(cachedDetails.plot, cachedDetails.name)) {
+            _currentSeriesDetails.value = cachedDetails
+            _isSeriesDetailsLoading.value = false
+            return
+        }
+
         if (_currentSeriesDetails.value?.seriesId != seriesItem.streamId) {
             _currentSeriesDetails.value = null
         }
-        viewModelScope.launch {
+
+        seriesDetailsJob?.cancel()
+        seriesDetailsJob = viewModelScope.launch {
             _isSeriesDetailsLoading.value = true
             try {
                 val active = _activeAccount.value
+                val persisted = withContext(Dispatchers.IO) { repository.getItemById(seriesItem.id) }
                 var baseDetails: SeriesDetails? = null
 
                 if (active != null && !active.isDemo) {
@@ -1746,58 +2061,118 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                             releaseDate = seriesItem.year,
                             rating = seriesItem.rating,
                             seasons = emptyList(),
-                            quality = seriesItem.quality.ifBlank { seriesItem.resolution }
+                            quality = seriesItem.quality.ifBlank { seriesItem.resolution },
+                            tmdbId = seriesItem.tmdbId
                         )
                     }
                 }
 
-                _currentSeriesDetails.value = baseDetails
-                if (baseDetails.quality.isNotBlank()) {
-                    applyDetectedQualityToItem(seriesItem.id, baseDetails.quality)
+                // Merge any valid persisted metadata from Room and sanitize generic/placeholder plot
+                val baseValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(baseDetails.plot, seriesItem.name)
+                val itemValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(seriesItem.plot, seriesItem.name)
+                val persistedValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(persisted?.plot, seriesItem.name)
+                val effectiveTmdbId = baseDetails.tmdbId.takeIf { it > 0 }
+                    ?: seriesItem.tmdbId.takeIf { it > 0 }
+                    ?: (persisted?.tmdbId ?: 0)
+
+                val sanitizedBase = baseDetails.copy(
+                    plot = baseValidPlot.ifEmpty { itemValidPlot.ifEmpty { persistedValidPlot } },
+                    cast = baseDetails.cast.ifBlank { seriesItem.cast.ifBlank { persisted?.cast.orEmpty() } },
+                    director = baseDetails.director.ifBlank { seriesItem.director.ifBlank { persisted?.director.orEmpty() } },
+                    genre = baseDetails.genre.ifBlank { seriesItem.genre.ifBlank { persisted?.genre.orEmpty() } },
+                    backdrop = baseDetails.backdrop.ifBlank { seriesItem.backdrop.ifBlank { persisted?.backdrop.orEmpty() } },
+                    tmdbId = effectiveTmdbId
+                )
+
+                _currentSeriesDetails.value = sanitizedBase
+                if (sanitizedBase.quality.isNotBlank()) {
+                    applyDetectedQualityToItem(seriesItem.id, sanitizedBase.quality)
                 }
 
-                // Enrich Series, Cast, Seasons, and Episodes via Server-Side TMDb Proxy if configured
-                val settings = _userSettings.value
-                val proxyUrl = settings.tmdbProxyUrl.trim()
-                if (settings.tmdbAutoEnrichEnabled && proxyUrl.isNotBlank()) {
+                // Step 2: Enrich via TMDb (Direct API v3 or Server-Side Proxy) when plot is missing/generic,
+                // Arabic is requested and current plot is non-Arabic, or cast/backdrop/seasons need metadata.
+                val hasValidIptvPlot = TmdbMetadataMatcher.isValidSynopsis(sanitizedBase.plot, sanitizedBase.name)
+                val wantsArabicUpgrade = preferArabic && hasValidIptvPlot && !TmdbMetadataMatcher.containsArabicScript(sanitizedBase.plot)
+                val needsTmdb = !hasValidIptvPlot || wantsArabicUpgrade || sanitizedBase.cast.isBlank() || sanitizedBase.backdrop.isBlank()
+
+                var finalDetails = sanitizedBase
+                if (needsTmdb) {
                     withContext(Dispatchers.IO) {
-                        val tvMeta = tmdbProxyClient.fetchTvMetadata(
-                            rawProxyUrl = proxyUrl,
+                        val tvMeta = fetchAccurateTmdbMetadata(
                             rawTitle = seriesItem.name,
-                            year = seriesItem.year.ifBlank { baseDetails.releaseDate.take(4) },
-                            tmdbId = seriesItem.tmdbId
+                            year = seriesItem.year.ifBlank { sanitizedBase.releaseDate.take(4) },
+                            isSeries = true,
+                            tmdbId = effectiveTmdbId,
+                            preferArabic = preferArabic
                         )
                         if (tvMeta != null) {
-                            val seasonNumsToFetch = if (baseDetails.seasons.isNotEmpty()) {
-                                baseDetails.seasons.map { it.seasonNumber }.distinct()
-                            } else {
-                                tvMeta.seasons.map { it.seasonNumber }.distinct().take(5)
-                            }
+                            val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
+                            val epLang = if (preferArabic) "ar" else "en-US"
                             val seasonEpMap = LinkedHashMap<Int, List<com.example.data.api.TmdbEpisodeMetadata>>()
-                            for (sNum in seasonNumsToFetch) {
-                                val eps = tmdbProxyClient.fetchTvSeasonEpisodes(proxyUrl, tvMeta.tmdbId, sNum)
-                                if (eps.isNotEmpty()) {
-                                    seasonEpMap[sNum] = eps
+                            if (proxyUrl.isNotBlank() && tvMeta.tmdbId > 0) {
+                                val seasonNumsToFetch = if (sanitizedBase.seasons.isNotEmpty()) {
+                                    sanitizedBase.seasons.map { it.seasonNumber }.distinct()
+                                } else {
+                                    tvMeta.seasons.map { it.seasonNumber }.distinct().take(5)
+                                }
+                                for (sNum in seasonNumsToFetch) {
+                                    val eps = tmdbProxyClient.fetchTvSeasonEpisodes(proxyUrl, tvMeta.tmdbId, sNum, epLang)
+                                    if (eps.isNotEmpty()) {
+                                        seasonEpMap[sNum] = eps
+                                    }
                                 }
                             }
-                            val enrichedDetails = TmdbProxyClient.enrichSeriesDetails(
-                                details = baseDetails,
+
+                            val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(tvMeta.overview) &&
+                                TmdbMetadataMatcher.isValidSynopsis(tvMeta.overview, sanitizedBase.name)
+                            val overridePlot = !hasValidIptvPlot || (wantsArabicUpgrade && tmdbHasArabicOverview)
+
+                            finalDetails = TmdbProxyClient.enrichSeriesDetails(
+                                details = sanitizedBase,
                                 metadata = tvMeta,
-                                seasonEpisodesMap = seasonEpMap
+                                seasonEpisodesMap = seasonEpMap,
+                                overrideValidExistingPlot = overridePlot
                             )
-                            _currentSeriesDetails.value = enrichedDetails
+                            _currentSeriesDetails.value = finalDetails
                             if (m3uSeriesDetailsMap.containsKey(seriesItem.streamId)) {
-                                m3uSeriesDetailsMap[seriesItem.streamId] = enrichedDetails
+                                m3uSeriesDetailsMap[seriesItem.streamId] = finalDetails
                             }
-                            val enrichedItem = TmdbProxyClient.enrichMediaItem(seriesItem, tvMeta)
+
+                            val enrichedItem = TmdbProxyClient.enrichMediaItem(
+                                item = seriesItem.copy(
+                                    plot = sanitizedBase.plot,
+                                    tmdbId = effectiveTmdbId
+                                ),
+                                tmdb = tvMeta,
+                                overrideValidExistingPlot = overridePlot
+                            )
+                            enrichedMediaDetailsCache["${seriesItem.id}:$langKey"] = enrichedItem
                             repository.updateTmdbMetadata(enrichedItem)
                             applyEnrichedTmdbItemToState(enrichedItem)
                         }
                     }
+                } else {
+                    val syncedItem = seriesItem.copy(
+                        plot = finalDetails.plot,
+                        cast = finalDetails.cast.ifBlank { seriesItem.cast },
+                        director = finalDetails.director.ifBlank { seriesItem.director },
+                        genre = finalDetails.genre.ifBlank { seriesItem.genre },
+                        backdrop = finalDetails.backdrop.ifBlank { seriesItem.backdrop },
+                        tmdbId = finalDetails.tmdbId
+                    )
+                    enrichedMediaDetailsCache["${seriesItem.id}:$langKey"] = syncedItem
+                    withContext(Dispatchers.IO) {
+                        repository.updateTmdbMetadata(syncedItem)
+                    }
+                    applyEnrichedTmdbItemToState(syncedItem)
                 }
+
+                enrichedSeriesDetailsCache[detailsCacheKey] = finalDetails
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 e.printStackTrace()
-                if (_currentSeriesDetails.value == null) {
+                if (_currentSeriesDetails.value == null && _activeAccount.value?.isDemo == true) {
                     _currentSeriesDetails.value = SampleData.getSampleSeriesDetails(seriesItem.streamId)
                 }
             } finally {
@@ -2443,6 +2818,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         )
         val orderChanged = _userSettings.value.liveChannelOrder != normalizedSettings.liveChannelOrder
         val bufferChanged = _userSettings.value.bufferSize != normalizedSettings.bufferSize
+        val languageChanged = !_userSettings.value.language.equals(normalizedSettings.language, ignoreCase = true)
         val tmdbProxyChanged = _userSettings.value.tmdbProxyUrl != normalizedSettings.tmdbProxyUrl ||
                 _userSettings.value.tmdbAutoEnrichEnabled != normalizedSettings.tmdbAutoEnrichEnabled
         KrasMediaPlaybackService.backgroundPlaybackEnabled = normalizedSettings.backgroundPlayback
@@ -2459,9 +2835,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         if (tmdbProxyChanged) {
             verifyTmdbProxyConnection(normalizedSettings.tmdbProxyUrl)
         }
+        if (languageChanged) {
+            _selectedMovieForDetails.value?.let { showMediaDetails(it) }
+            _selectedSeriesForDetails.value?.let { showMediaDetails(it) }
+        }
     }
 
     fun clearCache() {
+        enrichedMediaDetailsCache.clear()
+        enrichedSeriesDetailsCache.clear()
         viewModelScope.launch(Dispatchers.IO) {
             repository.clearCache()
             _watchHistory.value = emptyList()

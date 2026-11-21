@@ -37,6 +37,7 @@ import coil.compose.AsyncImage
 import com.example.data.model.CardStyle
 import com.example.data.model.MediaItem
 import com.example.data.model.WatchProgress
+import com.example.ui.components.DetailsOverviewSection
 import com.example.ui.components.MediaCard
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.components.liquidGlassPanel
@@ -66,6 +67,7 @@ fun MovieDetailsScreen(
     onMovieClick: (MediaItem) -> Unit,
     onBack: () -> Unit,
     watchHistory: List<WatchProgress> = emptyList(),
+    isLoadingDetails: Boolean = false,
     isArabic: Boolean = false,
     modifier: Modifier = Modifier
 ) {
@@ -430,24 +432,13 @@ fun MovieDetailsScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 6.dp)
                 ) {
-                    Text(
-                        text = if (isArabic) "القصة" else "Overview",
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontFamily = OutfitFontFamily,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Text(
-                        text = movie.plot.ifBlank {
-                            if (isArabic) "استمتع بمشاهدة هذا الفيلم بجودة عالية وتجربة سينمائية مميزة."
-                            else "Experience an extraordinary cinematic story with stunning visuals and immersive audio."
-                        },
-                        color = TextSecondary,
-                        fontSize = 13.sp,
-                        lineHeight = 20.sp
+                    DetailsOverviewSection(
+                        itemKey = movie.id,
+                        mediaTitle = movie.name,
+                        sectionTitle = if (isArabic) "القصة" else "Overview",
+                        plot = movie.plot,
+                        isLoading = isLoadingDetails,
+                        isArabic = isArabic
                     )
 
                     if (movie.cast.isNotBlank()) {

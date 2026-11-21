@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.data.model.*
+import com.example.ui.components.DetailsOverviewSection
 import com.example.ui.components.MediaCard
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.theme.*
@@ -485,24 +486,13 @@ fun SeriesDetailsScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 6.dp)
                 ) {
-                    Text(
-                        text = if (isArabic) "عن المسلسل" else "About the Series",
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontFamily = OutfitFontFamily,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Text(
-                        text = details.plot.ifEmpty {
-                            if (isArabic) "رحلة درامية مشوقة وصراعات مليئة بالإثارة والغموض عبر مواسم متعددة."
-                            else "An extraordinary story unfolding across space and time with high-stakes conflicts."
-                        },
-                        color = TextSecondary,
-                        fontSize = 13.sp,
-                        lineHeight = 20.sp
+                    DetailsOverviewSection(
+                        itemKey = "${seriesItem.id}_${details.seriesId}",
+                        mediaTitle = details.name,
+                        sectionTitle = if (isArabic) "القصة" else "Overview",
+                        plot = details.plot,
+                        isLoading = isLoading,
+                        isArabic = isArabic
                     )
 
                     if (details.cast.isNotEmpty()) {
