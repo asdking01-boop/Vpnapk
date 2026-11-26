@@ -46,8 +46,18 @@ sealed class ReleaseCheckResult {
     data class Error(val message: String) : ReleaseCheckResult()
 }
 
+sealed class ApkVerificationResult {
+    object Valid : ApkVerificationResult()
+    data class SignatureMismatch(val message: String) : ApkVerificationResult()
+    data class Invalid(val message: String) : ApkVerificationResult()
+}
+
+private class UpdateSignatureMismatch(message: String) : IOException(message)
+
 data class AppUpdateUiState(
     val isChecking: Boolean = false,
+    val isVerifying: Boolean = false,
+    val isSignatureMismatch: Boolean = false,
     val availableRelease: GithubReleaseInfo? = null,
     val showUpdateDialog: Boolean = false,
     val isDownloading: Boolean = false,
@@ -260,7 +270,30 @@ class AppUpdater(
             val newSigners = if (Build.VERSION.SDK_INT >= 28) candidate.signingInfo?.apkContentsSigners else candidate.signatures
             if (oldSigners.isNullOrEmpty() || newSigners.isNullOrEmpty() ||
                 oldSigners.toSet() != newSigners.toSet())
-                throw IOException("Update signature mismatch. The APK must be signed with the original installed app key.")
+                throw UpdateSignatureMismatch("Update signature mismatch. The APK must be signed with the original installed app key.")
+        }
+
+        @Suppress("DEPRECATION")
+        fun getInstalledVersionCode(context: Context): Long {
+            val installed = context.packageManager.getPackageInfo(context.packageName, 0)
+            return if (Build.VERSION.SDK_INT >= 28) installed.longVersionCode else installed.versionCode.toLong()
+        }
+
+        fun verifyDownloadedApk(context: Context, apkFile: File): ApkVerificationResult {
+            return try {
+                validateUpdateApk(context, apkFile)
+                ApkVerificationResult.Valid
+            } catch (e: UpdateSignatureMismatch) {
+                ApkVerificationResult.SignatureMismatch(e.message ?: "Update signature mismatch.")
+            } catch (e: Exception) {
+                ApkVerificationResult.Invalid(e.message ?: "APK verification failed.")
+            }
+        }
+
+        fun formatVerificationError(result: ApkVerificationResult): String = when (result) {
+            is ApkVerificationResult.Valid -> ""
+            is ApkVerificationResult.SignatureMismatch -> result.message
+            is ApkVerificationResult.Invalid -> result.message
         }
 
         fun createInstallApkIntent(context: Context, apkFile: File): Intent {
@@ -439,12 +472,6 @@ class AppUpdater(
             val moved = tempFile.renameTo(targetFile)
             if (!moved) throw IOException("Could not prepare the APK for installation.")
             val finalApk = targetFile
-            try {
-                validateUpdateApk(context, finalApk)
-            } catch (e: Exception) {
-                finalApk.delete()
-                throw e
-            }
             onProgress(100, finalSize, finalSize)
             Result.success(finalApk)
         } catch (ce: CancellationException) {
