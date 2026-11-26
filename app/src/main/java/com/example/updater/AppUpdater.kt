@@ -2,6 +2,8 @@ package com.example.updater
 
 import android.content.Context
 import android.content.Intent
+import android.content.ClipData
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -240,11 +242,34 @@ class AppUpdater(
             }
         }
 
+        @Suppress("DEPRECATION")
+        private fun validateUpdateApk(context: Context, apkFile: File) {
+            val pm = context.packageManager
+            val flags = if (Build.VERSION.SDK_INT >= 28)
+                PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+            val candidate = pm.getPackageArchiveInfo(apkFile.absolutePath, flags)
+                ?: throw IOException("Invalid or incomplete update APK.")
+            val installed = pm.getPackageInfo(context.packageName, flags)
+            if (candidate.packageName != context.packageName)
+                throw IOException("Update APK package name does not match the installed app.")
+            val newVersion = if (Build.VERSION.SDK_INT >= 28) candidate.longVersionCode else candidate.versionCode.toLong()
+            val oldVersion = if (Build.VERSION.SDK_INT >= 28) installed.longVersionCode else installed.versionCode.toLong()
+            if (newVersion <= oldVersion)
+                throw IOException("Update APK version is not newer than the installed app.")
+            val oldSigners = if (Build.VERSION.SDK_INT >= 28) installed.signingInfo?.apkContentsSigners else installed.signatures
+            val newSigners = if (Build.VERSION.SDK_INT >= 28) candidate.signingInfo?.apkContentsSigners else candidate.signatures
+            if (oldSigners.isNullOrEmpty() || newSigners.isNullOrEmpty() ||
+                oldSigners.toSet() != newSigners.toSet())
+                throw IOException("Update signature mismatch. The APK must be signed with the original installed app key.")
+        }
+
         fun createInstallApkIntent(context: Context, apkFile: File): Intent {
+            validateUpdateApk(context, apkFile)
             val authority = "${context.packageName}.fileprovider"
             val apkUri = FileProvider.getUriForFile(context, authority, apkFile)
             return Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(apkUri, "application/vnd.android.package-archive")
+                clipData = ClipData.newRawUri("KRAS TV update", apkUri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
@@ -412,7 +437,14 @@ class AppUpdater(
             }
 
             val moved = tempFile.renameTo(targetFile)
-            val finalApk = if (moved) targetFile else tempFile
+            if (!moved) throw IOException("Could not prepare the APK for installation.")
+            val finalApk = targetFile
+            try {
+                validateUpdateApk(context, finalApk)
+            } catch (e: Exception) {
+                finalApk.delete()
+                throw e
+            }
             onProgress(100, finalSize, finalSize)
             Result.success(finalApk)
         } catch (ce: CancellationException) {
