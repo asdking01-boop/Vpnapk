@@ -13,6 +13,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -39,6 +41,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -50,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.content.res.Configuration
+import android.os.Build
 import com.example.data.local.KrasRepository
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
@@ -59,6 +64,10 @@ import com.example.ui.components.AppUpdateDialogs
 import com.example.ui.components.BottomNavBar
 import com.example.ui.components.NavScreen
 import com.example.ui.components.liquidGlassPanel
+import com.example.ui.premium.LocalPremiumExperienceState
+import com.example.ui.premium.MovieReelsScreen
+import com.example.ui.premium.PremiumLiquidGlassNavBar
+import com.example.ui.premium.rememberPremiumExperienceState
 import com.example.ui.screens.*
 import com.example.ui.theme.*
 import com.example.viewmodel.KrasViewModel
@@ -89,6 +98,16 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val userSettings by viewModel.userSettings.collectAsState()
+            val premiumExperience = rememberPremiumExperienceState(userSettings)
+            val isArabic = remember(userSettings.language) {
+                userSettings.language.equals("Arabic", ignoreCase = true) ||
+                    userSettings.language == "العربية"
+            }
+
+            // Smooth 60Hz / 120Hz display refresh rate optimization (respects Battery Saving Mode)
+            LaunchedEffect(premiumExperience.batterySavingActive) {
+                configurePreferredRefreshRate(preferHighRefreshRate = !premiumExperience.batterySavingActive)
+            }
 
             val accentColor = remember(userSettings.accentColorIndex) {
                 when (userSettings.accentColorIndex) {
@@ -100,7 +119,15 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            KrasTvTheme(accentColor = accentColor) {
+            CompositionLocalProvider(
+                LocalPremiumExperienceState provides premiumExperience,
+                LocalLayoutDirection provides if (isArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+            ) {
+            KrasTvTheme(
+                accentColor = accentColor,
+                isPremiumStyle = premiumExperience.isPremiumStyle,
+                premiumTheme = userSettings.premiumTheme
+            ) {
                 val context = LocalContext.current
                 val crashPrefs = remember {
                     context.getSharedPreferences(KrasApplication.PREFS_CRASH, Context.MODE_PRIVATE)
@@ -178,6 +205,13 @@ class MainActivity : ComponentActivity() {
                         viewModel.dismissMediaDetails()
                         currentScreen = NavScreen.SETTINGS
                         viewModel.consumeNavigateToSettingsFromAuth()
+                    }
+                }
+
+                // If Movie Reels is disabled or user restores Classic Original, leave REELS tab cleanly
+                LaunchedEffect(premiumExperience.movieReelsActive) {
+                    if (currentScreen == NavScreen.REELS && !premiumExperience.movieReelsActive) {
+                        currentScreen = NavScreen.HOME
                     }
                 }
 
@@ -393,27 +427,44 @@ class MainActivity : ComponentActivity() {
                         onSearchQueryChanged = { q -> viewModel.performSearch(q) }
                     )
                 } else {
-                    // Main App Shell with Floating Liquid Glass Bottom Navigation
+                    // Main App Shell with Classic Original or Cinematic Premium 2.0 Floating Liquid Glass Navigation
+                    val shellBackground = if (premiumExperience.isPremiumStyle) {
+                        premiumExperience.palette.background
+                    } else {
+                        CinemaBlack
+                    }
                     Scaffold(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(CinemaBlack),
-                        containerColor = CinemaBlack,
+                            .background(shellBackground),
+                        containerColor = shellBackground,
                         contentWindowInsets = WindowInsets(0, 0, 0, 0),
                         bottomBar = {
-                            val hideBottomBar = isInPip || (currentScreen == NavScreen.LIVE_TV && (isLiveFullscreen || isLandscape))
+                            val hideBottomBar = nowPlayingItem != null ||
+                                isInPip ||
+                                (currentScreen == NavScreen.LIVE_TV && (isLiveFullscreen || isLandscape))
                             if (!hideBottomBar) {
-                                BottomNavBar(
-                                    currentScreen = currentScreen,
-                                    onScreenSelected = { screen ->
-                                        if (currentScreen == NavScreen.LIVE_TV && screen != NavScreen.LIVE_TV && activeLiveChannel != null) {
-                                            viewModel.setLiveMiniPlayer(true)
-                                        } else if (screen == NavScreen.LIVE_TV) {
-                                            viewModel.setLiveMiniPlayer(false)
-                                        }
-                                        currentScreen = screen
+                                val handleScreenSelect: (NavScreen) -> Unit = { screen ->
+                                    if (currentScreen == NavScreen.LIVE_TV && screen != NavScreen.LIVE_TV && activeLiveChannel != null) {
+                                        viewModel.setLiveMiniPlayer(true)
+                                    } else if (screen == NavScreen.LIVE_TV) {
+                                        viewModel.setLiveMiniPlayer(false)
                                     }
-                                )
+                                    currentScreen = screen
+                                }
+                                if (premiumExperience.liquidGlassNavigationActive) {
+                                    PremiumLiquidGlassNavBar(
+                                        currentScreen = currentScreen,
+                                        onScreenSelected = handleScreenSelect,
+                                        showReelsTab = premiumExperience.movieReelsActive,
+                                        isArabic = isArabic
+                                    )
+                                } else {
+                                    BottomNavBar(
+                                        currentScreen = currentScreen,
+                                        onScreenSelected = handleScreenSelect
+                                    )
+                                }
                             }
                         }
                     ) { innerPadding ->
@@ -425,22 +476,26 @@ class MainActivity : ComponentActivity() {
                             AnimatedContent(
                                 targetState = currentScreen,
                                 transitionSpec = {
-                                    val direction = if (targetState.ordinal >= initialState.ordinal) 1 else -1
-                                    (fadeIn(animationSpec = tween(240, easing = FastOutSlowInEasing)) +
-                                        slideInHorizontally(
-                                            animationSpec = tween(260, easing = FastOutSlowInEasing),
-                                            initialOffsetX = { fullWidth -> (fullWidth * 0.06f * direction).toInt() }
-                                        ) +
-                                        scaleIn(
-                                            initialScale = 0.98f,
-                                            animationSpec = tween(240, easing = FastOutSlowInEasing)
-                                        )).togetherWith(
-                                        fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)) +
-                                            slideOutHorizontally(
-                                                animationSpec = tween(220, easing = FastOutSlowInEasing),
-                                                targetOffsetX = { fullWidth -> (-fullWidth * 0.04f * direction).toInt() }
-                                            )
-                                    )
+                                    if (!premiumExperience.animationsEnabled) {
+                                        EnterTransition.None togetherWith ExitTransition.None
+                                    } else {
+                                        val direction = if (targetState.ordinal >= initialState.ordinal) 1 else -1
+                                        (fadeIn(animationSpec = tween(240, easing = FastOutSlowInEasing)) +
+                                            slideInHorizontally(
+                                                animationSpec = tween(260, easing = FastOutSlowInEasing),
+                                                initialOffsetX = { fullWidth -> (fullWidth * 0.06f * direction).toInt() }
+                                            ) +
+                                            scaleIn(
+                                                initialScale = 0.98f,
+                                                animationSpec = tween(240, easing = FastOutSlowInEasing)
+                                            )).togetherWith(
+                                            fadeOut(animationSpec = tween(180, easing = FastOutSlowInEasing)) +
+                                                slideOutHorizontally(
+                                                    animationSpec = tween(220, easing = FastOutSlowInEasing),
+                                                    targetOffsetX = { fullWidth -> (-fullWidth * 0.04f * direction).toInt() }
+                                                )
+                                        )
+                                    }
                                 },
                                 label = "nav_screen_transition"
                             ) { targetScreen ->
@@ -508,6 +563,28 @@ class MainActivity : ComponentActivity() {
                                         onFilterChanged = { cat, q, rating, yr, qFilter, sortQ, sortOrder ->
                                             viewModel.filterSeries(cat, q, rating, yr, qFilter, sortQ, sortOrder)
                                         }
+                                    )
+
+                                    NavScreen.REELS -> MovieReelsScreen(
+                                        movies = movies,
+                                        series = series,
+                                        userSettings = userSettings,
+                                        isFavorite = { id -> viewModel.isFavorite(id) },
+                                        onToggleFavorite = { item -> viewModel.toggleFavorite(item) },
+                                        onWatchNow = { item ->
+                                            when (item.type) {
+                                                MediaType.MOVIE -> viewModel.startPlayback(item)
+                                                MediaType.SERIES -> viewModel.showMediaDetails(item)
+                                                MediaType.LIVE -> {
+                                                    currentScreen = NavScreen.LIVE_TV
+                                                    viewModel.selectLiveChannel(item)
+                                                }
+                                            }
+                                        },
+                                        onOpenDetails = { item -> viewModel.showMediaDetails(item) },
+                                        onResolveTrailerKey = { item -> viewModel.resolveOfficialTrailerKey(item) },
+                                        onUpdateSettings = { updated -> viewModel.updateSettings(updated) },
+                                        isArabic = isArabic
                                     )
 
                                     NavScreen.LIVE_TV -> LiveTvScreen(
@@ -803,6 +880,47 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+            }
+        }
+    }
+
+    /**
+     * Enables smooth high refresh rate (up to 120Hz on flagship displays such as Galaxy S24/S25 Ultra)
+     * while honoring Battery Saving Mode by returning to the system default display mode.
+     */
+    private fun configurePreferredRefreshRate(preferHighRefreshRate: Boolean) {
+        try {
+            val activeDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager?.defaultDisplay
+            } ?: return
+
+            val currentMode = activeDisplay.mode
+            val params = window.attributes
+            if (!preferHighRefreshRate) {
+                if (params.preferredDisplayModeId != 0) {
+                    params.preferredDisplayModeId = 0
+                    window.attributes = params
+                }
+                return
+            }
+
+            val bestMode = activeDisplay.supportedModes
+                .filter {
+                    it.physicalWidth == currentMode.physicalWidth &&
+                        it.physicalHeight == currentMode.physicalHeight &&
+                        it.refreshRate <= 120.5f
+                }
+                .maxByOrNull { it.refreshRate }
+
+            if (bestMode != null && params.preferredDisplayModeId != bestMode.modeId) {
+                params.preferredDisplayModeId = bestMode.modeId
+                window.attributes = params
+            }
+        } catch (_: Exception) {
+            // Gracefully ignore on devices/emulators that restrict display mode switching
         }
     }
 

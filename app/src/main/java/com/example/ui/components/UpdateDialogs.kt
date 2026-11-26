@@ -95,26 +95,28 @@ fun AppUpdateDialogs(
         return
     }
 
-    // 2. Main Update Available / Downloading / Verifying / Error Dialog
+    // 2. Main Update Available / Downloading / Error Dialog
     if (updateState.showUpdateDialog && release != null) {
+        val isSignatureMismatch = updateState.errorMessage
+            ?.contains("signature mismatch", ignoreCase = true) == true
         AlertDialog(
             onDismissRequest = {
-                if (!updateState.isDownloading && !updateState.isVerifying) {
+                if (!updateState.isDownloading) {
                     onDismissDialog()
                 }
             },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = if (updateState.isSignatureMismatch) Icons.Default.Security else Icons.Default.SystemUpdate,
-                        contentDescription = if (updateState.isSignatureMismatch) "Signature Mismatch" else "Update Available",
+                        imageVector = if (isSignatureMismatch) Icons.Default.Security else Icons.Default.SystemUpdate,
+                        contentDescription = if (isSignatureMismatch) "Signature Mismatch" else "Update Available",
                         tint = KrasRedBright,
                         modifier = Modifier.size(24.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
-                            text = if (updateState.isSignatureMismatch) "Update Signature Mismatch" else "New version available",
+                            text = if (isSignatureMismatch) "Update Signature Mismatch" else "New version available",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 18.sp
@@ -201,27 +203,6 @@ fun AppUpdateDialogs(
                         }
                     }
 
-                    if (updateState.isVerifying) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                text = "Verifying APK integrity and signing certificate...",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                            LinearProgressIndicator(
-                                color = KrasRed,
-                                trackColor = Color.White.copy(alpha = 0.15f),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(8.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .testTag("update_verifying_indicator")
-                            )
-                        }
-                    }
-
                     if (updateState.errorMessage != null) {
                         Row(
                             verticalAlignment = Alignment.Top,
@@ -234,7 +215,7 @@ fun AppUpdateDialogs(
                                 .padding(10.dp)
                                 .verticalScroll(rememberScrollState())
                                 .testTag(
-                                    if (updateState.isSignatureMismatch) {
+                                    if (isSignatureMismatch) {
                                         "update_signature_mismatch_box"
                                     } else {
                                         "update_error_box"
@@ -262,8 +243,8 @@ fun AppUpdateDialogs(
             },
             confirmButton = {
                 when {
-                    updateState.isDownloading || updateState.isVerifying || updateState.isSignatureMismatch -> {
-                        // Do not show Update/Retry while downloading, verifying, or when signing certs mismatch
+                    updateState.isDownloading || isSignatureMismatch -> {
+                        // Do not show Update/Retry while downloading or when signing certs mismatch
                     }
                     updateState.errorMessage != null -> {
                         Button(
@@ -295,10 +276,7 @@ fun AppUpdateDialogs(
                             Text("Cancel", color = KrasRedBright, fontWeight = FontWeight.Bold)
                         }
                     }
-                    updateState.isVerifying -> {
-                        // Wait for fast local certificate verification to complete
-                    }
-                    updateState.isSignatureMismatch -> {
+                    isSignatureMismatch -> {
                         TextButton(
                             onClick = onDismissDialog,
                             modifier = Modifier.testTag("update_close_button")

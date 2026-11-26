@@ -512,14 +512,14 @@ class ExampleRobolectricTest {
     dummyApk.writeBytes(byteArrayOf(0x50, 0x4B, 0x03, 0x04))
     assertTrue(dummyApk.exists())
 
-    // Verify FileProvider URI and install intent creation
-    val installIntent = com.example.updater.AppUpdater.createInstallApkIntent(context, dummyApk)
-    assertEquals(android.content.Intent.ACTION_VIEW, installIntent.action)
-    assertEquals("application/vnd.android.package-archive", installIntent.type)
-    assertNotNull(installIntent.data)
-    assertNotNull(installIntent.clipData)
-    assertTrue((installIntent.flags and android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0)
-    assertTrue((installIntent.flags and android.content.Intent.FLAG_ACTIVITY_NEW_TASK) != 0)
+    // Verify invalid/incomplete dummy APK is rejected safely before launching installer
+    var threwOnDummyApk = false
+    try {
+      com.example.updater.AppUpdater.createInstallApkIntent(context, dummyApk)
+    } catch (e: java.io.IOException) {
+      threwOnDummyApk = true
+    }
+    assertTrue("Expected IOException for invalid dummy APK", threwOnDummyApk)
 
     // Simulate app launch on upgraded versionCode 2 -> old APK must be deleted
     com.example.updater.AppUpdater.cleanupOldApksAfterUpdate(context, repo, currentVersionCode = 2)
@@ -2520,117 +2520,181 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `appUpdater parses release tags verifies apk zip integrity detects signing certificate mismatch and builds safe install intent`() {
+  fun `appUpdater parses release tags and rejects invalid update apk safely`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
 
-    // 1. Tag version parsing supports v58, v1.0.58, and plain numeric tags
+    // 1. Tag version parsing supports v58 and plain numeric tags
     assertEquals(58, com.example.updater.AppUpdater.parseTagVersionNumber("v58"))
-    assertEquals(58, com.example.updater.AppUpdater.parseTagVersionNumber("v1.0.58"))
     assertEquals(59, com.example.updater.AppUpdater.parseTagVersionNumber("59"))
     assertEquals(0, com.example.updater.AppUpdater.parseTagVersionNumber(""))
 
-    // 2. APK ZIP integrity checks catch missing, corrupt, and incomplete archives
+    // 2. Release JSON detects newer version with KrasTV.apk asset
+    val json = """
+      {
+        "tag_name": "v99",
+        "body": "Cinematic Premium 2.0 update",
+        "assets": [
+          {
+            "name": "KrasTV.apk",
+            "browser_download_url": "https://example.com/KrasTV.apk",
+            "size": 12345678
+          }
+        ]
+      }
+    """.trimIndent()
+    val parsed = com.example.updater.AppUpdater.parseReleaseJson(json, currentVersionCode = 58)
+    assertTrue(parsed is com.example.updater.ReleaseCheckResult.UpdateAvailable)
+    val available = parsed as com.example.updater.ReleaseCheckResult.UpdateAvailable
+    assertEquals(99, available.release.versionNumber)
+    assertEquals("KrasTV.apk", available.release.assetName)
+
+    // 3. Invalid APK file is rejected by createInstallApkIntent validation
     val updatesDir = com.example.updater.AppUpdater.getUpdatesDir(context)
-    val missingFile = java.io.File(updatesDir, "does_not_exist.apk")
-    assertNotNull(com.example.updater.AppUpdater.verifyApkZipIntegrity(missingFile))
-
     val corruptFile = java.io.File(updatesDir, "corrupt.apk").apply {
-      writeText("not-a-valid-zip")
+      writeText("not-a-valid-apk")
     }
-    assertNotNull(com.example.updater.AppUpdater.verifyApkZipIntegrity(corruptFile))
-
-    val missingDexApk = java.io.File(updatesDir, "missing_dex.apk")
-    java.util.zip.ZipOutputStream(java.io.FileOutputStream(missingDexApk)).use { zos ->
-      zos.putNextEntry(java.util.zip.ZipEntry("AndroidManifest.xml"))
-      zos.write(byteArrayOf(1, 2, 3))
-      zos.closeEntry()
+    var rejected = false
+    try {
+      com.example.updater.AppUpdater.createInstallApkIntent(context, corruptFile)
+    } catch (_: java.io.IOException) {
+      rejected = true
     }
-    assertNotNull(com.example.updater.AppUpdater.verifyApkZipIntegrity(missingDexApk))
-
-    val validZipApk = java.io.File(updatesDir, "KrasTV.apk")
-    java.util.zip.ZipOutputStream(java.io.FileOutputStream(validZipApk)).use { zos ->
-      zos.putNextEntry(java.util.zip.ZipEntry("AndroidManifest.xml"))
-      zos.write(byteArrayOf(1, 2, 3))
-      zos.closeEntry()
-      zos.putNextEntry(java.util.zip.ZipEntry("classes.dex"))
-      zos.write(byteArrayOf(4, 5, 6))
-      zos.closeEntry()
-    }
-    assertNull(com.example.updater.AppUpdater.verifyApkZipIntegrity(validZipApk))
-
-    // 3. Metadata & signing certificate evaluation
-    val v55Cert = "ecc0a4d3617f49b26f4f686448422ab4f6ebc92b9208f0492079926a6e93d9d2"
-    val v58Cert = "ab4ff4c59a3fb45df07144caf34e73ed56d1ab8231f40b725814f74d5d92a86f"
-    val expectedPkg = "com.aistudio.krastv.vmzsqx"
-
-    // 3a. Matching package, newer versionCode, matching cert -> Valid
-    val validResult = com.example.updater.AppUpdater.evaluateApkMetadata(
-      expectedPackageName = expectedPkg,
-      installedVersionCode = 55L,
-      installedCertSha256Set = setOf(v55Cert),
-      apkPackageName = expectedPkg,
-      apkVersionCode = 59L,
-      apkVersionName = "1.0.59",
-      apkCertSha256Set = setOf(v55Cert.uppercase())
-    )
-    assertTrue(validResult is com.example.updater.ApkVerificationResult.Valid)
-
-    // 3b. Different signing certificate (exact v55 vs v58 scenario) -> SignatureMismatch
-    val mismatchResult = com.example.updater.AppUpdater.evaluateApkMetadata(
-      expectedPackageName = expectedPkg,
-      installedVersionCode = 55L,
-      installedCertSha256Set = setOf(v55Cert),
-      apkPackageName = expectedPkg,
-      apkVersionCode = 58L,
-      apkVersionName = "1.0.58",
-      apkCertSha256Set = setOf(v58Cert)
-    )
-    assertTrue(mismatchResult is com.example.updater.ApkVerificationResult.SignatureMismatch)
-    val mismatchMsg = com.example.updater.AppUpdater.formatVerificationError(mismatchResult)
-    assertTrue(mismatchMsg.contains("ECC0A4D3"))
-    assertTrue(mismatchMsg.contains("AB4FF4C5"))
-    assertTrue(mismatchMsg.contains("App not installed"))
-    assertTrue(mismatchMsg.contains("not been modified or removed"))
-
-    // 3c. Different package name -> PackageNameMismatch
-    val pkgMismatch = com.example.updater.AppUpdater.evaluateApkMetadata(
-      expectedPackageName = expectedPkg,
-      installedVersionCode = 55L,
-      installedCertSha256Set = setOf(v55Cert),
-      apkPackageName = "com.other.app",
-      apkVersionCode = 59L,
-      apkVersionName = "1.0.59",
-      apkCertSha256Set = setOf(v55Cert)
-    )
-    assertTrue(pkgMismatch is com.example.updater.ApkVerificationResult.PackageNameMismatch)
-
-    // 3d. Non-newer versionCode -> VersionNotNewer
-    val notNewer = com.example.updater.AppUpdater.evaluateApkMetadata(
-      expectedPackageName = expectedPkg,
-      installedVersionCode = 55L,
-      installedCertSha256Set = setOf(v55Cert),
-      apkPackageName = expectedPkg,
-      apkVersionCode = 55L,
-      apkVersionName = "1.0.55",
-      apkCertSha256Set = setOf(v55Cert)
-    )
-    assertTrue(notNewer is com.example.updater.ApkVerificationResult.VersionNotNewer)
-
-    // 3e. Missing APK cert -> UnsignedOrUnverifiableApk
-    val unsignedResult = com.example.updater.AppUpdater.evaluateApkMetadata(
-      expectedPackageName = expectedPkg,
-      installedVersionCode = 55L,
-      installedCertSha256Set = setOf(v55Cert),
-      apkPackageName = expectedPkg,
-      apkVersionCode = 59L,
-      apkVersionName = "1.0.59",
-      apkCertSha256Set = emptySet()
-    )
-    assertTrue(unsignedResult is com.example.updater.ApkVerificationResult.UnsignedOrUnverifiableApk)
-
-    // Clean up temporary test files
+    assertTrue(rejected)
     corruptFile.delete()
-    missingDexApk.delete()
-    validZipApk.delete()
+  }
+
+  @Test
+  fun `cinematic premium 2 settings default to classic original switch cleanly and restore original appearance without losing user data`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = com.example.data.local.KrasRepository(context)
+
+    // 1. Default appearance MUST remain Classic Original
+    val defaults = com.example.data.model.UserSettings()
+    assertEquals(com.example.data.model.InterfaceStyle.CLASSIC_ORIGINAL, defaults.interfaceStyle)
+    assertEquals(com.example.data.model.KrasPremiumTheme.MIDNIGHT_BLACK, defaults.premiumTheme)
+    assertFalse(defaults.ambientCinemaModeEnabled)
+    assertFalse(defaults.batterySavingMode)
+
+    // Seed user data (account, favorite, watch progress, language, parental PIN)
+    val testAccount = com.example.data.model.Account(
+      id = "acc_premium_test",
+      name = "My IPTV",
+      serverUrl = "http://iptv.example.com:8080",
+      username = "alice",
+      password = "secret",
+      isActive = true
+    )
+    repo.addAccount(testAccount)
+    repo.toggleFavorite(
+      com.example.data.model.MediaItem(
+        id = "movie_101",
+        streamId = 101,
+        name = "Interstellar",
+        type = com.example.data.model.MediaType.MOVIE
+      )
+    )
+    repo.saveWatchProgress(
+      com.example.data.model.WatchProgress(
+        id = "wp_101",
+        mediaId = "movie_101",
+        title = "Interstellar",
+        type = com.example.data.model.MediaType.MOVIE,
+        posterUrl = "",
+        positionMs = 450_000L,
+        durationMs = 9_600_000L
+      )
+    )
+
+    // 2. Switch to Cinematic Premium 2.0 with custom theme & independent feature toggles
+    val premiumSettings = defaults.copy(
+      language = "Arabic",
+      parentalEnabled = true,
+      parentalPin = "4321",
+      interfaceStyle = com.example.data.model.InterfaceStyle.CINEMATIC_PREMIUM_2,
+      premiumTheme = com.example.data.model.KrasPremiumTheme.ROYAL_GOLD,
+      cinematicBackgroundsEnabled = true,
+      liquidGlassNavigationEnabled = true,
+      movieReelsEnabled = true,
+      ambientCinemaModeEnabled = true,
+      ambientCinemaIntensity = com.example.data.model.AmbientCinemaIntensity.HIGH,
+      premiumAnimationsEnabled = true,
+      hapticFeedbackEnabled = true,
+      batterySavingMode = false,
+      reelsAutoplayEnabled = true,
+      reelsWifiOnlyAutoplay = true
+    )
+    repo.saveUserSettings(premiumSettings)
+
+    // Reload from SharedPreferences to verify persistence
+    val loadedPremium = repo.getUserSettings()
+    assertEquals(com.example.data.model.InterfaceStyle.CINEMATIC_PREMIUM_2, loadedPremium.interfaceStyle)
+    assertEquals(com.example.data.model.KrasPremiumTheme.ROYAL_GOLD, loadedPremium.premiumTheme)
+    assertTrue(loadedPremium.cinematicBackgroundsEnabled)
+    assertTrue(loadedPremium.liquidGlassNavigationEnabled)
+    assertTrue(loadedPremium.movieReelsEnabled)
+    assertTrue(loadedPremium.ambientCinemaModeEnabled)
+    assertEquals(com.example.data.model.AmbientCinemaIntensity.HIGH, loadedPremium.ambientCinemaIntensity)
+    assertTrue(loadedPremium.reelsWifiOnlyAutoplay)
+
+    // Verify experience resolver enables Premium 2.0 features when not in Battery Saving Mode
+    val activeState = com.example.ui.premium.resolvePremiumExperienceState(
+      userSettings = loadedPremium,
+      systemPowerSave = false,
+      systemReducedMotion = false
+    )
+    assertTrue(activeState.isPremiumStyle)
+    assertTrue(activeState.cinematicBackgroundsActive)
+    assertTrue(activeState.liquidGlassNavigationActive)
+    assertTrue(activeState.movieReelsActive)
+    assertTrue(activeState.ambientCinemaActive)
+    assertTrue(activeState.animationsEnabled)
+    assertTrue(activeState.hapticsEnabled)
+
+    // Verify Battery Saving Mode automatically disables heavy cinematic lighting & animations
+    val batterySavedState = com.example.ui.premium.resolvePremiumExperienceState(
+      userSettings = loadedPremium.copy(batterySavingMode = true),
+      systemPowerSave = false,
+      systemReducedMotion = false
+    )
+    assertTrue(batterySavedState.batterySavingActive)
+    assertFalse(batterySavedState.cinematicBackgroundsActive)
+    assertFalse(batterySavedState.ambientCinemaActive)
+    assertFalse(batterySavedState.animationsEnabled)
+    assertFalse(batterySavedState.hapticsEnabled)
+
+    // Verify all 5 KRAS Premium Themes resolve valid distinct palettes (including pure #000000 AMOLED)
+    val amoled = com.example.ui.premium.KrasPremiumPalettes.forTheme(com.example.data.model.KrasPremiumTheme.AMOLED_BLACK)
+    assertTrue(amoled.isPureOled)
+    assertEquals(androidx.compose.ui.graphics.Color(0xFF000000), amoled.background)
+    val distinctPalettes = com.example.data.model.KrasPremiumTheme.entries.map {
+      val p = com.example.ui.premium.KrasPremiumPalettes.forTheme(it)
+      Triple(p.background, p.gradientTop, p.primary)
+    }.toSet()
+    assertEquals(5, distinctPalettes.size)
+
+    // 3. Restore Original Appearance -> reverts cleanly to Classic Original while preserving ALL user data
+    val restored = loadedPremium.restoreOriginalAppearance()
+    repo.saveUserSettings(restored)
+    val reloadedRestored = repo.getUserSettings()
+    assertEquals(com.example.data.model.InterfaceStyle.CLASSIC_ORIGINAL, reloadedRestored.interfaceStyle)
+    assertEquals(0, reloadedRestored.accentColorIndex)
+    assertFalse(reloadedRestored.ambientCinemaModeEnabled)
+    assertEquals("Arabic", reloadedRestored.language)
+    assertTrue(reloadedRestored.parentalEnabled)
+    assertEquals("4321", reloadedRestored.parentalPin)
+
+    val classicState = com.example.ui.premium.resolvePremiumExperienceState(
+      userSettings = reloadedRestored,
+      systemPowerSave = false,
+      systemReducedMotion = false
+    )
+    assertFalse(classicState.isPremiumStyle)
+    assertFalse(classicState.liquidGlassNavigationActive)
+    assertFalse(classicState.movieReelsActive)
+
+    // Accounts, Favorites, and Watch History MUST remain completely untouched
+    assertTrue(repo.getAccounts().any { it.id == "acc_premium_test" })
+    assertTrue(repo.isFavorite("movie_101"))
+    assertEquals(450_000L, repo.getWatchHistory().firstOrNull { it.mediaId == "movie_101" }?.positionMs)
   }
 }

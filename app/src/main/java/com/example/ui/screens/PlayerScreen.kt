@@ -94,6 +94,8 @@ import com.example.ui.components.ResolutionBadge
 import com.example.ui.components.ScreenRotationSelectorOverlay
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.components.liquidPressClickable
+import com.example.ui.premium.AmbientCinemaBackdrop
+import com.example.ui.premium.AmbientCinemaEdgeAura
 import com.example.ui.theme.*
 import kotlinx.coroutines.delay
 
@@ -417,6 +419,9 @@ fun PlayerScreen(
         }
 
         val boundPlayer = mediaController ?: playerWrapper.getPlayer()
+        val ambientArtworkUrl = remember(mediaItem.backdrop, mediaItem.streamIcon) {
+            mediaItem.backdrop.ifBlank { mediaItem.streamIcon }
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -427,6 +432,15 @@ fun PlayerScreen(
                 },
             contentAlignment = Alignment.Center
         ) {
+            // Optional Ambient Cinema Mode backdrop (soft artwork-derived theater lighting;
+            // never captures protected video surfaces or interferes with hardware decoding)
+            AmbientCinemaBackdrop(
+                enabled = userSettings.ambientCinemaModeEnabled,
+                intensity = userSettings.ambientCinemaIntensity,
+                artworkUrl = ambientArtworkUrl,
+                isPlaying = isPlaying
+            )
+
             AndroidView(
                 factory = { ctx ->
                     PlayerView(ctx).apply {
@@ -455,6 +469,15 @@ fun PlayerScreen(
                         .aspectRatio(16f / 9f)
                 }
             )
+
+            if (isFullscreen) {
+                AmbientCinemaEdgeAura(
+                    enabled = userSettings.ambientCinemaModeEnabled,
+                    intensity = userSettings.ambientCinemaIntensity,
+                    artworkUrl = ambientArtworkUrl,
+                    isPlaying = isPlaying
+                )
+            }
         }
 
         // Pure black video surface before the first frame is rendered, with subtle fade-out on first frame

@@ -39,7 +39,7 @@ import com.example.ui.theme.OutfitFontFamily
 import com.example.ui.theme.TextSecondary
 
 enum class NavScreen {
-    HOME, MOVIES, SERIES, LIVE_TV, SETTINGS
+    HOME, MOVIES, SERIES, REELS, LIVE_TV, SETTINGS
 }
 
 @Composable

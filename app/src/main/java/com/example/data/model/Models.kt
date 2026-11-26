@@ -43,6 +43,59 @@ enum class MediaSortOrder(val label: String, val shortLabel: String) {
     TITLE_ZA("Title – Z to A", "Title: Z–A")
 }
 
+enum class InterfaceStyle(val label: String, val arabicLabel: String) {
+    CLASSIC_ORIGINAL("Classic Original", "الواجهة الكلاسيكية الأصلية"),
+    CINEMATIC_PREMIUM_2("Cinematic Premium 2.0", "الواجهة السينمائية بريميوم 2.0")
+}
+
+enum class KrasPremiumTheme(
+    val label: String,
+    val arabicLabel: String,
+    val tagline: String,
+    val arabicTagline: String
+) {
+    MIDNIGHT_BLACK(
+        label = "Midnight Black",
+        arabicLabel = "أسود منتصف الليل",
+        tagline = "Obsidian cinema glass & crimson glow",
+        arabicTagline = "زجاج سينمائي داكن وتوهج قرمزي"
+    ),
+    NETFLIX_RED(
+        label = "Netflix Red",
+        arabicLabel = "أحمر نتفليكس",
+        tagline = "Iconic studio red & theater contrast",
+        arabicTagline = "أحمر سينمائي أيقوني وتباين مسرحي"
+    ),
+    ROYAL_GOLD(
+        label = "Royal Gold",
+        arabicLabel = "الذهبي الملكي",
+        tagline = "24K champagne gold & obsidian luxury",
+        arabicTagline = "ذهب فاخر مع خلفية أوبسيديان داكنة"
+    ),
+    TITANIUM_SILVER(
+        label = "Titanium Silver",
+        arabicLabel = "فضي تيتانيوم",
+        tagline = "Brushed titanium & platinum sheen",
+        arabicTagline = "تيتانيوم مصقول وبريق بلاتيني"
+    ),
+    AMOLED_BLACK(
+        label = "AMOLED Black",
+        arabicLabel = "أسود AMOLED",
+        tagline = "True #000000 pure OLED contrast",
+        arabicTagline = "أسود نقي حقيقي لشاشات AMOLED"
+    )
+}
+
+enum class AmbientCinemaIntensity(
+    val label: String,
+    val arabicLabel: String,
+    val alphaMultiplier: Float
+) {
+    LOW("Low", "منخفض", 0.36f),
+    MEDIUM("Medium", "متوسط", 0.62f),
+    HIGH("High", "مرتفع", 0.90f)
+}
+
 
 data class Account(
     val id: String,
@@ -201,8 +254,40 @@ data class UserSettings(
     val liveSwipeGesturesEnabled: Boolean = true,
     val tmdbProxyUrl: String = "https://kras-tmdb-proxy.asdking01.workers.dev",
     val tmdbAutoEnrichEnabled: Boolean = true,
-    val tmdbAutoSyncEnabled: Boolean = true
-)
+    val tmdbAutoSyncEnabled: Boolean = true,
+    // KRAS TV — Cinematic Premium 2.0 (Classic Original remains the default)
+    val interfaceStyle: InterfaceStyle = InterfaceStyle.CLASSIC_ORIGINAL,
+    val premiumTheme: KrasPremiumTheme = KrasPremiumTheme.MIDNIGHT_BLACK,
+    val cinematicBackgroundsEnabled: Boolean = true,
+    val liquidGlassNavigationEnabled: Boolean = true,
+    val movieReelsEnabled: Boolean = true,
+    val ambientCinemaModeEnabled: Boolean = false,
+    val ambientCinemaIntensity: AmbientCinemaIntensity = AmbientCinemaIntensity.MEDIUM,
+    val premiumAnimationsEnabled: Boolean = true,
+    val hapticFeedbackEnabled: Boolean = true,
+    val batterySavingMode: Boolean = false,
+    val reelsAutoplayEnabled: Boolean = true,
+    val reelsWifiOnlyAutoplay: Boolean = true
+) {
+    /**
+     * Restores the exact Classic Original appearance and disables all Premium 2.0 visual effects,
+     * while strictly preserving accounts, playlists, favorites, watch history, language, parental PIN,
+     * Live TV settings, and TMDb sync settings.
+     */
+    fun restoreOriginalAppearance(): UserSettings = copy(
+        interfaceStyle = InterfaceStyle.CLASSIC_ORIGINAL,
+        accentColorIndex = 0,
+        premiumTheme = KrasPremiumTheme.MIDNIGHT_BLACK,
+        cinematicBackgroundsEnabled = false,
+        liquidGlassNavigationEnabled = false,
+        movieReelsEnabled = false,
+        ambientCinemaModeEnabled = false,
+        ambientCinemaIntensity = AmbientCinemaIntensity.MEDIUM,
+        premiumAnimationsEnabled = false,
+        hapticFeedbackEnabled = false,
+        batterySavingMode = false
+    )
+}
 
 // Xtream Codes API DTOs
 @JsonClass(generateAdapter = true)

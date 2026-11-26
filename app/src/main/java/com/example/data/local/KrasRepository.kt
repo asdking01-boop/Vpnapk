@@ -1056,15 +1056,50 @@ class KrasRepository(context: Context) {
             LiveChannelOrder.SMART
         }
 
+        val interfaceStyle = try {
+            InterfaceStyle.valueOf(
+                prefs.getString("interfaceStyle", InterfaceStyle.CLASSIC_ORIGINAL.name)
+                    ?: InterfaceStyle.CLASSIC_ORIGINAL.name
+            )
+        } catch (_: Exception) {
+            InterfaceStyle.CLASSIC_ORIGINAL
+        }
+
+        val premiumTheme = try {
+            KrasPremiumTheme.valueOf(
+                prefs.getString("premiumTheme", KrasPremiumTheme.MIDNIGHT_BLACK.name)
+                    ?: KrasPremiumTheme.MIDNIGHT_BLACK.name
+            )
+        } catch (_: Exception) {
+            KrasPremiumTheme.MIDNIGHT_BLACK
+        }
+
+        val ambientIntensity = try {
+            AmbientCinemaIntensity.valueOf(
+                prefs.getString("ambientCinemaIntensity", AmbientCinemaIntensity.MEDIUM.name)
+                    ?: AmbientCinemaIntensity.MEDIUM.name
+            )
+        } catch (_: Exception) {
+            AmbientCinemaIntensity.MEDIUM
+        }
+
         val canonicalProxyUrl = migrateStoredTmdbProxyUrl()
 
         return UserSettings(
             accentColorIndex = prefs.getInt("accentColorIndex", 0),
             blurIntensity = prefs.getString("blurIntensity", "Medium") ?: "Medium",
-            cardStyle = CardStyle.valueOf(prefs.getString("cardStyle", CardStyle.POSTER.name) ?: CardStyle.POSTER.name),
+            cardStyle = try {
+                CardStyle.valueOf(prefs.getString("cardStyle", CardStyle.POSTER.name) ?: CardStyle.POSTER.name)
+            } catch (_: Exception) {
+                CardStyle.POSTER
+            },
             defaultQuality = prefs.getString("defaultQuality", "Auto") ?: "Auto",
             bufferSize = prefs.getString("bufferSize", "Large") ?: "Large",
-            defaultAspectRatio = AspectRatioMode.valueOf(prefs.getString("defaultAspectRatio", AspectRatioMode.FIT.name) ?: AspectRatioMode.FIT.name),
+            defaultAspectRatio = try {
+                AspectRatioMode.valueOf(prefs.getString("defaultAspectRatio", AspectRatioMode.FIT.name) ?: AspectRatioMode.FIT.name)
+            } catch (_: Exception) {
+                AspectRatioMode.FIT
+            },
             language = prefs.getString("language", "English") ?: "English",
             parentalPin = prefs.getString("parentalPin", "") ?: "",
             parentalEnabled = prefs.getBoolean("parentalEnabled", false),
@@ -1076,7 +1111,19 @@ class KrasRepository(context: Context) {
             liveSwipeGesturesEnabled = prefs.getBoolean("liveSwipeGesturesEnabled", true),
             tmdbProxyUrl = canonicalProxyUrl,
             tmdbAutoEnrichEnabled = true,
-            tmdbAutoSyncEnabled = prefs.getBoolean("tmdbAutoSyncEnabled", true)
+            tmdbAutoSyncEnabled = prefs.getBoolean("tmdbAutoSyncEnabled", true),
+            interfaceStyle = interfaceStyle,
+            premiumTheme = premiumTheme,
+            cinematicBackgroundsEnabled = prefs.getBoolean("cinematicBackgroundsEnabled", true),
+            liquidGlassNavigationEnabled = prefs.getBoolean("liquidGlassNavigationEnabled", true),
+            movieReelsEnabled = prefs.getBoolean("movieReelsEnabled", true),
+            ambientCinemaModeEnabled = prefs.getBoolean("ambientCinemaModeEnabled", false),
+            ambientCinemaIntensity = ambientIntensity,
+            premiumAnimationsEnabled = prefs.getBoolean("premiumAnimationsEnabled", true),
+            hapticFeedbackEnabled = prefs.getBoolean("hapticFeedbackEnabled", true),
+            batterySavingMode = prefs.getBoolean("batterySavingMode", false),
+            reelsAutoplayEnabled = prefs.getBoolean("reelsAutoplayEnabled", true),
+            reelsWifiOnlyAutoplay = prefs.getBoolean("reelsWifiOnlyAutoplay", true)
         )
     }
 
@@ -1104,6 +1151,18 @@ class KrasRepository(context: Context) {
             putString("tmdbProxyUrl", normalizedProxyUrl)
             putBoolean("tmdbAutoEnrichEnabled", true)
             putBoolean("tmdbAutoSyncEnabled", settings.tmdbAutoSyncEnabled)
+            putString("interfaceStyle", settings.interfaceStyle.name)
+            putString("premiumTheme", settings.premiumTheme.name)
+            putBoolean("cinematicBackgroundsEnabled", settings.cinematicBackgroundsEnabled)
+            putBoolean("liquidGlassNavigationEnabled", settings.liquidGlassNavigationEnabled)
+            putBoolean("movieReelsEnabled", settings.movieReelsEnabled)
+            putBoolean("ambientCinemaModeEnabled", settings.ambientCinemaModeEnabled)
+            putString("ambientCinemaIntensity", settings.ambientCinemaIntensity.name)
+            putBoolean("premiumAnimationsEnabled", settings.premiumAnimationsEnabled)
+            putBoolean("hapticFeedbackEnabled", settings.hapticFeedbackEnabled)
+            putBoolean("batterySavingMode", settings.batterySavingMode)
+            putBoolean("reelsAutoplayEnabled", settings.reelsAutoplayEnabled)
+            putBoolean("reelsWifiOnlyAutoplay", settings.reelsWifiOnlyAutoplay)
         }.apply()
     }
 

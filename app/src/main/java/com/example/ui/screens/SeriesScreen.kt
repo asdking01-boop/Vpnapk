@@ -36,10 +36,10 @@ import com.example.data.model.Category
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaSortOrder
 import com.example.data.model.WatchProgress
-import com.example.ui.components.DynamicAmbientPosterBackdrop
 import com.example.ui.components.LiquidGlassChip
 import com.example.ui.components.MediaCard
 import com.example.ui.components.liquidGlassPanel
+import com.example.ui.premium.CinematicScreenBackdrop
 import com.example.ui.theme.*
 
 @Composable
@@ -231,15 +231,23 @@ fun SeriesScreen(
         return
     }
 
+    val seriesScrollParallaxPx by remember {
+        derivedStateOf {
+            (gridState.firstVisibleItemIndex * 180f + gridState.firstVisibleItemScrollOffset.toFloat())
+                .coerceIn(0f, 600f)
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(CinemaBlack)
+            .background(MaterialTheme.colorScheme.background)
             .testTag("series_screen")
     ) {
-        DynamicAmbientPosterBackdrop(
+        CinematicScreenBackdrop(
             imageUrl = ambientPosterUrl,
-            ambientAlpha = 0.22f
+            scrollOffsetPx = seriesScrollParallaxPx,
+            ambientAlpha = 0.28f
         )
 
         Column(

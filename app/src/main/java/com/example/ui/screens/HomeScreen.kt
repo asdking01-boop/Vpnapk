@@ -30,7 +30,6 @@ import com.example.data.model.CardStyle
 import com.example.data.model.FavoriteItem
 import com.example.data.model.MediaItem
 import com.example.data.model.WatchProgress
-import com.example.ui.components.DynamicAmbientPosterBackdrop
 import com.example.ui.components.HeroBannerCarousel
 import com.example.ui.components.HeroBannerSkeleton
 import com.example.ui.components.LiquidGlassChip
@@ -38,6 +37,7 @@ import com.example.ui.components.MediaRow
 import com.example.ui.components.MediaRowSkeleton
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.components.liquidGlassPanel
+import com.example.ui.premium.CinematicScreenBackdrop
 import com.example.ui.theme.*
 
 @Composable
@@ -120,13 +120,14 @@ fun HomeScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(CinemaBlack)
+            .background(MaterialTheme.colorScheme.background)
             .testTag("home_screen")
     ) {
-        // Dynamic Blurred Ambient Backdrop extracted from featured poster
-        DynamicAmbientPosterBackdrop(
+        // Dynamic Cinematic Background in Premium 2.0 (falls back identically to Classic Original backdrop)
+        CinematicScreenBackdrop(
             imageUrl = ambientPosterUrl,
-            ambientAlpha = 0.28f
+            scrollOffsetPx = heroParallaxOffset,
+            ambientAlpha = 0.34f
         )
 
         if (isLoading && movies.isEmpty() && series.isEmpty() && liveStreams.isEmpty()) {

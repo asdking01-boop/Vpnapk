@@ -1103,6 +1103,70 @@ class TmdbDirectClient(
         items
     }
 
+    private val trailerKeyCache = ConcurrentHashMap<String, String>()
+
+    /**
+     * Fetches the official YouTube video key for a movie or TV series directly from TMDb v3
+     * (/movie/{id}/videos or /tv/{id}/videos). Returns null when unavailable or offline.
+     * Never downloads or extracts raw media streams.
+     */
+    suspend fun fetchOfficialYoutubeTrailerKey(
+        apiKey: String,
+        tmdbId: Int,
+        isSeries: Boolean
+    ): String? = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isEmpty() || tmdbId <= 0) return@withContext null
+
+        val cacheKey = "${if (isSeries) "tv" else "movie"}_$tmdbId"
+        trailerKeyCache[cacheKey]?.let { cached ->
+            return@withContext cached.ifEmpty { null }
+        }
+
+        val mediaSegment = if (isSeries) "tv" else "movie"
+        val url = "$TMDB_BASE_URL/$mediaSegment/$tmdbId/videos?api_key=${URLEncoder.encode(cleanKey, "UTF-8")}&language=en-US"
+        val request = Request.Builder()
+            .url(url)
+            .header("Accept", "application/json")
+            .get()
+            .build()
+
+        val foundKey = try {
+            httpClient.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) return@use ""
+                val json = parseJsonObjectSafe(resp.body?.string().orEmpty()) ?: return@use ""
+                val results = json.optJSONArray("results") ?: return@use ""
+                var bestKey = ""
+                var bestScore = -1
+                for (i in 0 until results.length()) {
+                    val obj = results.optJSONObject(i) ?: continue
+                    val site = obj.optString("site", "")
+                    val key = obj.optString("key", "").trim()
+                    if (!site.equals("YouTube", ignoreCase = true) || key.isBlank()) continue
+                    val type = obj.optString("type", "")
+                    val official = obj.optBoolean("official", false)
+                    val score = when {
+                        type.equals("Trailer", ignoreCase = true) && official -> 100
+                        type.equals("Trailer", ignoreCase = true) -> 80
+                        type.equals("Teaser", ignoreCase = true) && official -> 60
+                        type.equals("Teaser", ignoreCase = true) -> 40
+                        else -> 10
+                    }
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestKey = key
+                    }
+                }
+                bestKey
+            }
+        } catch (_: Exception) {
+            ""
+        }
+
+        trailerKeyCache[cacheKey] = foundKey
+        foundKey.ifEmpty { null }
+    }
+
     companion object {
         private const val TMDB_BASE_URL = "https://api.themoviedb.org/3"
         private const val NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000L

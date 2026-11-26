@@ -48,6 +48,8 @@ import com.example.data.model.UserSettings
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.KrasLogo
 import com.example.ui.components.liquidGlassPanel
+import com.example.ui.premium.AppearanceExperienceSettingsCard
+import com.example.ui.premium.PlayerAmbientCinemaSettingsBlock
 import com.example.ui.theme.*
 import com.example.updater.AppUpdateUiState
 import java.util.Locale
@@ -140,7 +142,7 @@ fun SettingsScreen(
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
-            .background(CinemaBlack)
+            .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
             .padding(horizontal = 16.dp)
             .testTag("settings_screen")
@@ -415,7 +417,17 @@ fun SettingsScreen(
             }
         }
 
-        // 3. Theme & Customization
+        // 3A. Appearance & Experience (Classic Original vs Cinematic Premium 2.0, 5 Premium Themes, Independent Toggles)
+        item {
+            AppearanceExperienceSettingsCard(
+                userSettings = userSettings,
+                isArabic = isArabic,
+                onUpdateSettings = onUpdateSettings,
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+        }
+
+        // 3B. Classic Theme & Customization (Preserved intact)
         item {
             Box(
                 modifier = Modifier
@@ -607,6 +619,15 @@ fun SettingsScreen(
                             )
                         )
                     }
+
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                    // Ambient Cinema Mode (Player Lighting & Intensity)
+                    PlayerAmbientCinemaSettingsBlock(
+                        userSettings = userSettings,
+                        isArabic = isArabic,
+                        onUpdateSettings = onUpdateSettings
+                    )
                 }
             }
         }
