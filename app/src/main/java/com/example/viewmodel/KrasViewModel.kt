@@ -27,6 +27,7 @@ import com.example.player.ExoPlayerWrapper
 import com.example.player.KrasMediaPlaybackService
 import com.example.player.PlaybackNotificationMetadata
 import com.example.sound.CinematicSoundPlayer
+import com.example.updater.ApkVerificationResult
 import com.example.updater.AppUpdateUiState
 import com.example.updater.AppUpdater
 import com.example.updater.ReleaseCheckResult
@@ -2861,7 +2862,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val app = getApplication<Application>()
-                AppUpdater.cleanupOldApksAfterUpdate(app, repository, BuildConfig.VERSION_CODE)
+                val installedVersion = AppUpdater.getInstalledVersionCode(app).toInt()
+                    .takeIf { it > 0 } ?: BuildConfig.VERSION_CODE
+                AppUpdater.cleanupOldApksAfterUpdate(app, repository, installedVersion)
 
                 if (!_userSettings.value.autoCheckUpdates) return@launch
 
@@ -2881,14 +2884,20 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         updateCheckJob?.cancel()
         updateCheckJob = viewModelScope.launch(Dispatchers.IO) {
             try {
+                val app = getApplication<Application>()
+                val installedVersionCode = AppUpdater.getInstalledVersionCode(app).toInt()
+                    .takeIf { it > 0 } ?: BuildConfig.VERSION_CODE
+
                 _updateState.value = _updateState.value.copy(
                     isChecking = true,
+                    isVerifying = false,
+                    isSignatureMismatch = false,
                     statusMessage = if (isManual) "Checking for updates..." else _updateState.value.statusMessage,
                     isStatusError = false,
                     errorMessage = null
                 )
 
-                val result = appUpdater.checkLatestRelease(BuildConfig.VERSION_CODE)
+                val result = appUpdater.checkLatestRelease(installedVersionCode)
                 repository.saveLastUpdateCheckMs(System.currentTimeMillis())
 
                 when (result) {
@@ -2899,7 +2908,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                             showUpdateDialog = true,
                             statusMessage = "New version ${result.release.tagName} available",
                             isStatusError = false,
-                            errorMessage = null
+                            errorMessage = null,
+                            isSignatureMismatch = false
                         )
                     }
                     is ReleaseCheckResult.UpToDate -> {
@@ -2952,13 +2962,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startUpdateDownload() {
         val release = _updateState.value.availableRelease ?: return
-        if (_updateState.value.isDownloading) return
+        if (_updateState.value.isDownloading || _updateState.value.isVerifying) return
 
         updateDownloadJob?.cancel()
         updateDownloadJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 _updateState.value = _updateState.value.copy(
                     isDownloading = true,
+                    isVerifying = false,
+                    isSignatureMismatch = false,
                     downloadProgress = 0,
                     downloadedBytes = 0L,
                     totalBytes = release.assetSize,
@@ -2977,29 +2989,88 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 downloadResult.onSuccess { apkFile ->
-                    _updateState.value = _updateState.value.copy(
-                        isDownloading = false,
-                        downloadProgress = 100,
-                        pendingInstallFile = apkFile,
-                        errorMessage = null
-                    )
-                    triggerInstallOrRequestPermission(apkFile)
+                    verifyAndLaunchInstaller(apkFile)
                 }.onFailure { err ->
                     _updateState.value = _updateState.value.copy(
                         isDownloading = false,
+                        isVerifying = false,
+                        isSignatureMismatch = false,
                         errorMessage = err.message ?: "Download failed. Please try again."
                     )
                 }
             } catch (ce: CancellationException) {
                 _updateState.value = _updateState.value.copy(
                     isDownloading = false,
+                    isVerifying = false,
                     downloadProgress = 0,
                     downloadedBytes = 0L
                 )
             } catch (e: Exception) {
                 _updateState.value = _updateState.value.copy(
                     isDownloading = false,
+                    isVerifying = false,
+                    isSignatureMismatch = false,
                     errorMessage = e.message ?: "Download failed. Please try again."
+                )
+            }
+        }
+    }
+
+    private suspend fun verifyAndLaunchInstaller(apkFile: File) {
+        val app = getApplication<Application>()
+        _updateState.value = _updateState.value.copy(
+            isDownloading = false,
+            isVerifying = true,
+            downloadProgress = 100,
+            errorMessage = null,
+            isSignatureMismatch = false
+        )
+
+        val verification = withContext(Dispatchers.IO) {
+            AppUpdater.verifyDownloadedApk(app, apkFile)
+        }
+
+        when (verification) {
+            is ApkVerificationResult.Valid -> {
+                _updateState.value = _updateState.value.copy(
+                    isVerifying = false,
+                    pendingInstallFile = apkFile,
+                    errorMessage = null,
+                    isSignatureMismatch = false
+                )
+                launchInstallerOrRequestPermissionInternal(apkFile)
+            }
+            is ApkVerificationResult.SignatureMismatch -> {
+                // Remove incompatible APK from cache; NEVER uninstall existing app
+                try {
+                    apkFile.delete()
+                } catch (_: Exception) {
+                }
+                _updateState.value = _updateState.value.copy(
+                    isVerifying = false,
+                    pendingInstallFile = null,
+                    showInstallPermissionDialog = false,
+                    showUpdateDialog = true,
+                    isSignatureMismatch = true,
+                    errorMessage = AppUpdater.formatVerificationError(verification),
+                    statusMessage = "Update blocked: signing certificate mismatch",
+                    isStatusError = true
+                )
+            }
+            else -> {
+                try {
+                    apkFile.delete()
+                } catch (_: Exception) {
+                }
+                _updateState.value = _updateState.value.copy(
+                    isVerifying = false,
+                    pendingInstallFile = null,
+                    showInstallPermissionDialog = false,
+                    showUpdateDialog = true,
+                    isSignatureMismatch = false,
+                    errorMessage = AppUpdater.formatVerificationError(verification),
+                    statusMessage = "Update verification failed",
+                    isStatusError = true
                 )
             }
         }
@@ -3013,6 +3084,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
         _updateState.value = _updateState.value.copy(
             isDownloading = false,
+            isVerifying = false,
+            isSignatureMismatch = false,
             downloadProgress = 0,
             downloadedBytes = 0L,
             errorMessage = null
@@ -3025,18 +3098,28 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         }
         _updateState.value = _updateState.value.copy(
             showUpdateDialog = false,
+            isVerifying = false,
+            isSignatureMismatch = false,
             errorMessage = null
         )
     }
 
     fun triggerInstallOrRequestPermission(apkFile: File? = _updateState.value.pendingInstallFile) {
         val file = apkFile ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            verifyAndLaunchInstaller(file)
+        }
+    }
+
+    private suspend fun launchInstallerOrRequestPermissionInternal(file: File) {
         val app = getApplication<Application>()
         try {
             if (!file.exists()) {
                 _updateState.value = _updateState.value.copy(
                     showInstallPermissionDialog = false,
                     showUpdateDialog = true,
+                    pendingInstallFile = null,
+                    isSignatureMismatch = false,
                     errorMessage = "Downloaded update file was not found. Tap Retry to download again."
                 )
                 return
@@ -3050,19 +3133,33 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 return
             }
 
-            val installIntent = AppUpdater.createInstallApkIntent(app, file)
-            app.startActivity(installIntent)
-            _updateState.value = _updateState.value.copy(
-                showInstallPermissionDialog = false,
-                showUpdateDialog = false,
-                pendingInstallFile = null,
-                errorMessage = null
-            )
+            withContext(Dispatchers.Main) {
+                val installIntent = AppUpdater.createInstallApkIntent(app, file)
+                val resolved = installIntent.resolveActivity(app.packageManager)
+                if (resolved == null) {
+                    _updateState.value = _updateState.value.copy(
+                        showInstallPermissionDialog = false,
+                        showUpdateDialog = true,
+                        isSignatureMismatch = false,
+                        errorMessage = "No Android package installer was found on this device to open the update APK."
+                    )
+                    return@withContext
+                }
+                app.startActivity(installIntent)
+                _updateState.value = _updateState.value.copy(
+                    showInstallPermissionDialog = false,
+                    showUpdateDialog = false,
+                    pendingInstallFile = null,
+                    errorMessage = null,
+                    isSignatureMismatch = false
+                )
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             _updateState.value = _updateState.value.copy(
                 showInstallPermissionDialog = false,
                 showUpdateDialog = true,
+                isSignatureMismatch = false,
                 errorMessage = "Could not launch package installer: ${e.message ?: "Unknown error"}"
             )
         }

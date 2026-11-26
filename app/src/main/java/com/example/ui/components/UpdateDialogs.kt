@@ -95,26 +95,26 @@ fun AppUpdateDialogs(
         return
     }
 
-    // 2. Main Update Available / Downloading / Error Dialog
+    // 2. Main Update Available / Downloading / Verifying / Error Dialog
     if (updateState.showUpdateDialog && release != null) {
         AlertDialog(
             onDismissRequest = {
-                if (!updateState.isDownloading) {
+                if (!updateState.isDownloading && !updateState.isVerifying) {
                     onDismissDialog()
                 }
             },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Default.SystemUpdate,
-                        contentDescription = "Update Available",
+                        imageVector = if (updateState.isSignatureMismatch) Icons.Default.Security else Icons.Default.SystemUpdate,
+                        contentDescription = if (updateState.isSignatureMismatch) "Signature Mismatch" else "Update Available",
                         tint = KrasRedBright,
                         modifier = Modifier.size(24.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
-                            text = "New version available",
+                            text = if (updateState.isSignatureMismatch) "Update Signature Mismatch" else "New version available",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 18.sp
@@ -144,7 +144,7 @@ fun AppUpdateDialogs(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 60.dp, max = 180.dp)
+                            .heightIn(min = 60.dp, max = 140.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF101014))
                             .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
@@ -201,22 +201,53 @@ fun AppUpdateDialogs(
                         }
                     }
 
+                    if (updateState.isVerifying) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "Verifying APK integrity and signing certificate...",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            LinearProgressIndicator(
+                                color = KrasRed,
+                                trackColor = Color.White.copy(alpha = 0.15f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .testTag("update_verifying_indicator")
+                            )
+                        }
+                    }
+
                     if (updateState.errorMessage != null) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
+                            verticalAlignment = Alignment.Top,
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .heightIn(max = 200.dp)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(Color(0xFF2A0C0E))
-                                .border(1.dp, KrasRed.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                .border(1.dp, KrasRed.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
                                 .padding(10.dp)
-                                .testTag("update_error_box")
+                                .verticalScroll(rememberScrollState())
+                                .testTag(
+                                    if (updateState.isSignatureMismatch) {
+                                        "update_signature_mismatch_box"
+                                    } else {
+                                        "update_error_box"
+                                    }
+                                )
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Warning,
                                 contentDescription = "Error",
                                 tint = KrasRedBright,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier
+                                    .padding(top = 2.dp)
+                                    .size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
@@ -231,8 +262,8 @@ fun AppUpdateDialogs(
             },
             confirmButton = {
                 when {
-                    updateState.isDownloading -> {
-                        // While downloading, only show Cancel in dismissButton
+                    updateState.isDownloading || updateState.isVerifying || updateState.isSignatureMismatch -> {
+                        // Do not show Update/Retry while downloading, verifying, or when signing certs mismatch
                     }
                     updateState.errorMessage != null -> {
                         Button(
@@ -255,19 +286,33 @@ fun AppUpdateDialogs(
                 }
             },
             dismissButton = {
-                if (updateState.isDownloading) {
-                    TextButton(
-                        onClick = onCancelDownload,
-                        modifier = Modifier.testTag("update_cancel_download_button")
-                    ) {
-                        Text("Cancel", color = KrasRedBright, fontWeight = FontWeight.Bold)
+                when {
+                    updateState.isDownloading -> {
+                        TextButton(
+                            onClick = onCancelDownload,
+                            modifier = Modifier.testTag("update_cancel_download_button")
+                        ) {
+                            Text("Cancel", color = KrasRedBright, fontWeight = FontWeight.Bold)
+                        }
                     }
-                } else {
-                    TextButton(
-                        onClick = onDismissDialog,
-                        modifier = Modifier.testTag("update_later_button")
-                    ) {
-                        Text("Later", color = TextSecondary)
+                    updateState.isVerifying -> {
+                        // Wait for fast local certificate verification to complete
+                    }
+                    updateState.isSignatureMismatch -> {
+                        TextButton(
+                            onClick = onDismissDialog,
+                            modifier = Modifier.testTag("update_close_button")
+                        ) {
+                            Text("Close", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    else -> {
+                        TextButton(
+                            onClick = onDismissDialog,
+                            modifier = Modifier.testTag("update_later_button")
+                        ) {
+                            Text("Later", color = TextSecondary)
+                        }
                     }
                 }
             },

@@ -517,7 +517,9 @@ class ExampleRobolectricTest {
     assertEquals(android.content.Intent.ACTION_VIEW, installIntent.action)
     assertEquals("application/vnd.android.package-archive", installIntent.type)
     assertNotNull(installIntent.data)
+    assertNotNull(installIntent.clipData)
     assertTrue((installIntent.flags and android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0)
+    assertTrue((installIntent.flags and android.content.Intent.FLAG_ACTIVITY_NEW_TASK) != 0)
 
     // Simulate app launch on upgraded versionCode 2 -> old APK must be deleted
     com.example.updater.AppUpdater.cleanupOldApksAfterUpdate(context, repo, currentVersionCode = 2)
@@ -2516,8 +2518,119 @@ class ExampleRobolectricTest {
     }
     assertNull(rejectedProxyMatch)
   }
+
+  @Test
+  fun `appUpdater parses release tags verifies apk zip integrity detects signing certificate mismatch and builds safe install intent`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // 1. Tag version parsing supports v58, v1.0.58, and plain numeric tags
+    assertEquals(58, com.example.updater.AppUpdater.parseTagVersionNumber("v58"))
+    assertEquals(58, com.example.updater.AppUpdater.parseTagVersionNumber("v1.0.58"))
+    assertEquals(59, com.example.updater.AppUpdater.parseTagVersionNumber("59"))
+    assertEquals(0, com.example.updater.AppUpdater.parseTagVersionNumber(""))
+
+    // 2. APK ZIP integrity checks catch missing, corrupt, and incomplete archives
+    val updatesDir = com.example.updater.AppUpdater.getUpdatesDir(context)
+    val missingFile = java.io.File(updatesDir, "does_not_exist.apk")
+    assertNotNull(com.example.updater.AppUpdater.verifyApkZipIntegrity(missingFile))
+
+    val corruptFile = java.io.File(updatesDir, "corrupt.apk").apply {
+      writeText("not-a-valid-zip")
+    }
+    assertNotNull(com.example.updater.AppUpdater.verifyApkZipIntegrity(corruptFile))
+
+    val missingDexApk = java.io.File(updatesDir, "missing_dex.apk")
+    java.util.zip.ZipOutputStream(java.io.FileOutputStream(missingDexApk)).use { zos ->
+      zos.putNextEntry(java.util.zip.ZipEntry("AndroidManifest.xml"))
+      zos.write(byteArrayOf(1, 2, 3))
+      zos.closeEntry()
+    }
+    assertNotNull(com.example.updater.AppUpdater.verifyApkZipIntegrity(missingDexApk))
+
+    val validZipApk = java.io.File(updatesDir, "KrasTV.apk")
+    java.util.zip.ZipOutputStream(java.io.FileOutputStream(validZipApk)).use { zos ->
+      zos.putNextEntry(java.util.zip.ZipEntry("AndroidManifest.xml"))
+      zos.write(byteArrayOf(1, 2, 3))
+      zos.closeEntry()
+      zos.putNextEntry(java.util.zip.ZipEntry("classes.dex"))
+      zos.write(byteArrayOf(4, 5, 6))
+      zos.closeEntry()
+    }
+    assertNull(com.example.updater.AppUpdater.verifyApkZipIntegrity(validZipApk))
+
+    // 3. Metadata & signing certificate evaluation
+    val v55Cert = "ecc0a4d3617f49b26f4f686448422ab4f6ebc92b9208f0492079926a6e93d9d2"
+    val v58Cert = "ab4ff4c59a3fb45df07144caf34e73ed56d1ab8231f40b725814f74d5d92a86f"
+    val expectedPkg = "com.aistudio.krastv.vmzsqx"
+
+    // 3a. Matching package, newer versionCode, matching cert -> Valid
+    val validResult = com.example.updater.AppUpdater.evaluateApkMetadata(
+      expectedPackageName = expectedPkg,
+      installedVersionCode = 55L,
+      installedCertSha256Set = setOf(v55Cert),
+      apkPackageName = expectedPkg,
+      apkVersionCode = 59L,
+      apkVersionName = "1.0.59",
+      apkCertSha256Set = setOf(v55Cert.uppercase())
+    )
+    assertTrue(validResult is com.example.updater.ApkVerificationResult.Valid)
+
+    // 3b. Different signing certificate (exact v55 vs v58 scenario) -> SignatureMismatch
+    val mismatchResult = com.example.updater.AppUpdater.evaluateApkMetadata(
+      expectedPackageName = expectedPkg,
+      installedVersionCode = 55L,
+      installedCertSha256Set = setOf(v55Cert),
+      apkPackageName = expectedPkg,
+      apkVersionCode = 58L,
+      apkVersionName = "1.0.58",
+      apkCertSha256Set = setOf(v58Cert)
+    )
+    assertTrue(mismatchResult is com.example.updater.ApkVerificationResult.SignatureMismatch)
+    val mismatchMsg = com.example.updater.AppUpdater.formatVerificationError(mismatchResult)
+    assertTrue(mismatchMsg.contains("ECC0A4D3"))
+    assertTrue(mismatchMsg.contains("AB4FF4C5"))
+    assertTrue(mismatchMsg.contains("App not installed"))
+    assertTrue(mismatchMsg.contains("not been modified or removed"))
+
+    // 3c. Different package name -> PackageNameMismatch
+    val pkgMismatch = com.example.updater.AppUpdater.evaluateApkMetadata(
+      expectedPackageName = expectedPkg,
+      installedVersionCode = 55L,
+      installedCertSha256Set = setOf(v55Cert),
+      apkPackageName = "com.other.app",
+      apkVersionCode = 59L,
+      apkVersionName = "1.0.59",
+      apkCertSha256Set = setOf(v55Cert)
+    )
+    assertTrue(pkgMismatch is com.example.updater.ApkVerificationResult.PackageNameMismatch)
+
+    // 3d. Non-newer versionCode -> VersionNotNewer
+    val notNewer = com.example.updater.AppUpdater.evaluateApkMetadata(
+      expectedPackageName = expectedPkg,
+      installedVersionCode = 55L,
+      installedCertSha256Set = setOf(v55Cert),
+      apkPackageName = expectedPkg,
+      apkVersionCode = 55L,
+      apkVersionName = "1.0.55",
+      apkCertSha256Set = setOf(v55Cert)
+    )
+    assertTrue(notNewer is com.example.updater.ApkVerificationResult.VersionNotNewer)
+
+    // 3e. Missing APK cert -> UnsignedOrUnverifiableApk
+    val unsignedResult = com.example.updater.AppUpdater.evaluateApkMetadata(
+      expectedPackageName = expectedPkg,
+      installedVersionCode = 55L,
+      installedCertSha256Set = setOf(v55Cert),
+      apkPackageName = expectedPkg,
+      apkVersionCode = 59L,
+      apkVersionName = "1.0.59",
+      apkCertSha256Set = emptySet()
+    )
+    assertTrue(unsignedResult is com.example.updater.ApkVerificationResult.UnsignedOrUnverifiableApk)
+
+    // Clean up temporary test files
+    corruptFile.delete()
+    missingDexApk.delete()
+    validZipApk.delete()
+  }
 }
-
-
-
-
