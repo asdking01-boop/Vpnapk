@@ -2760,48 +2760,54 @@ class ExampleRobolectricTest {
     assertTrue(repo.getAccounts().any { it.id == "acc_logo_test" })
     assertTrue(repo.isFavorite("movie_logo_1"))
 
-    // 4. Verify Cinematic K Zoom-Through 0.0–1.8s timeline phases
+    // 4. Verify Seamless Cinematic K Intro 0.0–1.8s timeline phases (pure zoom + synchronized crossfade)
     val f0 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(0L)
     assertEquals(0f, f0.kAlpha, 0.001f)
     assertEquals(0f, f0.lightSweepProgress, 0.001f)
-    assertEquals(0f, f0.portalOpenProgress, 0.001f)
     assertEquals(1f, f0.backdropAlpha, 0.001f)
     assertFalse(f0.isFinished)
 
-    // End of Phase 1 (0.4s): original 3D K fully revealed at center on pure black
-    val f400 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(400L)
-    assertEquals(1f, f400.kAlpha, 0.001f)
-    assertEquals(1f, f400.kScale, 0.01f)
-    assertEquals(0f, f400.lightSweepProgress, 0.001f)
-    assertEquals(1f, f400.backdropAlpha, 0.001f)
+    // End of Phase 1 (0.3s): original metallic red 3D K fully visible centered on pure AMOLED black
+    val f300 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(300L)
+    assertEquals(1f, f300.kAlpha, 0.001f)
+    assertEquals(1f, f300.kScale, 0.01f)
+    assertEquals(0f, f300.lightSweepProgress, 0.001f)
+    assertEquals(1f, f300.backdropAlpha, 0.001f)
 
-    // End of Phase 2 (0.8s): light reflection sweep completed, soft red glow & depth active
-    val f800 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(800L)
-    assertEquals(1f, f800.lightSweepProgress, 0.001f)
-    assertTrue(f800.depthLightingAlpha >= 0.99f)
-    assertTrue(f800.centerGlowAlpha > 0.5f)
-    assertTrue(f800.kScale > f400.kScale)
+    // Mid Phase 2 (0.5s): subtle cinematic reflection actively sweeping across K & smooth zoom started
+    val f500 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(500L)
+    assertTrue(f500.lightSweepProgress in 0.2f..0.8f)
+    assertTrue(f500.kScale > f300.kScale)
+    assertEquals(1f, f500.backdropAlpha, 0.001f)
+    assertEquals(1f, f500.kAlpha, 0.001f)
 
-    // Mid Phase 3 (1.15s): accelerating zoom, motion blur active, portal beginning to open
-    val f1150 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(1150L)
-    assertTrue(f1150.kScale > f800.kScale)
-    assertTrue(f1150.motionBlurDp > 0f)
-    assertTrue(f1150.portalOpenProgress > 0f)
-    assertTrue(f1150.speedStreaksAlpha > 0f)
+    // End of Phase 2 (0.7s): reflection completed, gentle zoom at ~1.14x, ready to accelerate
+    val f700 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(700L)
+    assertEquals(1f, f700.lightSweepProgress, 0.001f)
+    assertEquals(1.14f, f700.kScale, 0.01f)
+    assertEquals(1f, f700.backdropAlpha, 0.001f)
+    assertEquals(1f, f700.kAlpha, 0.001f)
 
-    // End of Phase 3 (1.5s): K enlarged dramatically beyond screen bounds
+    // Mid Phase 3 (1.1s): accelerating zoom + synchronized crossfade revealing Home behind logo
+    val f1100 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(1100L)
+    assertTrue(f1100.kScale > f700.kScale * 2f)
+    assertTrue(f1100.backdropAlpha in 0.25f..0.75f)
+    assertTrue(f1100.kAlpha in 0.35f..0.95f)
+    assertFalse(f1100.isFinished)
+
+    // End of Phase 3 (1.5s): K enlarged beyond screen boundaries, Home screen revealed (backdropAlpha == 0)
     val f1500 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(1500L)
-    assertTrue(f1500.kScale >= 25f)
-    assertTrue(f1500.portalOpenProgress > f1150.portalOpenProgress)
+    assertTrue(f1500.kScale >= 15.9f)
+    assertEquals(0f, f1500.backdropAlpha, 0.001f)
+    assertTrue(f1500.kAlpha in 0.05f..0.25f)
     assertFalse(f1500.isFinished)
 
-    // End of Phase 4 (1.8s): seamless live Home reveal complete, backdrop & K shell completely cleared
+    // End of Phase 4 (1.8s): Home fully revealed, startup layer completely transparent and finished
     val f1800 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(1800L)
-    assertTrue(f1800.kScale >= 55f)
-    assertEquals(1f, f1800.portalOpenProgress, 0.001f)
+    assertTrue(f1800.kScale >= 21.9f)
     assertEquals(0f, f1800.backdropAlpha, 0.001f)
-    assertEquals(0f, f1800.kShellAlpha, 0.001f)
-    assertEquals(0f, f1800.motionBlurDp, 0.001f)
+    assertEquals(0f, f1800.kAlpha, 0.001f)
+    assertEquals(0f, f1800.ambientGlowAlpha, 0.001f)
     assertTrue(f1800.isFinished)
   }
 }
