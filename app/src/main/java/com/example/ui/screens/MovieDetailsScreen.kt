@@ -29,11 +29,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.data.api.TmdbCastMember
 import com.example.data.api.TmdbMediaMetadata
 import com.example.data.api.TmdbMetadataMatcher
 import com.example.data.api.TmdbSearchCandidate
@@ -75,7 +78,9 @@ fun MovieDetailsScreen(
     watchHistory: List<WatchProgress> = emptyList(),
     isLoadingDetails: Boolean = false,
     isArabic: Boolean = false,
+    preferArabicMetadata: Boolean = isArabic,
     richMetadata: TmdbMediaMetadata? = null,
+    onActorClick: ((TmdbCastMember) -> Unit)? = null,
     manualMatchCandidates: List<TmdbSearchCandidate> = emptyList(),
     isManualMatchSearching: Boolean = false,
     onSearchManualMatch: (String, String) -> Unit = { _, _ -> },
@@ -292,15 +297,26 @@ fun MovieDetailsScreen(
                                 }
                             }
 
-                            if (movie.genre.isNotBlank() || movie.categoryName.isNotBlank()) {
+                            val localizedGenre = remember(movie.genre, movie.categoryName, preferArabicMetadata) {
+                                TmdbMetadataMatcher.localizeGenres(
+                                    movie.genre.ifBlank { movie.categoryName },
+                                    preferArabic = preferArabicMetadata
+                                )
+                            }
+                            if (localizedGenre.isNotBlank()) {
+                                val genreIsArabic = TmdbMetadataMatcher.containsArabicScript(localizedGenre)
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = movie.genre.ifBlank { movie.categoryName },
+                                    text = localizedGenre,
                                     color = KrasRedBright,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = TextStyle(
+                                        textDirection = if (genreIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                                    ),
+                                    modifier = Modifier.testTag("movie_details_genre_text")
                                 )
                             }
                         }
@@ -420,10 +436,16 @@ fun MovieDetailsScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (officialTrailerKey.isNotBlank()) {
-                                    if (isArabic) "الإعلان الرسمي" else "Official Trailer"
-                                } else {
-                                    if (isArabic) "الإعلان الدعائي" else "Trailer"
+                                text = when {
+                                    officialTrailerKey.isNotBlank() && richMetadata?.trailerLanguage == "ar" -> {
+                                        if (isArabic) "الإعلان الرسمي (عربي)" else "Trailer (AR)"
+                                    }
+                                    officialTrailerKey.isNotBlank() -> {
+                                        if (isArabic) "الإعلان الرسمي" else "Official Trailer"
+                                    }
+                                    else -> {
+                                        if (isArabic) "الإعلان الدعائي" else "Trailer"
+                                    }
                                 },
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -504,7 +526,8 @@ fun MovieDetailsScreen(
                         castMembers = richMetadata?.castMembers.orEmpty(),
                         fallbackCastCsv = movie.cast,
                         director = richMetadata?.director?.ifBlank { movie.director } ?: movie.director,
-                        isArabic = isArabic
+                        isArabic = isArabic,
+                        onActorClick = onActorClick
                     )
                 }
             }

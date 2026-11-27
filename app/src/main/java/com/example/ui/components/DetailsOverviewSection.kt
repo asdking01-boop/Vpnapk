@@ -13,10 +13,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.api.TmdbMetadataMatcher
@@ -30,6 +35,7 @@ import com.example.ui.theme.TextSecondary
  *
  * Behavior:
  * - Displays the verified real plot synopsis with a Read More / Read Less toggle for long descriptions.
+ * - Automatically applies proper RTL layout & text alignment whenever the synopsis is in Arabic.
  * - Shows a subtle loading indicator while fetching details if no verified plot is available yet.
  * - Never displays invented or generic placeholder text; shows "Story synopsis not available"
  *   (Arabic: "ملخص القصة غير متوفر") when no verified synopsis exists.
@@ -47,6 +53,9 @@ fun DetailsOverviewSection(
 ) {
     val verifiedPlot = remember(plot, mediaTitle) {
         TmdbMetadataMatcher.sanitizeSynopsis(plot, mediaTitle)
+    }
+    val plotIsArabic = remember(verifiedPlot) {
+        TmdbMetadataMatcher.containsArabicScript(verifiedPlot)
     }
 
     var isExpanded by remember(itemKey) { mutableStateOf(false) }
@@ -69,52 +78,64 @@ fun DetailsOverviewSection(
 
         when {
             verifiedPlot.isNotEmpty() -> {
-                Text(
-                    text = verifiedPlot,
-                    color = TextSecondary,
-                    fontSize = 13.sp,
-                    lineHeight = 20.sp,
-                    maxLines = if (isExpanded) Int.MAX_VALUE else collapsedMaxLines,
-                    overflow = TextOverflow.Ellipsis,
-                    onTextLayout = { layoutResult ->
-                        if (!isExpanded) {
-                            hasOverflow = layoutResult.hasVisualOverflow || layoutResult.lineCount > collapsedMaxLines
-                        }
-                    },
-                    modifier = Modifier.testTag("overview_text")
-                )
-
-                val showReadMoreToggle = hasOverflow || isExpanded || verifiedPlot.length > 260
-                if (showReadMoreToggle) {
-                    Row(
-                        modifier = Modifier
-                            .defaultMinSize(minHeight = 48.dp)
-                            .clickable { isExpanded = !isExpanded }
-                            .padding(vertical = 4.dp)
-                            .testTag("overview_read_more_button"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
+                CompositionLocalProvider(
+                    LocalLayoutDirection provides if (plotIsArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
                         Text(
-                            text = if (isExpanded) {
-                                if (isArabic) "عرض أقل" else "Read Less"
-                            } else {
-                                if (isArabic) "عرض المزيد" else "Read More"
-                            },
-                            color = KrasRedBright,
+                            text = verifiedPlot,
+                            color = TextSecondary,
                             fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Icon(
-                            imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                            contentDescription = if (isExpanded) {
-                                if (isArabic) "عرض أقل" else "Read Less"
-                            } else {
-                                if (isArabic) "عرض المزيد" else "Read More"
+                            lineHeight = 20.sp,
+                            maxLines = if (isExpanded) Int.MAX_VALUE else collapsedMaxLines,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Start,
+                            style = TextStyle(
+                                textDirection = if (plotIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                            ),
+                            onTextLayout = { layoutResult ->
+                                if (!isExpanded) {
+                                    hasOverflow = layoutResult.hasVisualOverflow || layoutResult.lineCount > collapsedMaxLines
+                                }
                             },
-                            tint = KrasRedBright,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("overview_text")
                         )
+
+                        val showReadMoreToggle = hasOverflow || isExpanded || verifiedPlot.length > 260
+                        if (showReadMoreToggle) {
+                            Row(
+                                modifier = Modifier
+                                    .defaultMinSize(minHeight = 48.dp)
+                                    .clickable { isExpanded = !isExpanded }
+                                    .padding(vertical = 4.dp)
+                                    .testTag("overview_read_more_button"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = if (isExpanded) {
+                                        if (isArabic || plotIsArabic) "عرض أقل" else "Read Less"
+                                    } else {
+                                        if (isArabic || plotIsArabic) "عرض المزيد" else "Read More"
+                                    },
+                                    color = KrasRedBright,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Icon(
+                                    imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                    contentDescription = if (isExpanded) {
+                                        if (isArabic || plotIsArabic) "عرض أقل" else "Read Less"
+                                    } else {
+                                        if (isArabic || plotIsArabic) "عرض المزيد" else "Read More"
+                                    },
+                                    tint = KrasRedBright,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }

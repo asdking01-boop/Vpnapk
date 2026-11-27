@@ -63,7 +63,9 @@ import com.example.data.model.TmdbAuthStatus
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.AppUpdateDialogs
 import com.example.ui.components.BottomNavBar
+import com.example.ui.components.LocalPreferArabicMetadata
 import com.example.ui.components.NavScreen
+import com.example.ui.components.TmdbActorBioDialog
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.premium.LocalPremiumExperienceState
 import com.example.ui.premium.MovieReelsScreen
@@ -127,8 +129,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            val preferArabicMetadata = remember(userSettings.tmdbMetadataLanguage, userSettings.language) {
+                userSettings.resolvePreferArabicMetadata()
+            }
+
             CompositionLocalProvider(
                 LocalPremiumExperienceState provides premiumExperience,
+                LocalPreferArabicMetadata provides preferArabicMetadata,
                 LocalLayoutDirection provides if (isArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
             ) {
             KrasTvTheme(
@@ -210,6 +217,8 @@ class MainActivity : ComponentActivity() {
                 val tmdbDiagnosticsReport by viewModel.tmdbDiagnosticsReport.collectAsState()
                 val selectedMovieRichMetadata by viewModel.selectedMovieRichMetadata.collectAsState()
                 val selectedSeriesRichMetadata by viewModel.selectedSeriesRichMetadata.collectAsState()
+                val selectedActorBiography by viewModel.selectedActorBiography.collectAsState()
+                val isActorBioLoading by viewModel.isActorBioLoading.collectAsState()
                 val manualMatchCandidates by viewModel.manualMatchCandidates.collectAsState()
                 val isManualMatchSearching by viewModel.isManualMatchSearching.collectAsState()
                 val navigateToSettingsFromAuth by viewModel.navigateToSettingsFromAuth.collectAsState()
@@ -544,7 +553,8 @@ class MainActivity : ComponentActivity() {
                                         isRefreshing = isRefreshing,
                                         isLoading = isLoading,
                                         cardStyle = userSettings.cardStyle,
-                                        favorites = favorites
+                                        favorites = favorites,
+                                        onEnsureLocalizedMetadata = { item -> viewModel.ensureLocalizedMetadataOnDemand(item) }
                                     )
 
                                     NavScreen.MOVIES -> MoviesScreen(
@@ -604,7 +614,8 @@ class MainActivity : ComponentActivity() {
                                         onOpenDetails = { item -> viewModel.showMediaDetails(item) },
                                         onResolveTrailerKey = { item -> viewModel.resolveOfficialTrailerKey(item) },
                                         onUpdateSettings = { updated -> viewModel.updateSettings(updated) },
-                                        isArabic = isArabic
+                                        isArabic = isArabic,
+                                        onEnsureLocalizedMetadata = { item -> viewModel.ensureLocalizedMetadataOnDemand(item) }
                                     )
 
                                     NavScreen.LIVE_TV -> LiveTvScreen(
@@ -814,7 +825,9 @@ class MainActivity : ComponentActivity() {
                                 watchHistory = watchHistory,
                                 isLoadingDetails = isMovieDetailsLoading,
                                 isArabic = isArabic,
+                                preferArabicMetadata = preferArabicMetadata,
                                 richMetadata = selectedMovieRichMetadata,
+                                onActorClick = { member -> viewModel.loadActorBiography(member) },
                                 manualMatchCandidates = manualMatchCandidates,
                                 isManualMatchSearching = isManualMatchSearching,
                                 onSearchManualMatch = { q, y ->
@@ -863,7 +876,9 @@ class MainActivity : ComponentActivity() {
                                     viewModel.showMediaDetails(nextSeries)
                                 },
                                 isArabic = isArabic,
+                                preferArabicMetadata = preferArabicMetadata,
                                 richMetadata = selectedSeriesRichMetadata,
+                                onActorClick = { member -> viewModel.loadActorBiography(member) },
                                 manualMatchCandidates = manualMatchCandidates,
                                 isManualMatchSearching = isManualMatchSearching,
                                 onSearchManualMatch = { q, y ->
@@ -875,6 +890,16 @@ class MainActivity : ComponentActivity() {
                                 onClearManualMatch = { viewModel.clearManualMatchState() }
                             )
                         }
+                    }
+
+                    // Localized TMDb Actor Biography Modal (Arabic ar-SA with English fallback, original actor name preserved)
+                    selectedActorBiography?.let { actorBio ->
+                        TmdbActorBioDialog(
+                            biography = actorBio,
+                            isLoading = isActorBioLoading,
+                            isUiArabic = isArabic,
+                            onDismiss = { viewModel.dismissActorBiography() }
+                        )
                     }
 
                     // Unified Seamless Fullscreen Video Player Overlay

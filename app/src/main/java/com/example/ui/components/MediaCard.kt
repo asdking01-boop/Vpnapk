@@ -29,12 +29,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.data.api.TmdbMetadataMatcher
 import com.example.data.local.QualityDetector
 import com.example.data.model.CardStyle
 import com.example.data.model.MediaItem
@@ -508,12 +511,20 @@ private fun CompactCard(
                 )
             }
             Spacer(modifier = Modifier.height(2.dp))
+            val preferArabicMeta = LocalPreferArabicMetadata.current
+            val cardGenreText = remember(item.genre, item.categoryName, preferArabicMeta) {
+                TmdbMetadataMatcher.localizeGenres(item.genre.ifEmpty { item.categoryName }, preferArabic = preferArabicMeta)
+            }
+            val cardGenreIsArabic = TmdbMetadataMatcher.containsArabicScript(cardGenreText)
             Text(
-                text = item.genre.ifEmpty { item.categoryName },
+                text = cardGenreText,
                 color = TextSecondary,
                 fontSize = 11.sp,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis,
+                style = TextStyle(
+                    textDirection = if (cardGenreIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                )
             )
             Spacer(modifier = Modifier.height(4.dp))
             Row(
@@ -635,12 +646,21 @@ private fun BillboardCard(
                         fontWeight = FontWeight.SemiBold
                     )
                 }
+                val preferArabicMeta = LocalPreferArabicMetadata.current
+                val billboardSubtitle = remember(item.plot, item.genre, item.name, preferArabicMeta) {
+                    val cleanPlot = TmdbMetadataMatcher.sanitizeSynopsis(item.plot, item.name)
+                    cleanPlot.ifEmpty { TmdbMetadataMatcher.localizeGenres(item.genre, preferArabic = preferArabicMeta) }
+                }
+                val subtitleIsArabic = TmdbMetadataMatcher.containsArabicScript(billboardSubtitle)
                 Text(
-                    text = item.plot.ifEmpty { item.genre },
+                    text = billboardSubtitle,
                     color = TextSecondary,
                     fontSize = 11.sp,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    style = TextStyle(
+                        textDirection = if (subtitleIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                    )
                 )
             }
         }

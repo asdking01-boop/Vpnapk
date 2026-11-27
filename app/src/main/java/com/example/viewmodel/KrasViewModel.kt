@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
 import com.example.KrasApplication
 import com.example.data.api.M3uPlaylistParser
+import com.example.data.api.TmdbCastMember
 import com.example.data.api.TmdbConnectionState
 import com.example.data.api.TmdbDiagnosticCheck
 import com.example.data.api.TmdbDiagnosticStatus
@@ -17,6 +18,7 @@ import com.example.data.api.TmdbErrorSanitizer
 import com.example.data.api.TmdbHealthResult
 import com.example.data.api.TmdbMediaMetadata
 import com.example.data.api.TmdbMetadataMatcher
+import com.example.data.api.TmdbPersonBiography
 import com.example.data.api.TmdbProxyClient
 import com.example.data.api.TmdbSearchCandidate
 import com.example.data.api.XtreamClient
@@ -97,6 +99,16 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _selectedSeriesRichMetadata = MutableStateFlow<TmdbMediaMetadata?>(null)
     val selectedSeriesRichMetadata = _selectedSeriesRichMetadata.asStateFlow()
+
+    // Localized Actor Biography modal state (ar-SA with en-US fallback, preserves original actor name)
+    private val _selectedActorBiography = MutableStateFlow<TmdbPersonBiography?>(null)
+    val selectedActorBiography = _selectedActorBiography.asStateFlow()
+
+    private val _isActorBioLoading = MutableStateFlow(false)
+    val isActorBioLoading = _isActorBioLoading.asStateFlow()
+
+    private var actorBioJob: Job? = null
+    private val onDemandEnrichInFlight = ConcurrentHashMap.newKeySet<String>()
 
     // Manual TMDb Match Picker state
     private val _manualMatchCandidates = MutableStateFlow<List<TmdbSearchCandidate>>(emptyList())
@@ -1291,7 +1303,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             if (health.state != TmdbConnectionState.CONNECTED) return@withContext false
         }
 
-        val preferArabic = SubscriptionInfoHelper.isArabicLanguage(settings.language)
+        val preferArabic = isArabicMetadataPreferred(settings)
 
         try {
             val moviesToEnrich = (
@@ -1310,15 +1322,22 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     preferArabic = preferArabic
                 )
                 if (meta != null) {
+                    tmdbCacheStore.putForMediaItem(
+                        mediaItemId = movie.id,
+                        isSeries = false,
+                        preferArabic = preferArabic,
+                        metadata = meta
+                    )
                     val existingValid = TmdbMetadataMatcher.isValidSynopsis(movie.plot, movie.name)
-                    val upgradeToArabic = preferArabic &&
-                        existingValid &&
-                        !TmdbMetadataMatcher.containsArabicScript(movie.plot) &&
-                        TmdbMetadataMatcher.containsArabicScript(meta.overview)
+                    val upgradeLanguage = existingValid && (
+                        (preferArabic && !TmdbMetadataMatcher.containsArabicScript(movie.plot) && TmdbMetadataMatcher.containsArabicScript(meta.overview)) ||
+                            (!preferArabic && TmdbMetadataMatcher.containsArabicScript(movie.plot) && !TmdbMetadataMatcher.containsArabicScript(meta.overview))
+                        )
                     val enriched = TmdbProxyClient.enrichMediaItem(
                         item = movie,
                         tmdb = meta,
-                        overrideValidExistingPlot = upgradeToArabic
+                        overrideValidExistingPlot = upgradeLanguage,
+                        preferArabic = preferArabic
                     )
                     repository.updateTmdbMetadata(enriched)
                     applyEnrichedTmdbItemToState(enriched)
@@ -1341,15 +1360,22 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     preferArabic = preferArabic
                 )
                 if (meta != null) {
+                    tmdbCacheStore.putForMediaItem(
+                        mediaItemId = seriesItem.id,
+                        isSeries = true,
+                        preferArabic = preferArabic,
+                        metadata = meta
+                    )
                     val existingValid = TmdbMetadataMatcher.isValidSynopsis(seriesItem.plot, seriesItem.name)
-                    val upgradeToArabic = preferArabic &&
-                        existingValid &&
-                        !TmdbMetadataMatcher.containsArabicScript(seriesItem.plot) &&
-                        TmdbMetadataMatcher.containsArabicScript(meta.overview)
+                    val upgradeLanguage = existingValid && (
+                        (preferArabic && !TmdbMetadataMatcher.containsArabicScript(seriesItem.plot) && TmdbMetadataMatcher.containsArabicScript(meta.overview)) ||
+                            (!preferArabic && TmdbMetadataMatcher.containsArabicScript(seriesItem.plot) && !TmdbMetadataMatcher.containsArabicScript(meta.overview))
+                        )
                     val enriched = TmdbProxyClient.enrichMediaItem(
                         item = seriesItem,
                         tmdb = meta,
-                        overrideValidExistingPlot = upgradeToArabic
+                        overrideValidExistingPlot = upgradeLanguage,
+                        preferArabic = preferArabic
                     )
                     repository.updateTmdbMetadata(enriched)
                     applyEnrichedTmdbItemToState(enriched)
@@ -1379,11 +1405,21 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         if (_latestMoviesForCategory.value.any { it.id == enriched.id }) {
             _latestMoviesForCategory.value = _latestMoviesForCategory.value.map { if (it.id == enriched.id) enriched else it }
         }
+        if (_latestMoviesByCategoryMap.value.values.any { list -> list.any { it.id == enriched.id } }) {
+            _latestMoviesByCategoryMap.value = _latestMoviesByCategoryMap.value.mapValues { (_, list) ->
+                if (list.any { it.id == enriched.id }) list.map { if (it.id == enriched.id) enriched else it } else list
+            }
+        }
         if (_series.value.any { it.id == enriched.id }) {
             _series.value = _series.value.map { if (it.id == enriched.id) enriched else it }
         }
         if (_latestSeriesForCategory.value.any { it.id == enriched.id }) {
             _latestSeriesForCategory.value = _latestSeriesForCategory.value.map { if (it.id == enriched.id) enriched else it }
+        }
+        if (_latestSeriesByCategoryMap.value.values.any { list -> list.any { it.id == enriched.id } }) {
+            _latestSeriesByCategoryMap.value = _latestSeriesByCategoryMap.value.mapValues { (_, list) ->
+                if (list.any { it.id == enriched.id }) list.map { if (it.id == enriched.id) enriched else it } else list
+            }
         }
         if (_searchResults.value.any { it.id == enriched.id }) {
             _searchResults.value = _searchResults.value.map { if (it.id == enriched.id) enriched else it }
@@ -1406,6 +1442,42 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         if (_favorites.value.any { it.mediaId == enriched.id }) {
             _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder)
         }
+    }
+
+    /**
+     * Re-projects already-cached ar-SA / en-US TMDb metadata and localized genres onto all
+     * visible lists immediately when the user switches Settings -> TMDb -> Metadata Language,
+     * without triggering any IPTV synchronization.
+     */
+    private fun applyCachedLocalizedMetadataToCatalog(preferArabic: Boolean) {
+        fun projectItem(item: MediaItem): MediaItem {
+            if (item.type == MediaType.LIVE) return item
+            val isSeries = item.type == MediaType.SERIES
+            val cached = tmdbCacheStore.getExactLanguageForMediaItem(
+                mediaItemId = item.id,
+                tmdbId = item.tmdbId,
+                isSeries = isSeries,
+                preferArabic = preferArabic
+            )
+            return if (cached != null) {
+                TmdbProxyClient.enrichMediaItem(
+                    item = item,
+                    tmdb = cached,
+                    overrideValidExistingPlot = true,
+                    preferArabic = preferArabic
+                )
+            } else {
+                item.copy(genre = TmdbMetadataMatcher.localizeGenres(item.genre, preferArabic = preferArabic))
+            }
+        }
+
+        _movies.value = _movies.value.map(::projectItem)
+        _latestMoviesForCategory.value = _latestMoviesForCategory.value.map(::projectItem)
+        _latestMoviesByCategoryMap.value = _latestMoviesByCategoryMap.value.mapValues { (_, list) -> list.map(::projectItem) }
+        _series.value = _series.value.map(::projectItem)
+        _latestSeriesForCategory.value = _latestSeriesForCategory.value.map(::projectItem)
+        _latestSeriesByCategoryMap.value = _latestSeriesByCategoryMap.value.mapValues { (_, list) -> list.map(::projectItem) }
+        _searchResults.value = _searchResults.value.map(::projectItem)
     }
 
     private fun handleOom(throwable: Throwable, contextMsg: String) {
@@ -1837,8 +1909,147 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- Unified On-Demand Movie & Series Details (IPTV-First + Accurate TMDb Fallback + Bilingual Caching) ---
 
+    fun isArabicMetadataPreferred(settings: UserSettings = _userSettings.value): Boolean {
+        return settings.resolvePreferArabicMetadata()
+    }
+
     private fun currentOverviewLanguageKey(): String {
-        return if (_userSettings.value.language.equals("Arabic", ignoreCase = true)) "ar" else "en"
+        return _userSettings.value.resolveTmdbLanguageTag()
+    }
+
+    /**
+     * Lightweight on-demand localization for visible items on Home Hero Banner, Movie Reels,
+     * and Search without triggering a full IPTV synchronization.
+     */
+    fun ensureLocalizedMetadataOnDemand(mediaItem: MediaItem) {
+        if (mediaItem.type == MediaType.LIVE) return
+        val preferArabic = isArabicMetadataPreferred()
+        val langKey = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+        val inflightKey = "${mediaItem.id}:$langKey"
+        val isSeries = mediaItem.type == MediaType.SERIES
+
+        val cached = tmdbCacheStore.getExactLanguageForMediaItem(
+            mediaItemId = mediaItem.id,
+            tmdbId = mediaItem.tmdbId,
+            isSeries = isSeries,
+            preferArabic = preferArabic
+        )
+        if (cached != null && !tmdbCacheStore.isStale(cached)) {
+            val localized = TmdbProxyClient.enrichMediaItem(
+                item = mediaItem,
+                tmdb = cached,
+                overrideValidExistingPlot = true,
+                preferArabic = preferArabic
+            )
+            if (localized.plot != mediaItem.plot || localized.genre != mediaItem.genre || localized.backdrop != mediaItem.backdrop) {
+                applyEnrichedTmdbItemToState(localized)
+            }
+            return
+        }
+
+        if (tmdbCacheStore.shouldSkipAfterRecentFailure(mediaItem.id, preferArabic)) return
+        if (!onDemandEnrichInFlight.add(inflightKey)) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                getOrFetchEnrichedMediaDetails(mediaItem, forceRefresh = false)
+            } catch (_: Exception) {
+            } finally {
+                onDemandEnrichInFlight.remove(inflightKey)
+            }
+        }
+    }
+
+    /**
+     * Opens the localized Actor Biography dialog (ar-SA when Arabic metadata is selected,
+     * automatic en-US fallback, cached separately per language, preserving original actor name).
+     */
+    fun loadActorBiography(member: TmdbCastMember) {
+        if (member.id <= 0) return
+        val preferArabic = isArabicMetadataPreferred()
+        val langTag = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+
+        val cached = tmdbCacheStore.getPersonBiography(member.id, preferArabic)
+        if (cached != null && !tmdbCacheStore.isBiographyStale(cached) && cached.biography.isNotBlank()) {
+            _selectedActorBiography.value = cached.copy(
+                name = member.name.ifBlank { cached.name },
+                character = member.character.ifBlank { cached.character },
+                profileUrl = member.profileUrl.ifBlank { cached.profileUrl }
+            )
+            _isActorBioLoading.value = false
+            return
+        }
+
+        _selectedActorBiography.value = cached?.copy(
+            name = member.name.ifBlank { cached.name },
+            character = member.character.ifBlank { cached.character },
+            profileUrl = member.profileUrl.ifBlank { cached.profileUrl }
+        ) ?: TmdbPersonBiography(
+            personId = member.id,
+            name = member.name,
+            character = member.character,
+            profileUrl = member.profileUrl,
+            languageTag = langTag
+        )
+
+        actorBioJob?.cancel()
+        actorBioJob = viewModelScope.launch {
+            _isActorBioLoading.value = true
+            try {
+                val fetched = withContext(Dispatchers.IO) {
+                    val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
+                    val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
+                    val directBio = if (savedApiKey.isNotEmpty()) {
+                        tmdbDirectClient.fetchPersonBiography(
+                            apiKey = savedApiKey,
+                            personId = member.id,
+                            preferArabic = preferArabic,
+                            fallbackName = member.name,
+                            fallbackCharacter = member.character,
+                            fallbackProfileUrl = member.profileUrl
+                        )
+                    } else {
+                        null
+                    }
+                    directBio ?: if (proxyUrl.isNotBlank()) {
+                        tmdbProxyClient.fetchPersonBiography(
+                            rawProxyUrl = proxyUrl,
+                            personId = member.id,
+                            preferArabic = preferArabic,
+                            fallbackName = member.name,
+                            fallbackCharacter = member.character,
+                            fallbackProfileUrl = member.profileUrl
+                        )
+                    } else {
+                        null
+                    }
+                }
+                if (fetched != null) {
+                    val finalized = fetched.copy(
+                        name = member.name.ifBlank { fetched.name },
+                        character = member.character.ifBlank { fetched.character },
+                        profileUrl = member.profileUrl.ifBlank { fetched.profileUrl }
+                    )
+                    withContext(Dispatchers.IO) {
+                        tmdbCacheStore.putPersonBiography(member.id, preferArabic, finalized)
+                    }
+                    if (_selectedActorBiography.value?.personId == member.id) {
+                        _selectedActorBiography.value = finalized
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            } finally {
+                _isActorBioLoading.value = false
+            }
+        }
+    }
+
+    fun dismissActorBiography() {
+        actorBioJob?.cancel()
+        _selectedActorBiography.value = null
+        _isActorBioLoading.value = false
     }
 
     /**
@@ -1847,17 +2058,34 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
      * and cached without ever showing generic placeholder text.
      */
     fun showMediaDetails(mediaItem: MediaItem) {
+        val preferArabic = isArabicMetadataPreferred()
         val langKey = currentOverviewLanguageKey()
         when (mediaItem.type) {
             MediaType.MOVIE -> {
                 _selectedSeriesForDetails.value = null
+                val manualBinding = tmdbCacheStore.getManualBinding(mediaItem.id)
+                val cachedRich = tmdbCacheStore.getForMediaItem(
+                    mediaItemId = mediaItem.id,
+                    tmdbId = manualBinding?.tmdbId ?: mediaItem.tmdbId,
+                    isSeries = false,
+                    preferArabic = preferArabic
+                )
+                _selectedMovieRichMetadata.value = cachedRich
+
                 val cached = enrichedMediaDetailsCache["${mediaItem.id}:$langKey"]
                 val sanitizedInitial = (cached ?: mediaItem).let {
-                    it.copy(plot = TmdbMetadataMatcher.sanitizeSynopsis(it.plot, it.name))
+                    it.copy(
+                        plot = TmdbMetadataMatcher.sanitizeSynopsis(it.plot, it.name),
+                        genre = TmdbMetadataMatcher.localizeGenres(it.genre, preferArabic = preferArabic)
+                    )
                 }
                 _selectedMovieForDetails.value = sanitizedInitial
 
-                if (cached != null && TmdbMetadataMatcher.isValidSynopsis(cached.plot, cached.name)) {
+                if (cached != null &&
+                    cachedRich != null &&
+                    !tmdbCacheStore.isStale(cachedRich) &&
+                    TmdbMetadataMatcher.isValidSynopsis(cached.plot, cached.name)
+                ) {
                     _isMovieDetailsLoading.value = false
                     return
                 }
@@ -1869,6 +2097,12 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         val enriched = getOrFetchEnrichedMediaDetails(mediaItem)
                         if (_selectedMovieForDetails.value?.id == mediaItem.id) {
                             _selectedMovieForDetails.value = enriched
+                            _selectedMovieRichMetadata.value = tmdbCacheStore.getForMediaItem(
+                                mediaItemId = mediaItem.id,
+                                tmdbId = enriched.tmdbId,
+                                isSeries = false,
+                                preferArabic = preferArabic
+                            )
                         }
                     } catch (e: CancellationException) {
                         throw e
@@ -1886,7 +2120,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _selectedMovieForDetails.value = null
                 val cachedItem = enrichedMediaDetailsCache["${mediaItem.id}:$langKey"]
                 val sanitizedInitial = (cachedItem ?: mediaItem).let {
-                    it.copy(plot = TmdbMetadataMatcher.sanitizeSynopsis(it.plot, it.name))
+                    it.copy(
+                        plot = TmdbMetadataMatcher.sanitizeSynopsis(it.plot, it.name),
+                        genre = TmdbMetadataMatcher.localizeGenres(it.genre, preferArabic = preferArabic)
+                    )
                 }
                 _selectedSeriesForDetails.value = sanitizedInitial
                 loadSeriesDetails(sanitizedInitial)
@@ -1929,8 +2166,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         mediaItem: MediaItem,
         forceRefresh: Boolean = false
     ): MediaItem = withContext(Dispatchers.IO) {
-        val preferArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
-        val langKey = if (preferArabic) "ar" else "en"
+        val preferArabic = isArabicMetadataPreferred()
+        val langKey = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
         val cacheKey = "${mediaItem.id}:$langKey"
         val isSeries = mediaItem.type == MediaType.SERIES
 
@@ -1947,6 +2184,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             !tmdbCacheStore.isStale(existingExactRich) &&
             tmdbCacheStore.isRichMetadataComplete(existingExactRich)
         ) {
+            if (!isSeries && _selectedMovieForDetails.value?.id == mediaItem.id) {
+                _selectedMovieRichMetadata.value = existingExactRich
+            }
             enrichedMediaDetailsCache[cacheKey]?.let { cached ->
                 if (TmdbMetadataMatcher.isValidBackdropUrl(cached.backdrop, cached.streamIcon) ||
                     existingExactRich.backdropUrl.isBlank()
@@ -2032,16 +2272,18 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Step 2: Determine if we need to fetch rich TMDb metadata (or refresh stale cache)
+        // Step 2: Determine if we need to fetch rich TMDb metadata (or refresh stale cache / switch language)
         val hasValidPlot = TmdbMetadataMatcher.isValidSynopsis(working.plot, working.name)
         val wantsArabicUpgrade = preferArabic && hasValidPlot && !TmdbMetadataMatcher.containsArabicScript(working.plot)
+        val wantsEnglishSwitch = !preferArabic && hasValidPlot && TmdbMetadataMatcher.containsArabicScript(working.plot)
         val hasRealBackdrop = TmdbMetadataMatcher.isValidBackdropUrl(working.backdrop, working.streamIcon)
         val hasCompleteRichCache = existingExactRich != null &&
             !tmdbCacheStore.isStale(existingExactRich) &&
             tmdbCacheStore.isRichMetadataComplete(existingExactRich)
         val needsMetadataFill = forceRefresh ||
             !hasValidPlot ||
-            wantsArabicUpgrade ||
+            (wantsArabicUpgrade && !hasCompleteRichCache) ||
+            (wantsEnglishSwitch && !hasCompleteRichCache) ||
             !hasRealBackdrop ||
             working.cast.isBlank() ||
             working.director.isBlank() ||
@@ -2069,14 +2311,22 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     metadata = stamped
                 )
                 refreshDiagnosticsCacheCounts()
+                if (!isSeries && _selectedMovieForDetails.value?.id == working.id) {
+                    _selectedMovieRichMetadata.value = stamped
+                }
 
-                val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(stamped.overview) &&
-                    TmdbMetadataMatcher.isValidSynopsis(stamped.overview, working.name)
-                val overridePlot = manualBinding != null || !hasValidPlot || (wantsArabicUpgrade && tmdbHasArabicOverview)
+                val tmdbHasValidOverview = TmdbMetadataMatcher.isValidSynopsis(stamped.overview, working.name)
+                val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(stamped.overview) && tmdbHasValidOverview
+                val tmdbHasEnglishOverview = !TmdbMetadataMatcher.containsArabicScript(stamped.overview) && tmdbHasValidOverview
+                val overridePlot = manualBinding != null ||
+                    !hasValidPlot ||
+                    (wantsArabicUpgrade && tmdbHasArabicOverview) ||
+                    (wantsEnglishSwitch && tmdbHasEnglishOverview)
                 working = TmdbProxyClient.enrichMediaItem(
                     item = working,
                     tmdb = stamped,
-                    overrideValidExistingPlot = overridePlot
+                    overrideValidExistingPlot = overridePlot,
+                    preferArabic = preferArabic
                 )
             } else {
                 tmdbCacheStore.markLookupFailure(working.id, preferArabic)
@@ -2091,21 +2341,34 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     working = TmdbProxyClient.enrichMediaItem(
                         item = working,
                         tmdb = fallbackCached,
-                        overrideValidExistingPlot = !hasValidPlot
+                        overrideValidExistingPlot = !hasValidPlot || wantsArabicUpgrade || wantsEnglishSwitch,
+                        preferArabic = preferArabic
                     )
                 }
             }
         } else if (existingExactRich != null) {
+            if (!isSeries && _selectedMovieForDetails.value?.id == working.id) {
+                _selectedMovieRichMetadata.value = existingExactRich
+            }
+            val cachedHasValidOverview = TmdbMetadataMatcher.isValidSynopsis(existingExactRich.overview, working.name)
+            val overridePlot = manualBinding != null ||
+                !hasValidPlot ||
+                (wantsArabicUpgrade && TmdbMetadataMatcher.containsArabicScript(existingExactRich.overview) && cachedHasValidOverview) ||
+                (wantsEnglishSwitch && !TmdbMetadataMatcher.containsArabicScript(existingExactRich.overview) && cachedHasValidOverview)
             working = TmdbProxyClient.enrichMediaItem(
                 item = working,
                 tmdb = existingExactRich,
-                overrideValidExistingPlot = manualBinding != null || !hasValidPlot
+                overrideValidExistingPlot = overridePlot,
+                preferArabic = preferArabic
             )
         }
 
         // Step 3: Final strict sanitization (never allow placeholder text) & persist/cache
         val finalCleanPlot = TmdbMetadataMatcher.sanitizeSynopsis(working.plot, working.name)
-        val finalItem = working.copy(plot = finalCleanPlot)
+        val finalItem = working.copy(
+            plot = finalCleanPlot,
+            genre = TmdbMetadataMatcher.localizeGenres(working.genre, preferArabic = preferArabic)
+        )
         enrichedMediaDetailsCache[cacheKey] = finalItem
 
         if (finalItem.tmdbId > 0 || finalItem.plot.isNotEmpty() || finalItem.cast.isNotBlank() || finalItem.backdrop.isNotBlank()) {
@@ -2170,8 +2433,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- On-Demand Series Details (Xtream Codes + M3U + Accurate TMDb Fallback & Persistent Caching) ---
     fun loadSeriesDetails(seriesItem: MediaItem, forceRefresh: Boolean = false) {
-        val preferArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
-        val langKey = if (preferArabic) "ar" else "en"
+        val preferArabic = isArabicMetadataPreferred()
+        val langKey = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
         val detailsCacheKey = "${seriesItem.streamId}:$langKey"
         val manualBinding = tmdbCacheStore.getManualBinding(seriesItem.id)
         val cachedRich = tmdbCacheStore.getForMediaItem(
@@ -2273,18 +2536,34 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     plot = baseValidPlot.ifEmpty { itemValidPlot.ifEmpty { persistedValidPlot } },
                     cast = baseDetails.cast.ifBlank { seriesItem.cast.ifBlank { persisted?.cast.orEmpty() } },
                     director = baseDetails.director.ifBlank { seriesItem.director.ifBlank { persisted?.director.orEmpty() } },
-                    genre = baseDetails.genre.ifBlank { seriesItem.genre.ifBlank { persisted?.genre.orEmpty() } },
+                    genre = TmdbMetadataMatcher.localizeGenres(
+                        baseDetails.genre.ifBlank { seriesItem.genre.ifBlank { persisted?.genre.orEmpty() } },
+                        preferArabic = preferArabic
+                    ),
                     backdrop = validBackdrop,
                     tmdbId = effectiveTmdbId
                 )
 
-                // Immediately apply cached rich metadata so UI is populated before any network round-trip
+                // Immediately apply cached rich metadata + cached localized season episodes before any network round-trip
                 if (cachedRich != null) {
+                    val cachedSeasonEps = LinkedHashMap<Int, List<com.example.data.api.TmdbEpisodeMetadata>>()
+                    if (cachedRich.tmdbId > 0) {
+                        val sNums = sanitizedBase.seasons.map { it.seasonNumber }.ifEmpty { cachedRich.seasons.map { it.seasonNumber } }.distinct().take(6)
+                        for (sNum in sNums) {
+                            tmdbCacheStore.getSeasonEpisodes(cachedRich.tmdbId, sNum, preferArabic)?.let {
+                                cachedSeasonEps[sNum] = it
+                            }
+                        }
+                    }
+                    val cachedMatchesDesiredLang = cachedExactRich != null
                     sanitizedBase = TmdbProxyClient.enrichSeriesDetails(
                         details = sanitizedBase,
                         metadata = cachedRich,
+                        seasonEpisodesMap = cachedSeasonEps,
                         overrideValidExistingPlot = manualBinding != null ||
-                            !TmdbMetadataMatcher.isValidSynopsis(sanitizedBase.plot, sanitizedBase.name)
+                            cachedMatchesDesiredLang ||
+                            !TmdbMetadataMatcher.isValidSynopsis(sanitizedBase.plot, sanitizedBase.name),
+                        preferArabic = preferArabic
                     )
                 }
 
@@ -2295,13 +2574,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
                 val hasValidIptvPlot = TmdbMetadataMatcher.isValidSynopsis(sanitizedBase.plot, sanitizedBase.name)
                 val wantsArabicUpgrade = preferArabic && hasValidIptvPlot && !TmdbMetadataMatcher.containsArabicScript(sanitizedBase.plot)
+                val wantsEnglishSwitch = !preferArabic && hasValidIptvPlot && TmdbMetadataMatcher.containsArabicScript(sanitizedBase.plot)
                 val hasRealBackdrop = TmdbMetadataMatcher.isValidBackdropUrl(sanitizedBase.backdrop, sanitizedBase.cover.ifBlank { seriesItem.streamIcon })
                 val hasCompleteRichCache = cachedExactRich != null &&
                     !tmdbCacheStore.isStale(cachedExactRich) &&
                     tmdbCacheStore.isRichMetadataComplete(cachedExactRich)
                 val needsTmdb = forceRefresh ||
                     !hasValidIptvPlot ||
-                    wantsArabicUpgrade ||
+                    (wantsArabicUpgrade && !hasCompleteRichCache) ||
+                    (wantsEnglishSwitch && !hasCompleteRichCache) ||
                     !hasRealBackdrop ||
                     sanitizedBase.cast.isBlank() ||
                     sanitizedBase.director.isBlank() ||
@@ -2335,7 +2616,6 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
                             val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
                             val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
-                            val epLang = if (preferArabic) "ar" else "en-US"
                             val seasonEpMap = LinkedHashMap<Int, List<com.example.data.api.TmdbEpisodeMetadata>>()
                             if (stamped.tmdbId > 0) {
                                 val seasonNumsToFetch = if (sanitizedBase.seasons.isNotEmpty()) {
@@ -2344,15 +2624,28 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                                     stamped.seasons.map { it.seasonNumber }.distinct().take(5)
                                 }
                                 for (sNum in seasonNumsToFetch) {
-                                    val eps = if (savedApiKey.isNotEmpty()) {
-                                        tmdbDirectClient.fetchTvSeasonEpisodes(savedApiKey, stamped.tmdbId, sNum, epLang)
-                                            .ifEmpty {
-                                                if (proxyUrl.isNotBlank()) tmdbProxyClient.fetchTvSeasonEpisodes(proxyUrl, stamped.tmdbId, sNum, epLang) else emptyList()
-                                            }
-                                    } else if (proxyUrl.isNotBlank()) {
-                                        tmdbProxyClient.fetchTvSeasonEpisodes(proxyUrl, stamped.tmdbId, sNum, epLang)
+                                    val cachedEps = if (!forceRefresh) {
+                                        tmdbCacheStore.getSeasonEpisodes(stamped.tmdbId, sNum, preferArabic)
                                     } else {
-                                        emptyList()
+                                        null
+                                    }
+                                    val eps = if (!cachedEps.isNullOrEmpty()) {
+                                        cachedEps
+                                    } else {
+                                        val fetchedEps = if (savedApiKey.isNotEmpty()) {
+                                            tmdbDirectClient.fetchTvSeasonEpisodesLocalized(savedApiKey, stamped.tmdbId, sNum, preferArabic)
+                                                .ifEmpty {
+                                                    if (proxyUrl.isNotBlank()) tmdbProxyClient.fetchTvSeasonEpisodesLocalized(proxyUrl, stamped.tmdbId, sNum, preferArabic) else emptyList()
+                                                }
+                                        } else if (proxyUrl.isNotBlank()) {
+                                            tmdbProxyClient.fetchTvSeasonEpisodesLocalized(proxyUrl, stamped.tmdbId, sNum, preferArabic)
+                                        } else {
+                                            emptyList()
+                                        }
+                                        if (fetchedEps.isNotEmpty()) {
+                                            tmdbCacheStore.putSeasonEpisodes(stamped.tmdbId, sNum, preferArabic, fetchedEps)
+                                        }
+                                        fetchedEps
                                     }
                                     if (eps.isNotEmpty()) {
                                         seasonEpMap[sNum] = eps
@@ -2360,15 +2653,20 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                             }
 
-                            val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(stamped.overview) &&
-                                TmdbMetadataMatcher.isValidSynopsis(stamped.overview, sanitizedBase.name)
-                            val overridePlot = manualBinding != null || !hasValidIptvPlot || (wantsArabicUpgrade && tmdbHasArabicOverview)
+                            val tmdbHasValidOverview = TmdbMetadataMatcher.isValidSynopsis(stamped.overview, sanitizedBase.name)
+                            val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(stamped.overview) && tmdbHasValidOverview
+                            val tmdbHasEnglishOverview = !TmdbMetadataMatcher.containsArabicScript(stamped.overview) && tmdbHasValidOverview
+                            val overridePlot = manualBinding != null ||
+                                !hasValidIptvPlot ||
+                                (wantsArabicUpgrade && tmdbHasArabicOverview) ||
+                                (wantsEnglishSwitch && tmdbHasEnglishOverview)
 
                             finalDetails = TmdbProxyClient.enrichSeriesDetails(
                                 details = sanitizedBase,
                                 metadata = stamped,
                                 seasonEpisodesMap = seasonEpMap,
-                                overrideValidExistingPlot = overridePlot
+                                overrideValidExistingPlot = overridePlot,
+                                preferArabic = preferArabic
                             )
                             _currentSeriesDetails.value = finalDetails
                             if (m3uSeriesDetailsMap.containsKey(seriesItem.streamId)) {
@@ -2381,7 +2679,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                                     tmdbId = effectiveTmdbId
                                 ),
                                 tmdb = stamped,
-                                overrideValidExistingPlot = overridePlot
+                                overrideValidExistingPlot = overridePlot,
+                                preferArabic = preferArabic
                             )
                             enrichedMediaDetailsCache["${seriesItem.id}:$langKey"] = enrichedItem
                             if (_selectedSeriesForDetails.value?.id == seriesItem.id) {
@@ -2394,6 +2693,51 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 } else {
+                    // Hydrate localized season episodes on demand even when show-level metadata is already cached
+                    if (cachedExactRich != null && cachedExactRich.tmdbId > 0) {
+                        val seasonNums = finalDetails.seasons.map { it.seasonNumber }.distinct().take(6)
+                        val missingSeasons = seasonNums.filter { tmdbCacheStore.getSeasonEpisodes(cachedExactRich.tmdbId, it, preferArabic).isNullOrEmpty() }
+                        if (missingSeasons.isNotEmpty()) {
+                            withContext(Dispatchers.IO) {
+                                val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
+                                val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
+                                val epMap = LinkedHashMap<Int, List<com.example.data.api.TmdbEpisodeMetadata>>()
+                                for (sNum in seasonNums) {
+                                    val cachedEps = tmdbCacheStore.getSeasonEpisodes(cachedExactRich.tmdbId, sNum, preferArabic)
+                                    val eps = if (!cachedEps.isNullOrEmpty()) {
+                                        cachedEps
+                                    } else {
+                                        val fetched = if (savedApiKey.isNotEmpty()) {
+                                            tmdbDirectClient.fetchTvSeasonEpisodesLocalized(savedApiKey, cachedExactRich.tmdbId, sNum, preferArabic)
+                                                .ifEmpty {
+                                                    if (proxyUrl.isNotBlank()) tmdbProxyClient.fetchTvSeasonEpisodesLocalized(proxyUrl, cachedExactRich.tmdbId, sNum, preferArabic) else emptyList()
+                                                }
+                                        } else if (proxyUrl.isNotBlank()) {
+                                            tmdbProxyClient.fetchTvSeasonEpisodesLocalized(proxyUrl, cachedExactRich.tmdbId, sNum, preferArabic)
+                                        } else {
+                                            emptyList()
+                                        }
+                                        if (fetched.isNotEmpty()) {
+                                            tmdbCacheStore.putSeasonEpisodes(cachedExactRich.tmdbId, sNum, preferArabic, fetched)
+                                        }
+                                        fetched
+                                    }
+                                    if (eps.isNotEmpty()) epMap[sNum] = eps
+                                }
+                                if (epMap.isNotEmpty()) {
+                                    finalDetails = TmdbProxyClient.enrichSeriesDetails(
+                                        details = finalDetails,
+                                        metadata = cachedExactRich,
+                                        seasonEpisodesMap = epMap,
+                                        overrideValidExistingPlot = true,
+                                        preferArabic = preferArabic
+                                    )
+                                    _currentSeriesDetails.value = finalDetails
+                                }
+                            }
+                        }
+                    }
+
                     val syncedItem = seriesItem.copy(
                         plot = finalDetails.plot,
                         cast = finalDetails.cast.ifBlank { seriesItem.cast },
@@ -2436,7 +2780,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         manualMatchJob = viewModelScope.launch {
             _isManualMatchSearching.value = true
             try {
-                val preferArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
+                val preferArabic = isArabicMetadataPreferred()
                 val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
                 val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
 
@@ -2494,8 +2838,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
      * metadata by exact TMDb ID, updates persistent cache + Room + UI immediately.
      */
     fun applyManualTmdbMatch(mediaItem: MediaItem, candidate: TmdbSearchCandidate) {
-        val preferArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
-        val langKey = if (preferArabic) "ar" else "en"
+        val preferArabic = isArabicMetadataPreferred()
         val isSeries = mediaItem.type == MediaType.SERIES
 
         viewModelScope.launch {
@@ -2536,9 +2879,13 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         metadata = seededMeta,
                         nowMs = 0L
                     )
+                    enrichedMediaDetailsCache.remove("${mediaItem.id}:${TmdbMetadataMatcher.TMDB_LANG_ENGLISH}")
+                    enrichedMediaDetailsCache.remove("${mediaItem.id}:${TmdbMetadataMatcher.TMDB_LANG_ARABIC}")
                     enrichedMediaDetailsCache.remove("${mediaItem.id}:en")
                     enrichedMediaDetailsCache.remove("${mediaItem.id}:ar")
                     if (isSeries) {
+                        enrichedSeriesDetailsCache.remove("${mediaItem.streamId}:${TmdbMetadataMatcher.TMDB_LANG_ENGLISH}")
+                        enrichedSeriesDetailsCache.remove("${mediaItem.streamId}:${TmdbMetadataMatcher.TMDB_LANG_ARABIC}")
                         enrichedSeriesDetailsCache.remove("${mediaItem.streamId}:en")
                         enrichedSeriesDetailsCache.remove("${mediaItem.streamId}:ar")
                     }
@@ -2782,10 +3129,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun refreshTmdbMetadataManual() {
         viewModelScope.launch {
-            val isArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
+            val isUiArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
+            val preferArabicMeta = isArabicMetadataPreferred()
             _tmdbDiagnosticsReport.value = _tmdbDiagnosticsReport.value.copy(
                 isRefreshingMetadata = true,
-                refreshFeedbackMessage = if (isArabic) "جاري تحديث بيانات TMDb..." else "Refreshing TMDb metadata..."
+                refreshFeedbackMessage = if (isUiArabic) "جاري تحديث بيانات TMDb..." else "Refreshing TMDb metadata..."
             )
             try {
                 var refreshedCount = 0
@@ -2796,11 +3144,13 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     enrichedMediaDetailsCache.clear()
                     enrichedSeriesDetailsCache.clear()
 
-                    // Refresh up to 10 visible movies/series that are missing real backdrop or plot
+                    // Refresh up to 10 visible movies/series needing backdrop, synopsis, or localized metadata
                     val candidates = (_movies.value.take(12) + _series.value.take(8))
                         .filter {
                             !TmdbMetadataMatcher.isValidBackdropUrl(it.backdrop, it.streamIcon) ||
                                 !TmdbMetadataMatcher.isValidSynopsis(it.plot, it.name) ||
+                                (preferArabicMeta && !TmdbMetadataMatcher.containsArabicScript(it.plot)) ||
+                                (!preferArabicMeta && TmdbMetadataMatcher.containsArabicScript(it.plot)) ||
                                 it.cast.isBlank()
                         }
                         .take(8)
@@ -2822,7 +3172,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                             mediaItemId = openMovie.id,
                             tmdbId = refreshed.tmdbId,
                             isSeries = false,
-                            preferArabic = isArabic
+                            preferArabic = preferArabicMeta
                         )
                     }
                 }
@@ -2830,7 +3180,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     loadSeriesDetails(openSeries, forceRefresh = true)
                 }
 
-                val feedback = if (isArabic) {
+                val feedback = if (isUiArabic) {
                     if (refreshedCount > 0) "تم تحديث بيانات $refreshedCount عنصر من TMDb بنجاح"
                     else "تم تجهيز ذاكرة TMDb للتحديث عند فتح أي فيلم أو مسلسل"
                 } else {
@@ -3073,16 +3423,27 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     val settings = _userSettings.value
-                    val proxyUrl = settings.tmdbProxyUrl.trim()
-                    if (settings.tmdbAutoEnrichEnabled && proxyUrl.isNotBlank() && (mediaItem.plot.isBlank() || mediaItem.tmdbId == 0)) {
-                        val movieMeta = tmdbProxyClient.fetchMovieMetadata(
-                            rawProxyUrl = proxyUrl,
+                    val preferArabic = isArabicMetadataPreferred(settings)
+                    if (settings.tmdbAutoEnrichEnabled && (mediaItem.plot.isBlank() || mediaItem.tmdbId == 0)) {
+                        val movieMeta = fetchAccurateTmdbMetadata(
                             rawTitle = mediaItem.name,
                             year = mediaItem.year,
-                            tmdbId = mediaItem.tmdbId
+                            isSeries = false,
+                            tmdbId = mediaItem.tmdbId,
+                            preferArabic = preferArabic
                         )
                         if (movieMeta != null) {
-                            val enriched = TmdbProxyClient.enrichMediaItem(mediaItem, movieMeta)
+                            tmdbCacheStore.putForMediaItem(
+                                mediaItemId = mediaItem.id,
+                                isSeries = false,
+                                preferArabic = preferArabic,
+                                metadata = movieMeta
+                            )
+                            val enriched = TmdbProxyClient.enrichMediaItem(
+                                item = mediaItem,
+                                tmdb = movieMeta,
+                                preferArabic = preferArabic
+                            )
                             repository.updateTmdbMetadata(enriched)
                             applyEnrichedTmdbItemToState(enriched)
                         }
@@ -3505,6 +3866,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         val orderChanged = prev.liveChannelOrder != normalizedSettings.liveChannelOrder
         val bufferChanged = prev.bufferSize != normalizedSettings.bufferSize
         val languageChanged = !prev.language.equals(normalizedSettings.language, ignoreCase = true)
+        val metadataLanguageChanged = prev.tmdbMetadataLanguage != normalizedSettings.tmdbMetadataLanguage ||
+            prev.resolvePreferArabicMetadata() != normalizedSettings.resolvePreferArabicMetadata()
         val tmdbProxyChanged = prev.tmdbProxyUrl != normalizedSettings.tmdbProxyUrl
         val syncScheduleChanged = prev.smartAutoSyncEnabled != normalizedSettings.smartAutoSyncEnabled ||
             prev.syncWifiOnly != normalizedSettings.syncWifiOnly ||
@@ -3537,7 +3900,12 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 smartSyncEngine.refreshUiState(active.id, normalizedSettings)
             }
         }
-        if (languageChanged) {
+        if (metadataLanguageChanged || languageChanged) {
+            // Preserve separate ar-SA / en-US caches on disk and NEVER trigger an IPTV sync
+            enrichedMediaDetailsCache.clear()
+            enrichedSeriesDetailsCache.clear()
+            val preferArabicMeta = normalizedSettings.resolvePreferArabicMetadata()
+            applyCachedLocalizedMetadataToCatalog(preferArabicMeta)
             _selectedMovieForDetails.value?.let { showMediaDetails(it) }
             _selectedSeriesForDetails.value?.let { showMediaDetails(it) }
         }
@@ -3568,16 +3936,45 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Resolves an official YouTube trailer key (11-char ID) for Movie Reels from:
-     * 1) Xtream VOD/Series details (youtube_trailer field) if available on active Xtream account
-     * 2) Official TMDb /movie/{id}/videos or /tv/{id}/videos endpoint when TMDb API key & tmdbId exist
+     * Resolves an official YouTube trailer key (11-char ID) for Movie Reels & Details:
+     * 1) Prefers localized Arabic trailer/subtitled trailer from TMDb when Arabic metadata is enabled
+     * 2) Falls back to Xtream VOD/Series youtube_trailer or English TMDb trailer
      *
      * Never scrapes or downloads protected video streams; returns only an official YouTube video key.
      */
     suspend fun resolveOfficialTrailerKey(item: MediaItem): String? = withContext(Dispatchers.IO) {
         try {
             val isSeries = item.type == MediaType.SERIES
-            var resolvedTmdbId = item.tmdbId
+            val preferArabic = isArabicMetadataPreferred()
+            var resolvedTmdbId = tmdbCacheStore.getManualBinding(item.id)?.tmdbId ?: item.tmdbId
+
+            // Check cached rich metadata for preferred-language trailer first
+            val cachedMeta = tmdbCacheStore.getExactLanguageForMediaItem(
+                mediaItemId = item.id,
+                tmdbId = resolvedTmdbId,
+                isSeries = isSeries,
+                preferArabic = preferArabic
+            )
+            if (cachedMeta != null) {
+                if (resolvedTmdbId <= 0 && cachedMeta.tmdbId > 0) resolvedTmdbId = cachedMeta.tmdbId
+                val cachedKey = normalizeYoutubeKey(cachedMeta.trailerYoutubeKey)
+                if (cachedKey != null && (!preferArabic || cachedMeta.trailerLanguage == "ar")) {
+                    return@withContext cachedKey
+                }
+            }
+
+            val apiKey = tmdbSessionStore.getSavedApiKey().trim()
+            if (preferArabic && apiKey.isNotBlank() && resolvedTmdbId > 0) {
+                val localizedTmdbKey = tmdbDirectClient.fetchOfficialYoutubeTrailerKey(
+                    apiKey = apiKey,
+                    tmdbId = resolvedTmdbId,
+                    isSeries = isSeries,
+                    preferArabic = true
+                )
+                if (!localizedTmdbKey.isNullOrBlank()) {
+                    return@withContext localizedTmdbKey
+                }
+            }
 
             val account = _activeAccount.value
             if (account != null && !account.isDemo && !account.serverUrl.startsWith("m3u://") && item.streamId > 0) {
@@ -3595,18 +3992,19 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            val apiKey = tmdbSessionStore.getSavedApiKey().trim()
             if (apiKey.isNotBlank() && resolvedTmdbId > 0) {
                 val tmdbKey = tmdbDirectClient.fetchOfficialYoutubeTrailerKey(
                     apiKey = apiKey,
                     tmdbId = resolvedTmdbId,
-                    isSeries = isSeries
+                    isSeries = isSeries,
+                    preferArabic = preferArabic
                 )
                 if (!tmdbKey.isNullOrBlank()) {
                     return@withContext tmdbKey
                 }
             }
-            null
+
+            cachedMeta?.trailerYoutubeKey?.let { normalizeYoutubeKey(it) }
         } catch (_: Exception) {
             null
         }

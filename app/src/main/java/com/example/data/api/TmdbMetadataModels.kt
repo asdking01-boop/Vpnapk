@@ -11,6 +11,23 @@ data class TmdbCastMember(
 )
 
 /**
+ * Localized actor biography returned by TMDb `/person/{id}` (`language=ar-SA` with `en-US` fallback).
+ * Preserves the original actor name while localizing the biography text.
+ */
+data class TmdbPersonBiography(
+    val personId: Int,
+    val name: String,
+    val character: String = "",
+    val biography: String = "",
+    val birthday: String = "",
+    val placeOfBirth: String = "",
+    val knownForDepartment: String = "",
+    val profileUrl: String = "",
+    val languageTag: String = "ar-SA",
+    val cachedAtMs: Long = 0L
+)
+
+/**
  * Similar or recommended title returned by TMDb for Movie & TV Series Details screens.
  */
 data class TmdbSimilarItem(

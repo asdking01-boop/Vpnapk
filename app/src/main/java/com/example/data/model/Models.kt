@@ -48,6 +48,16 @@ enum class InterfaceStyle(val label: String, val arabicLabel: String) {
     CINEMATIC_PREMIUM_2("Cinematic Premium 2.0", "الواجهة السينمائية بريميوم 2.0")
 }
 
+/**
+ * Preferred language for TMDb metadata (descriptions, genres, seasons, episodes, actor bios, trailers).
+ * Original movie/series titles and original actor names are always preserved.
+ */
+enum class TmdbMetadataLanguage(val label: String, val arabicLabel: String) {
+    ARABIC("العربية", "العربية"),
+    ENGLISH("English", "English"),
+    FOLLOW_APP("Follow App Language", "اتباع لغة التطبيق")
+}
+
 enum class KrasPremiumTheme(
     val label: String,
     val arabicLabel: String,
@@ -161,7 +171,8 @@ data class Season(
     val seasonNumber: Int,
     val name: String,
     val episodeCount: Int,
-    val episodes: List<Episode> = emptyList()
+    val episodes: List<Episode> = emptyList(),
+    val overview: String = ""
 )
 
 data class Episode(
@@ -264,6 +275,7 @@ data class UserSettings(
     val tmdbProxyUrl: String = "https://kras-tmdb-proxy.asdking01.workers.dev",
     val tmdbAutoEnrichEnabled: Boolean = true,
     val tmdbAutoSyncEnabled: Boolean = true,
+    val tmdbMetadataLanguage: TmdbMetadataLanguage = TmdbMetadataLanguage.ARABIC,
     // KRAS TV — Cinematic Premium 2.0 (Classic Original remains the default)
     val interfaceStyle: InterfaceStyle = InterfaceStyle.CLASSIC_ORIGINAL,
     val premiumTheme: KrasPremiumTheme = KrasPremiumTheme.MIDNIGHT_BLACK,
@@ -293,6 +305,20 @@ data class UserSettings(
     val syncIntervalTmdbHours: Int = 24,
     val syncIntervalAccountHours: Int = 24
 ) {
+    /**
+     * Resolves whether TMDb metadata (synopses, genres, season/episode overviews, actor bios, trailers)
+     * should be requested in Arabic (`ar-SA`) with automatic English (`en-US`) fallback.
+     */
+    fun resolvePreferArabicMetadata(): Boolean = when (tmdbMetadataLanguage) {
+        TmdbMetadataLanguage.ARABIC -> true
+        TmdbMetadataLanguage.ENGLISH -> false
+        TmdbMetadataLanguage.FOLLOW_APP -> language.trim().lowercase().startsWith("ar")
+    }
+
+    /**
+     * Returns the exact BCP-47 TMDb API language tag (`ar-SA` or `en-US`).
+     */
+    fun resolveTmdbLanguageTag(): String = if (resolvePreferArabicMetadata()) "ar-SA" else "en-US"
     /**
      * Restores the original Classic KRAS TV logo while strictly preserving all user data,
      * accounts, playlists, favorites, watch history, theme, and playback settings.

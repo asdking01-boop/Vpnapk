@@ -93,6 +93,7 @@ data class TmdbMediaMetadata(
     val originalTitle: String = "",
     val castMembers: List<TmdbCastMember> = emptyList(),
     val trailerYoutubeKey: String = "",
+    val trailerLanguage: String = "",
     val similarItems: List<TmdbSimilarItem> = emptyList(),
     val cachedAtMs: Long = 0L,
     val isManualMatch: Boolean = false
@@ -1196,6 +1197,116 @@ class TmdbProxyClient(
     }
 
     /**
+     * Fetches season episodes localized in `ar-SA` when [preferArabic] is true,
+     * automatically merging English (`en-US`) episode descriptions whenever Arabic overview is blank.
+     */
+    suspend fun fetchTvSeasonEpisodesLocalized(
+        rawProxyUrl: String,
+        tmdbId: Int,
+        seasonNumber: Int,
+        preferArabic: Boolean
+    ): List<TmdbEpisodeMetadata> = withContext(Dispatchers.IO) {
+        if (!preferArabic) {
+            return@withContext fetchTvSeasonEpisodes(rawProxyUrl, tmdbId, seasonNumber, TmdbMetadataMatcher.TMDB_LANG_ENGLISH)
+        }
+        val arabicEps = fetchTvSeasonEpisodes(rawProxyUrl, tmdbId, seasonNumber, TmdbMetadataMatcher.TMDB_LANG_ARABIC)
+        val needsEnglishFallback = arabicEps.isEmpty() || arabicEps.any { it.overview.isBlank() }
+        if (!needsEnglishFallback) return@withContext arabicEps
+
+        val englishEps = fetchTvSeasonEpisodes(rawProxyUrl, tmdbId, seasonNumber, TmdbMetadataMatcher.TMDB_LANG_ENGLISH)
+        if (arabicEps.isEmpty()) return@withContext englishEps
+        if (englishEps.isEmpty()) return@withContext arabicEps
+
+        val enByNum = englishEps.associateBy { it.episodeNumber }
+        arabicEps.map { arEp ->
+            val enEp = enByNum[arEp.episodeNumber]
+            val validArOverview = TmdbMetadataMatcher.sanitizeSynopsis(arEp.overview, arEp.title)
+            val validEnOverview = TmdbMetadataMatcher.sanitizeSynopsis(enEp?.overview, enEp?.title.orEmpty())
+            arEp.copy(
+                title = enEp?.title?.takeIf { it.isNotBlank() } ?: arEp.title,
+                overview = validArOverview.ifEmpty { validEnOverview },
+                stillUrl = arEp.stillUrl.ifBlank { enEp?.stillUrl.orEmpty() },
+                rating = if (arEp.rating > 0.0) arEp.rating else (enEp?.rating ?: 0.0),
+                durationSec = if (arEp.durationSec > 0) arEp.durationSec else (enEp?.durationSec ?: 0),
+                airDate = arEp.airDate.ifBlank { enEp?.airDate.orEmpty() }
+            )
+        }
+    }
+
+    /**
+     * Attempts to fetch localized actor biography via proxy (`/api/tmdb/person/{id}?language=ar-SA`
+     * with automatic `en-US` fallback). Gracefully returns null if the route is unavailable on the proxy.
+     */
+    suspend fun fetchPersonBiography(
+        rawProxyUrl: String,
+        personId: Int,
+        fallbackName: String = "",
+        fallbackCharacter: String = "",
+        fallbackProfileUrl: String = "",
+        preferArabic: Boolean = true
+    ): TmdbPersonBiography? = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl.ifBlank { CANONICAL_BACKEND_BASE_URL })
+        if (endpoint.baseUrl.isEmpty() || personId <= 0) return@withContext null
+
+        fun fetchSingle(lang: String): JSONObject? {
+            return try {
+                val url = buildEndpointUrl(
+                    endpoint.baseUrl,
+                    "/api/tmdb/person/$personId?language=${URLEncoder.encode(lang, "UTF-8")}"
+                )
+                val req = buildAuthenticatedRequest(url, endpoint.proxyAuthToken)
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val body = resp.body?.string().orEmpty().trim()
+                    if (!body.startsWith("{")) return@use null
+                    val root = JSONObject(body)
+                    root.optJSONObject("data") ?: root
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        val primaryLang = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+        val primaryJson = fetchSingle(primaryLang)
+        val primaryBio = TmdbMetadataMatcher.cleanSynopsisFormatting(primaryJson?.optString("biography", ""))
+        val enJson = if (preferArabic && (primaryJson == null || primaryBio.isBlank())) {
+            fetchSingle(TmdbMetadataMatcher.TMDB_LANG_ENGLISH)
+        } else {
+            null
+        }
+        val enBio = TmdbMetadataMatcher.cleanSynopsisFormatting(enJson?.optString("biography", ""))
+        val source = primaryJson ?: enJson ?: return@withContext null
+
+        val enName = enJson?.optString("name", "")?.trim().orEmpty()
+        val rawName = source.optString("name", "").trim()
+        val preservedName = fallbackName.trim().ifBlank { enName.ifBlank { rawName } }
+        val resolvedBio = primaryBio.ifBlank { enBio }
+        val resolvedLang = if (preferArabic && primaryBio.isNotBlank()) {
+            TmdbMetadataMatcher.TMDB_LANG_ARABIC
+        } else {
+            TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+        }
+        val profile = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+            source.optString("profileUrl", "").ifBlank { source.optString("profile_path", "") },
+            size = "w185"
+        ).ifBlank { fallbackProfileUrl }
+
+        TmdbPersonBiography(
+            personId = personId,
+            name = preservedName,
+            character = fallbackCharacter,
+            biography = resolvedBio,
+            birthday = source.optString("birthday", "").takeIf { it != "null" }.orEmpty().trim(),
+            placeOfBirth = source.optString("placeOfBirth", source.optString("place_of_birth", "")).takeIf { it != "null" }.orEmpty().trim(),
+            knownForDepartment = source.optString("knownForDepartment", source.optString("known_for_department", "")).trim(),
+            profileUrl = profile,
+            languageTag = resolvedLang,
+            cachedAtMs = System.currentTimeMillis()
+        )
+    }
+
+    /**
      * Retrieves verified TMDb metadata for a movie or TV series with:
      * - Direct ID lookup when [tmdbId] > 0, or cleaned title + year search otherwise.
      * - Strict candidate validation via [TmdbMetadataMatcher.isConfidentMatch] when searching by title
@@ -1214,7 +1325,7 @@ class TmdbProxyClient(
         val cleaned = TmdbMetadataMatcher.cleanIptvTitle(rawTitle)
         val effectiveTitle = cleaned.cleanTitle.ifBlank { rawTitle.trim() }
         val effectiveYear = year.filter { it.isDigit() }.take(4).ifBlank { cleaned.extractedYear }
-        val primaryLang = if (preferArabic) "ar" else "en-US"
+        val primaryLang = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
         val typeKey = if (isSeries) "tv" else "movie"
 
         val accurateKey = "accurate:$typeKey:$tmdbId:${effectiveTitle.lowercase()}:$effectiveYear:$primaryLang"
@@ -1278,47 +1389,91 @@ class TmdbProxyClient(
 
         var finalMeta = if (preferArabic) {
             val validArabicOverview = TmdbMetadataMatcher.sanitizeSynopsis(primary?.overview, effectiveTitle)
+            val hasMissingSeasonOverview = isSeries && primary?.seasons?.any { it.overview.isBlank() } == true
             val needsEnglishMerge = primary == null ||
                 validArabicOverview.isEmpty() ||
                 primary.backdropUrl.isBlank() ||
                 primary.trailerYoutubeKey.isBlank() ||
                 primary.castMembers.isEmpty() ||
-                primary.similarItems.isEmpty()
+                primary.similarItems.isEmpty() ||
+                hasMissingSeasonOverview ||
+                TmdbMetadataMatcher.containsArabicScript(primary.title)
 
             if (!needsEnglishMerge && primary != null) {
-                primary.copy(overview = validArabicOverview)
+                primary.copy(
+                    title = primary.originalTitle.ifBlank { primary.title },
+                    overview = validArabicOverview,
+                    genres = TmdbMetadataMatcher.localizeGenres(primary.genres, preferArabic = true)
+                )
             } else {
-                val englishFallback = fetchSingle(resolvedId, "en-US")
+                val englishFallback = fetchSingle(resolvedId, TmdbMetadataMatcher.TMDB_LANG_ENGLISH)
                 when {
                     primary == null -> englishFallback?.copy(
-                        overview = TmdbMetadataMatcher.sanitizeSynopsis(englishFallback.overview, effectiveTitle)
+                        overview = TmdbMetadataMatcher.sanitizeSynopsis(englishFallback.overview, effectiveTitle),
+                        genres = TmdbMetadataMatcher.localizeGenres(englishFallback.genres, preferArabic = true)
                     )
-                    englishFallback == null -> primary.copy(overview = validArabicOverview)
+                    englishFallback == null -> primary.copy(
+                        title = primary.originalTitle.ifBlank { primary.title },
+                        overview = validArabicOverview,
+                        genres = TmdbMetadataMatcher.localizeGenres(primary.genres, preferArabic = true)
+                    )
                     else -> {
                         val validEnglishOverview = TmdbMetadataMatcher.sanitizeSynopsis(englishFallback.overview, effectiveTitle)
+                        val preservedTitle = englishFallback.title.ifBlank { primary.originalTitle.ifBlank { primary.title } }
+                        val mergedCastMembers = if (englishFallback.castMembers.isNotEmpty()) {
+                            val arById = primary.castMembers.associateBy { it.id }
+                            englishFallback.castMembers.map { enMember ->
+                                val arMember = arById[enMember.id]
+                                enMember.copy(profileUrl = enMember.profileUrl.ifBlank { arMember?.profileUrl.orEmpty() })
+                            }
+                        } else {
+                            primary.castMembers
+                        }
+                        val enSeasonsByNum = englishFallback.seasons.associateBy { it.seasonNumber }
+                        val mergedSeasons = if (primary.seasons.isNotEmpty()) {
+                            primary.seasons.map { arSeason ->
+                                val enSeason = enSeasonsByNum[arSeason.seasonNumber]
+                                arSeason.copy(
+                                    name = arSeason.name.ifBlank { enSeason?.name.orEmpty() },
+                                    overview = TmdbMetadataMatcher.cleanSynopsisFormatting(arSeason.overview)
+                                        .ifBlank { TmdbMetadataMatcher.cleanSynopsisFormatting(enSeason?.overview) },
+                                    posterUrl = arSeason.posterUrl.ifBlank { enSeason?.posterUrl.orEmpty() },
+                                    airDate = arSeason.airDate.ifBlank { enSeason?.airDate.orEmpty() },
+                                    episodeCount = if (arSeason.episodeCount > 0) arSeason.episodeCount else (enSeason?.episodeCount ?: 0)
+                                )
+                            }
+                        } else {
+                            englishFallback.seasons
+                        }
                         primary.copy(
                             tmdbId = if (primary.tmdbId > 0) primary.tmdbId else englishFallback.tmdbId,
+                            title = preservedTitle,
                             overview = validArabicOverview.ifEmpty { validEnglishOverview },
                             posterUrl = primary.posterUrl.ifBlank { englishFallback.posterUrl },
                             backdropUrl = primary.backdropUrl.ifBlank { englishFallback.backdropUrl },
-                            genres = primary.genres.ifBlank { englishFallback.genres },
-                            cast = primary.cast.ifBlank { englishFallback.cast },
-                            castMembers = primary.castMembers.ifEmpty { englishFallback.castMembers },
-                            director = primary.director.ifBlank { englishFallback.director },
+                            genres = TmdbMetadataMatcher.localizeGenres(primary.genres.ifBlank { englishFallback.genres }, preferArabic = true),
+                            cast = englishFallback.cast.ifBlank { primary.cast },
+                            castMembers = mergedCastMembers,
+                            director = englishFallback.director.ifBlank { primary.director },
                             releaseYear = primary.releaseYear.ifBlank { englishFallback.releaseYear },
                             releaseDate = primary.releaseDate.ifBlank { englishFallback.releaseDate },
                             rating = if (primary.rating > 0.0) primary.rating else englishFallback.rating,
                             runtimeMinutes = if (primary.runtimeMinutes > 0) primary.runtimeMinutes else englishFallback.runtimeMinutes,
-                            seasons = primary.seasons.ifEmpty { englishFallback.seasons },
+                            seasons = mergedSeasons,
                             originalTitle = primary.originalTitle.ifBlank { englishFallback.originalTitle },
                             trailerYoutubeKey = primary.trailerYoutubeKey.ifBlank { englishFallback.trailerYoutubeKey },
-                            similarItems = primary.similarItems.ifEmpty { englishFallback.similarItems }
+                            trailerLanguage = if (primary.trailerYoutubeKey.isNotBlank()) primary.trailerLanguage else englishFallback.trailerLanguage,
+                            similarItems = englishFallback.similarItems.ifEmpty { primary.similarItems }
                         )
                     }
                 }
             }
         } else {
-            primary?.copy(overview = TmdbMetadataMatcher.sanitizeSynopsis(primary.overview, effectiveTitle))
+            primary?.copy(
+                title = primary.title.ifBlank { primary.originalTitle },
+                overview = TmdbMetadataMatcher.sanitizeSynopsis(primary.overview, effectiveTitle),
+                genres = TmdbMetadataMatcher.localizeGenres(primary.genres, preferArabic = false)
+            )
         }
 
         // Resilient fallback for proxy deployments that expose `/api/tmdb/search/movie` & `/api/tmdb/search/tv`
@@ -1343,7 +1498,7 @@ class TmdbProxyClient(
                 val sanitizedOverview = TmdbMetadataMatcher.sanitizeSynopsis(cand.overview, effectiveTitle)
                 finalMeta = TmdbMediaMetadata(
                     tmdbId = cand.tmdbId,
-                    title = cand.title,
+                    title = cand.originalTitle.ifBlank { cand.title },
                     originalTitle = cand.originalTitle,
                     overview = sanitizedOverview,
                     posterUrl = cand.posterUrl,
@@ -1389,7 +1544,7 @@ class TmdbProxyClient(
             .ifEmpty { listOf(rawQuery.trim()) }
             .take(3)
         val searchPath = if (isSeries) "api/tmdb/search/tv" else "api/tmdb/search/movie"
-        val languages = if (preferArabic) listOf("ar", "en-US") else listOf("en-US")
+        val languages = if (preferArabic) listOf(TmdbMetadataMatcher.TMDB_LANG_ARABIC, TmdbMetadataMatcher.TMDB_LANG_ENGLISH) else listOf(TmdbMetadataMatcher.TMDB_LANG_ENGLISH)
 
         val byId = LinkedHashMap<Int, TmdbSearchCandidate>()
 
@@ -1922,14 +2077,15 @@ class TmdbProxyClient(
                 }
             }
 
-            // Parse castMembers (from upgraded proxy `castMembers` OR raw TMDb `credits.cast`)
+            // Parse castMembers (preserve original actor name via original_name when present)
             val castMembers = mutableListOf<TmdbCastMember>()
             val castMembersArr = source.optJSONArray("castMembers")
                 ?: source.optJSONObject("credits")?.optJSONArray("cast")
             if (castMembersArr != null) {
                 for (i in 0 until castMembersArr.length().coerceAtMost(12)) {
                     val cObj = castMembersArr.optJSONObject(i) ?: continue
-                    val cName = cObj.optString("name", "").trim()
+                    val cName = cObj.optString("original_name", "").trim()
+                        .ifBlank { cObj.optString("name", "").trim() }
                     if (cName.isNotEmpty()) {
                         val profileUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
                             cObj.optString("profileUrl", "").ifBlank { cObj.optString("profile_path", "") },
@@ -1947,29 +2103,46 @@ class TmdbProxyClient(
                 }
             }
 
-            // Parse official YouTube trailer key (proxy `trailerYoutubeKey` OR raw TMDb `videos.results`)
+            // Parse official YouTube trailer key (prefer Arabic audio/subtitles when available)
             var trailerKey = source.optString("trailerYoutubeKey", source.optString("trailer_key", "")).trim()
-            if (trailerKey.isBlank()) {
-                val videosArr = source.optJSONObject("videos")?.optJSONArray("results")
-                if (videosArr != null) {
-                    var bestScore = -1
-                    for (i in 0 until videosArr.length()) {
-                        val v = videosArr.optJSONObject(i) ?: continue
-                        val site = v.optString("site", "")
-                        val key = v.optString("key", "").trim()
-                        if (!site.equals("YouTube", ignoreCase = true) || key.isBlank()) continue
-                        val type = v.optString("type", "")
-                        val official = v.optBoolean("official", false)
-                        val score = when {
-                            type.equals("Trailer", ignoreCase = true) && official -> 100
-                            type.equals("Trailer", ignoreCase = true) -> 80
-                            type.equals("Teaser", ignoreCase = true) && official -> 60
-                            type.equals("Teaser", ignoreCase = true) -> 40
-                            else -> 10
-                        }
-                        if (score > bestScore) {
-                            bestScore = score
-                            trailerKey = key
+            var trailerLanguage = source.optString("trailerLanguage", source.optString("trailer_language", "")).trim()
+            val videosArr = source.optJSONObject("videos")?.optJSONArray("results")
+            if (videosArr != null) {
+                var bestScore = -1
+                for (i in 0 until videosArr.length()) {
+                    val v = videosArr.optJSONObject(i) ?: continue
+                    val site = v.optString("site", "")
+                    val key = v.optString("key", "").trim()
+                    if (!site.equals("YouTube", ignoreCase = true) || key.isBlank()) continue
+                    val type = v.optString("type", "")
+                    val official = v.optBoolean("official", false)
+                    val isoLang = v.optString("iso_639_1", "").lowercase()
+                    val videoName = v.optString("name", "").lowercase()
+                    val isArabicVideo = isoLang == "ar" ||
+                        videoName.contains("مترجم") ||
+                        videoName.contains("عربي") ||
+                        videoName.contains("arabic")
+                    val baseScore = when {
+                        type.equals("Trailer", ignoreCase = true) && official -> 100
+                        type.equals("Trailer", ignoreCase = true) -> 80
+                        type.equals("Teaser", ignoreCase = true) && official -> 60
+                        type.equals("Teaser", ignoreCase = true) -> 40
+                        else -> 10
+                    }
+                    val langBonus = when {
+                        isoLang == "ar" -> 50
+                        isArabicVideo -> 40
+                        isoLang == "en" -> 15
+                        else -> 0
+                    }
+                    val score = baseScore + langBonus
+                    if (score > bestScore) {
+                        bestScore = score
+                        trailerKey = key
+                        trailerLanguage = when {
+                            isArabicVideo -> "ar"
+                            isoLang.isNotBlank() -> isoLang
+                            else -> "en"
                         }
                     }
                 }
@@ -2055,6 +2228,7 @@ class TmdbProxyClient(
                 originalTitle = originalTitle,
                 castMembers = castMembers,
                 trailerYoutubeKey = trailerKey,
+                trailerLanguage = trailerLanguage,
                 similarItems = similarItems,
                 cachedAtMs = System.currentTimeMillis()
             )
@@ -2087,7 +2261,8 @@ class TmdbProxyClient(
         fun enrichMediaItem(
             item: MediaItem,
             tmdb: TmdbMediaMetadata,
-            overrideValidExistingPlot: Boolean = false
+            overrideValidExistingPlot: Boolean = false,
+            preferArabic: Boolean? = null
         ): MediaItem {
             val validExistingPlot = TmdbMetadataMatcher.sanitizeSynopsis(item.plot, item.name)
             val validTmdbOverview = TmdbMetadataMatcher.sanitizeSynopsis(tmdb.overview, item.name)
@@ -2106,11 +2281,18 @@ class TmdbProxyClient(
             // Never copy portrait poster into backdrop so the UI can cleanly render blurred poster fallback
             val resolvedBackdrop = tmdb.backdropUrl.ifBlank { existingRealBackdrop }
 
+            val rawGenres = tmdb.genres.ifBlank { item.genre }
+            val resolvedGenres = if (preferArabic != null) {
+                TmdbMetadataMatcher.localizeGenres(rawGenres, preferArabic = preferArabic)
+            } else {
+                rawGenres
+            }
+
             return item.copy(
                 streamIcon = resolvedPoster,
                 backdrop = resolvedBackdrop,
                 plot = resolvedPlot,
-                genre = tmdb.genres.ifBlank { item.genre },
+                genre = resolvedGenres,
                 rating = if (tmdb.rating > 0.0) tmdb.rating else item.rating,
                 year = tmdb.releaseYear.ifBlank { item.year },
                 duration = if (tmdb.runtimeMinutes > 0 && item.duration.isBlank()) "${tmdb.runtimeMinutes}m" else item.duration,
@@ -2124,7 +2306,8 @@ class TmdbProxyClient(
             details: SeriesDetails,
             metadata: TmdbMediaMetadata,
             seasonEpisodesMap: Map<Int, List<TmdbEpisodeMetadata>> = emptyMap(),
-            overrideValidExistingPlot: Boolean = false
+            overrideValidExistingPlot: Boolean = false,
+            preferArabic: Boolean? = null
         ): SeriesDetails {
             val tmdbSeasonMap = metadata.seasons.associateBy { it.seasonNumber }
 
@@ -2138,10 +2321,16 @@ class TmdbProxyClient(
                     val mergedEpisodes = season.episodes.map { ep ->
                         val tmdbEp = tmdbEpsByNum[ep.episodeNum]
                         if (tmdbEp != null) {
+                            val existingEpPlot = TmdbMetadataMatcher.sanitizeSynopsis(ep.plot, ep.title)
+                            val tmdbEpPlot = TmdbMetadataMatcher.sanitizeSynopsis(tmdbEp.overview, ep.title)
+                            val resolvedEpPlot = if (overrideValidExistingPlot) {
+                                tmdbEpPlot.ifEmpty { existingEpPlot }
+                            } else {
+                                existingEpPlot.ifEmpty { tmdbEpPlot }
+                            }
                             ep.copy(
                                 title = tmdbEp.title.ifBlank { ep.title },
-                                plot = TmdbMetadataMatcher.sanitizeSynopsis(ep.plot, ep.title)
-                                    .ifEmpty { TmdbMetadataMatcher.sanitizeSynopsis(tmdbEp.overview, ep.title) },
+                                plot = resolvedEpPlot,
                                 coverUrl = tmdbEp.stillUrl.ifBlank { ep.coverUrl },
                                 rating = if (tmdbEp.rating > 0.0) tmdbEp.rating else ep.rating,
                                 durationSec = if (tmdbEp.durationSec > 0) tmdbEp.durationSec else ep.durationSec
@@ -2151,10 +2340,19 @@ class TmdbProxyClient(
                         }
                     }
 
+                    val existingSeasonOverview = TmdbMetadataMatcher.sanitizeSynopsis(season.overview, season.name)
+                    val tmdbSeasonOverview = TmdbMetadataMatcher.sanitizeSynopsis(tmdbSeason?.overview.orEmpty(), season.name)
+                    val resolvedSeasonOverview = if (overrideValidExistingPlot) {
+                        tmdbSeasonOverview.ifEmpty { existingSeasonOverview }
+                    } else {
+                        existingSeasonOverview.ifEmpty { tmdbSeasonOverview }
+                    }
+
                     season.copy(
                         name = tmdbSeason?.name?.ifBlank { season.name } ?: season.name,
                         episodeCount = mergedEpisodes.size.coerceAtLeast(tmdbSeason?.episodeCount ?: season.episodeCount),
-                        episodes = mergedEpisodes
+                        episodes = mergedEpisodes,
+                        overview = resolvedSeasonOverview
                     )
                 }
             } else if (metadata.seasons.isNotEmpty()) {
@@ -2178,7 +2376,8 @@ class TmdbProxyClient(
                                 seasonNumber = tmdbSeason.seasonNumber,
                                 quality = details.quality
                             )
-                        }
+                        },
+                        overview = TmdbMetadataMatcher.sanitizeSynopsis(tmdbSeason.overview, tmdbSeason.name)
                     )
                 }
             } else {
@@ -2199,13 +2398,20 @@ class TmdbProxyClient(
                 ""
             }
 
+            val rawGenres = metadata.genres.ifBlank { details.genre }
+            val resolvedGenres = if (preferArabic != null) {
+                TmdbMetadataMatcher.localizeGenres(rawGenres, preferArabic = preferArabic)
+            } else {
+                rawGenres
+            }
+
             return details.copy(
                 cover = metadata.posterUrl.ifBlank { details.cover },
                 backdrop = metadata.backdropUrl.ifBlank { existingRealBackdrop },
                 plot = resolvedPlot,
                 cast = metadata.cast.ifBlank { details.cast },
                 director = metadata.director.ifBlank { details.director },
-                genre = metadata.genres.ifBlank { details.genre },
+                genre = resolvedGenres,
                 releaseDate = metadata.releaseDate.ifBlank { metadata.releaseYear.ifBlank { details.releaseDate } },
                 rating = if (metadata.rating > 0.0) metadata.rating else details.rating,
                 seasons = enrichedSeasons,

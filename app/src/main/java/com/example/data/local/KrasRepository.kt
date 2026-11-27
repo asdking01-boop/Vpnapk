@@ -1092,6 +1092,15 @@ class KrasRepository(context: Context) {
             StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH
         }
 
+        val tmdbMetadataLang = try {
+            TmdbMetadataLanguage.valueOf(
+                prefs.getString("tmdbMetadataLanguage", TmdbMetadataLanguage.ARABIC.name)
+                    ?: TmdbMetadataLanguage.ARABIC.name
+            )
+        } catch (_: Exception) {
+            TmdbMetadataLanguage.ARABIC
+        }
+
         val canonicalProxyUrl = migrateStoredTmdbProxyUrl()
 
         return UserSettings(
@@ -1121,6 +1130,7 @@ class KrasRepository(context: Context) {
             tmdbProxyUrl = canonicalProxyUrl,
             tmdbAutoEnrichEnabled = true,
             tmdbAutoSyncEnabled = prefs.getBoolean("tmdbAutoSyncEnabled", true),
+            tmdbMetadataLanguage = tmdbMetadataLang,
             interfaceStyle = interfaceStyle,
             premiumTheme = premiumTheme,
             cinematicBackgroundsEnabled = prefs.getBoolean("cinematicBackgroundsEnabled", true),
@@ -1173,6 +1183,7 @@ class KrasRepository(context: Context) {
             putString("tmdbProxyUrl", normalizedProxyUrl)
             putBoolean("tmdbAutoEnrichEnabled", true)
             putBoolean("tmdbAutoSyncEnabled", settings.tmdbAutoSyncEnabled)
+            putString("tmdbMetadataLanguage", settings.tmdbMetadataLanguage.name)
             putString("interfaceStyle", settings.interfaceStyle.name)
             putString("premiumTheme", settings.premiumTheme.name)
             putBoolean("cinematicBackgroundsEnabled", settings.cinematicBackgroundsEnabled)

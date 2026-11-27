@@ -2,8 +2,11 @@ package com.example.data.local
 
 import android.content.Context
 import com.example.data.api.TmdbCastMember
+import com.example.data.api.TmdbEpisodeMetadata
 import com.example.data.api.TmdbErrorSanitizer
 import com.example.data.api.TmdbMediaMetadata
+import com.example.data.api.TmdbMetadataMatcher
+import com.example.data.api.TmdbPersonBiography
 import com.example.data.api.TmdbSeasonSummary
 import com.example.data.api.TmdbSimilarItem
 import java.io.File
@@ -43,6 +46,8 @@ class TmdbMetadataCacheStore(context: Context) {
     private var loaded = false
     private val entriesByKey = LinkedHashMap<String, TmdbMediaMetadata>()
     private val manualBindings = LinkedHashMap<String, ManualTmdbBinding>()
+    private val personBiographiesByKey = LinkedHashMap<String, TmdbPersonBiography>()
+    private val seasonEpisodesByKey = LinkedHashMap<String, List<TmdbEpisodeMetadata>>()
     private val negativeAttemptMs = HashMap<String, Long>()
 
     private fun ensureLoadedLocked() {
@@ -85,6 +90,58 @@ class TmdbMetadataCacheStore(context: Context) {
                     }
                 }
             }
+
+            val personsObj = root.optJSONObject("personBiographies")
+            if (personsObj != null) {
+                val keys = personsObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val obj = personsObj.optJSONObject(key) ?: continue
+                    val pid = obj.optInt("personId", 0)
+                    if (pid > 0) {
+                        personBiographiesByKey[key] = TmdbPersonBiography(
+                            personId = pid,
+                            name = obj.optString("name", ""),
+                            character = obj.optString("character", ""),
+                            biography = obj.optString("biography", ""),
+                            birthday = obj.optString("birthday", ""),
+                            placeOfBirth = obj.optString("placeOfBirth", ""),
+                            knownForDepartment = obj.optString("knownForDepartment", ""),
+                            profileUrl = obj.optString("profileUrl", ""),
+                            languageTag = obj.optString("languageTag", TmdbMetadataMatcher.TMDB_LANG_ARABIC),
+                            cachedAtMs = obj.optLong("cachedAtMs", 0L)
+                        )
+                    }
+                }
+            }
+
+            val episodesObj = root.optJSONObject("seasonEpisodes")
+            if (episodesObj != null) {
+                val keys = episodesObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val arr = episodesObj.optJSONArray(key) ?: continue
+                    val list = mutableListOf<TmdbEpisodeMetadata>()
+                    for (i in 0 until arr.length()) {
+                        val e = arr.optJSONObject(i) ?: continue
+                        list.add(
+                            TmdbEpisodeMetadata(
+                                episodeNumber = e.optInt("episodeNumber", i + 1),
+                                seasonNumber = e.optInt("seasonNumber", 1),
+                                title = e.optString("title", ""),
+                                overview = e.optString("overview", ""),
+                                stillUrl = e.optString("stillUrl", ""),
+                                rating = e.optDouble("rating", 0.0).let { if (it.isNaN()) 0.0 else it },
+                                durationSec = e.optInt("durationSec", 0),
+                                airDate = e.optString("airDate", "")
+                            )
+                        )
+                    }
+                    if (list.isNotEmpty()) {
+                        seasonEpisodesByKey[key] = list
+                    }
+                }
+            }
         } catch (_: Exception) {
             // Preserve app stability if cache file is unreadable; will rewrite cleanly on next save.
         }
@@ -121,6 +178,55 @@ class TmdbMetadataCacheStore(context: Context) {
             }
             root.put("manualBindings", manualObj)
 
+            while (personBiographiesByKey.size > 200) {
+                val oldest = personBiographiesByKey.keys.firstOrNull() ?: break
+                personBiographiesByKey.remove(oldest)
+            }
+            val personsObj = JSONObject()
+            for ((k, p) in personBiographiesByKey) {
+                personsObj.put(
+                    k,
+                    JSONObject().apply {
+                        put("personId", p.personId)
+                        put("name", p.name)
+                        put("character", p.character)
+                        put("biography", p.biography)
+                        put("birthday", p.birthday)
+                        put("placeOfBirth", p.placeOfBirth)
+                        put("knownForDepartment", p.knownForDepartment)
+                        put("profileUrl", p.profileUrl)
+                        put("languageTag", p.languageTag)
+                        put("cachedAtMs", p.cachedAtMs)
+                    }
+                )
+            }
+            root.put("personBiographies", personsObj)
+
+            while (seasonEpisodesByKey.size > 160) {
+                val oldest = seasonEpisodesByKey.keys.firstOrNull() ?: break
+                seasonEpisodesByKey.remove(oldest)
+            }
+            val episodesObj = JSONObject()
+            for ((k, eps) in seasonEpisodesByKey) {
+                val arr = JSONArray()
+                eps.forEach { e ->
+                    arr.put(
+                        JSONObject().apply {
+                            put("episodeNumber", e.episodeNumber)
+                            put("seasonNumber", e.seasonNumber)
+                            put("title", e.title)
+                            put("overview", e.overview)
+                            put("stillUrl", e.stillUrl)
+                            put("rating", e.rating)
+                            put("durationSec", e.durationSec)
+                            put("airDate", e.airDate)
+                        }
+                    )
+                }
+                episodesObj.put(k, arr)
+            }
+            root.put("seasonEpisodes", episodesObj)
+
             val tmp = File(cacheFile.parentFile, "$CACHE_FILE_NAME.tmp")
             tmp.writeText(root.toString(), Charsets.UTF_8)
             if (!tmp.renameTo(cacheFile)) {
@@ -132,11 +238,32 @@ class TmdbMetadataCacheStore(context: Context) {
     }
 
     fun buildItemKey(mediaItemId: String, preferArabic: Boolean): String {
-        val lang = if (preferArabic) "ar" else "en"
+        val lang = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
         return "item:${mediaItemId.trim()}:$lang"
     }
 
     fun buildTmdbKey(tmdbId: Int, isSeries: Boolean, preferArabic: Boolean): String {
+        val type = if (isSeries) "tv" else "movie"
+        val lang = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+        return "tmdb:$type:$tmdbId:$lang"
+    }
+
+    fun buildPersonKey(personId: Int, preferArabic: Boolean): String {
+        val lang = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+        return "person:$personId:$lang"
+    }
+
+    fun buildSeasonEpisodesKey(tmdbId: Int, seasonNumber: Int, preferArabic: Boolean): String {
+        val lang = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+        return "season:$tmdbId:$seasonNumber:$lang"
+    }
+
+    private fun buildLegacyItemKey(mediaItemId: String, preferArabic: Boolean): String {
+        val lang = if (preferArabic) "ar" else "en"
+        return "item:${mediaItemId.trim()}:$lang"
+    }
+
+    private fun buildLegacyTmdbKey(tmdbId: Int, isSeries: Boolean, preferArabic: Boolean): String {
         val type = if (isSeries) "tv" else "movie"
         val lang = if (preferArabic) "ar" else "en"
         return "tmdb:$type:$tmdbId:$lang"
@@ -145,17 +272,9 @@ class TmdbMetadataCacheStore(context: Context) {
     fun getForMediaItem(mediaItemId: String, tmdbId: Int, isSeries: Boolean, preferArabic: Boolean): TmdbMediaMetadata? {
         synchronized(lock) {
             ensureLoadedLocked()
-            val itemKey = buildItemKey(mediaItemId, preferArabic)
-            entriesByKey[itemKey]?.let { return it }
-            if (tmdbId > 0) {
-                entriesByKey[buildTmdbKey(tmdbId, isSeries, preferArabic)]?.let { return it }
-            }
+            getExactLanguageLocked(mediaItemId, tmdbId, isSeries, preferArabic)?.let { return it }
             // Fallback to opposite language cached entry ONLY for instant display while preferred language refreshes
-            val altItemKey = buildItemKey(mediaItemId, !preferArabic)
-            entriesByKey[altItemKey]?.let { return it }
-            if (tmdbId > 0) {
-                entriesByKey[buildTmdbKey(tmdbId, isSeries, !preferArabic)]?.let { return it }
-            }
+            getExactLanguageLocked(mediaItemId, tmdbId, isSeries, !preferArabic)?.let { return it }
             return null
         }
     }
@@ -163,11 +282,54 @@ class TmdbMetadataCacheStore(context: Context) {
     fun getExactLanguageForMediaItem(mediaItemId: String, tmdbId: Int, isSeries: Boolean, preferArabic: Boolean): TmdbMediaMetadata? {
         synchronized(lock) {
             ensureLoadedLocked()
-            entriesByKey[buildItemKey(mediaItemId, preferArabic)]?.let { return it }
-            if (tmdbId > 0) {
-                entriesByKey[buildTmdbKey(tmdbId, isSeries, preferArabic)]?.let { return it }
-            }
-            return null
+            return getExactLanguageLocked(mediaItemId, tmdbId, isSeries, preferArabic)
+        }
+    }
+
+    private fun getExactLanguageLocked(mediaItemId: String, tmdbId: Int, isSeries: Boolean, preferArabic: Boolean): TmdbMediaMetadata? {
+        entriesByKey[buildItemKey(mediaItemId, preferArabic)]?.let { return it }
+        entriesByKey[buildLegacyItemKey(mediaItemId, preferArabic)]?.let { return it }
+        if (tmdbId > 0) {
+            entriesByKey[buildTmdbKey(tmdbId, isSeries, preferArabic)]?.let { return it }
+            entriesByKey[buildLegacyTmdbKey(tmdbId, isSeries, preferArabic)]?.let { return it }
+        }
+        return null
+    }
+
+    fun getPersonBiography(personId: Int, preferArabic: Boolean): TmdbPersonBiography? {
+        synchronized(lock) {
+            ensureLoadedLocked()
+            return personBiographiesByKey[buildPersonKey(personId, preferArabic)]
+        }
+    }
+
+    fun putPersonBiography(personId: Int, preferArabic: Boolean, bio: TmdbPersonBiography, nowMs: Long = System.currentTimeMillis()) {
+        if (personId <= 0) return
+        synchronized(lock) {
+            ensureLoadedLocked()
+            val key = buildPersonKey(personId, preferArabic)
+            personBiographiesByKey.remove(key)
+            personBiographiesByKey[key] = bio.copy(cachedAtMs = if (bio.cachedAtMs > 0L) bio.cachedAtMs else nowMs)
+            persistLocked()
+        }
+    }
+
+    fun getSeasonEpisodes(tmdbId: Int, seasonNumber: Int, preferArabic: Boolean): List<TmdbEpisodeMetadata> {
+        if (tmdbId <= 0 || seasonNumber < 1) return emptyList()
+        synchronized(lock) {
+            ensureLoadedLocked()
+            return seasonEpisodesByKey[buildSeasonEpisodesKey(tmdbId, seasonNumber, preferArabic)].orEmpty()
+        }
+    }
+
+    fun putSeasonEpisodes(tmdbId: Int, seasonNumber: Int, preferArabic: Boolean, episodes: List<TmdbEpisodeMetadata>) {
+        if (tmdbId <= 0 || seasonNumber < 1 || episodes.isEmpty()) return
+        synchronized(lock) {
+            ensureLoadedLocked()
+            val key = buildSeasonEpisodesKey(tmdbId, seasonNumber, preferArabic)
+            seasonEpisodesByKey.remove(key)
+            seasonEpisodesByKey[key] = episodes
+            persistLocked()
         }
     }
 
@@ -198,6 +360,12 @@ class TmdbMetadataCacheStore(context: Context) {
         if (metadata == null) return true
         if (metadata.cachedAtMs <= 0L) return true
         return (nowMs - metadata.cachedAtMs) >= STALE_TTL_MS
+    }
+
+    fun isBiographyStale(biography: TmdbPersonBiography?, nowMs: Long = System.currentTimeMillis()): Boolean {
+        if (biography == null) return true
+        if (biography.cachedAtMs <= 0L) return true
+        return (nowMs - biography.cachedAtMs) >= STALE_TTL_MS
     }
 
     fun isRichMetadataComplete(metadata: TmdbMediaMetadata?): Boolean {
@@ -274,6 +442,8 @@ class TmdbMetadataCacheStore(context: Context) {
     fun clearAllCache() {
         synchronized(lock) {
             entriesByKey.clear()
+            personBiographiesByKey.clear()
+            seasonEpisodesByKey.clear()
             negativeAttemptMs.clear()
             persistLocked()
         }
@@ -334,6 +504,7 @@ class TmdbMetadataCacheStore(context: Context) {
             put("director", m.director)
             put("runtimeMinutes", m.runtimeMinutes)
             put("trailerYoutubeKey", m.trailerYoutubeKey)
+            put("trailerLanguage", m.trailerLanguage)
             put("cachedAtMs", m.cachedAtMs)
             put("isManualMatch", m.isManualMatch)
 
@@ -466,6 +637,7 @@ class TmdbMetadataCacheStore(context: Context) {
             seasons = seasons,
             castMembers = castMembers,
             trailerYoutubeKey = obj.optString("trailerYoutubeKey", ""),
+            trailerLanguage = obj.optString("trailerLanguage", ""),
             similarItems = similarItems,
             cachedAtMs = obj.optLong("cachedAtMs", 0L),
             isManualMatch = obj.optBoolean("isManualMatch", false)

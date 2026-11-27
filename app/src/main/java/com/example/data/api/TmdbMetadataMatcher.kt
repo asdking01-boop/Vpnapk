@@ -260,10 +260,124 @@ object TmdbMetadataMatcher {
         10767 to "حواري", 10768 to "حرب وسياسة"
     )
 
+    const val TMDB_LANG_ARABIC = "ar-SA"
+    const val TMDB_LANG_ENGLISH = "en-US"
+
     fun mapTmdbGenreIds(ids: List<Int>, preferArabic: Boolean = false): String {
         if (ids.isEmpty()) return ""
         val table = if (preferArabic) TMDB_GENRES_AR else TMDB_GENRES_EN
-        return ids.mapNotNull { table[it] }.distinct().take(4).joinToString(", ")
+        val sep = if (preferArabic) "، " else ", "
+        return ids.mapNotNull { table[it] }.distinct().take(4).joinToString(sep)
+    }
+
+    private val GENRE_EN_TO_AR: Map<String, String> = mapOf(
+        "action" to "أكشن",
+        "adventure" to "مغامرة",
+        "action & adventure" to "أكشن ومغامرة",
+        "animation" to "رسوم متحركة",
+        "anime" to "أنمي",
+        "comedy" to "كوميديا",
+        "crime" to "جريمة",
+        "documentary" to "وثائقي",
+        "drama" to "دراما",
+        "family" to "عائلي",
+        "fantasy" to "فانتازيا",
+        "history" to "تاريخي",
+        "historical" to "تاريخي",
+        "horror" to "رعب",
+        "music" to "موسيقى",
+        "musical" to "موسيقي",
+        "mystery" to "غموض",
+        "romance" to "رومانسي",
+        "romantic" to "رومانسي",
+        "science fiction" to "خيال علمي",
+        "sci-fi" to "خيال علمي",
+        "scifi" to "خيال علمي",
+        "sci-fi & fantasy" to "خيال علمي وفانتازيا",
+        "tv movie" to "فيلم تلفزيوني",
+        "thriller" to "إثارة",
+        "war" to "حرب",
+        "war & politics" to "حرب وسياسة",
+        "western" to "غربي",
+        "kids" to "أطفال",
+        "news" to "أخبار",
+        "reality" to "واقعي",
+        "soap" to "دراما يومية",
+        "talk" to "حواري",
+        "biography" to "سيرة ذاتية",
+        "sport" to "رياضة",
+        "sports" to "رياضة",
+        "superhero" to "أبطال خارقون"
+    )
+
+    private val GENRE_AR_TO_EN: Map<String, String> = mapOf(
+        "أكشن" to "Action",
+        "اكشن" to "Action",
+        "حركة" to "Action",
+        "مغامرة" to "Adventure",
+        "مغامرات" to "Adventure",
+        "أكشن ومغامرة" to "Action & Adventure",
+        "رسوم متحركة" to "Animation",
+        "أنمي" to "Anime",
+        "انمي" to "Anime",
+        "كوميديا" to "Comedy",
+        "كوميدي" to "Comedy",
+        "جريمة" to "Crime",
+        "وثائقي" to "Documentary",
+        "دراما" to "Drama",
+        "عائلي" to "Family",
+        "عائلة" to "Family",
+        "فانتازيا" to "Fantasy",
+        "خيال" to "Fantasy",
+        "تاريخي" to "History",
+        "تاريخ" to "History",
+        "رعب" to "Horror",
+        "موسيقى" to "Music",
+        "موسيقي" to "Musical",
+        "غموض" to "Mystery",
+        "رومانسي" to "Romance",
+        "رومانسية" to "Romance",
+        "خيال علمي" to "Science Fiction",
+        "خيال علمي وفانتازيا" to "Sci-Fi & Fantasy",
+        "فيلم تلفزيوني" to "TV Movie",
+        "إثارة" to "Thriller",
+        "اثارة" to "Thriller",
+        "تشويق" to "Thriller",
+        "حرب" to "War",
+        "حرب وسياسة" to "War & Politics",
+        "غربي" to "Western",
+        "أطفال" to "Kids",
+        "اطفال" to "Kids",
+        "أخبار" to "News",
+        "واقعي" to "Reality",
+        "دراما يومية" to "Soap",
+        "حواري" to "Talk",
+        "سيرة ذاتية" to "Biography",
+        "رياضة" to "Sport"
+    )
+
+    /**
+     * Localizes a comma/slash-separated genre string into Arabic or English while preserving
+     * any custom/unmapped genre names intact.
+     */
+    fun localizeGenres(rawGenres: String?, preferArabic: Boolean): String {
+        val raw = rawGenres?.trim().orEmpty()
+        if (raw.isEmpty()) return ""
+        val tokens = raw.split(",", "،", "/", "|", "•")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        if (tokens.isEmpty()) return raw
+
+        val mapped = tokens.map { token ->
+            if (preferArabic) {
+                GENRE_EN_TO_AR[token.lowercase()] ?: token
+            } else {
+                GENRE_AR_TO_EN[token] ?: token
+            }
+        }.distinct()
+
+        val sep = if (preferArabic && mapped.any { containsArabicScript(it) }) "، " else ", "
+        return mapped.joinToString(sep)
     }
 
     /**

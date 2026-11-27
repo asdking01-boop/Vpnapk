@@ -23,8 +23,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -37,12 +39,18 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.data.api.TmdbMetadataMatcher
 import com.example.data.model.MediaItem
 import com.example.ui.theme.*
 import kotlin.math.abs
@@ -611,16 +619,34 @@ private fun HeroBannerSlideContent(
                 overflow = TextOverflow.Ellipsis
             )
 
-            // Genre / Plot
-            if (item.genre.isNotEmpty() || item.plot.isNotEmpty()) {
+            // Genre / Localized Synopsis (with automatic RTL alignment for Arabic text)
+            val preferArabicMeta = LocalPreferArabicMetadata.current
+            val localizedHeroGenre = remember(item.genre, preferArabicMeta) {
+                TmdbMetadataMatcher.localizeGenres(item.genre, preferArabic = preferArabicMeta)
+            }
+            val verifiedHeroPlot = remember(item.plot, item.name) {
+                TmdbMetadataMatcher.sanitizeSynopsis(item.plot, item.name)
+            }
+            val heroSubtitle = localizedHeroGenre.ifEmpty { verifiedHeroPlot }
+            if (heroSubtitle.isNotEmpty()) {
+                val subtitleIsArabic = TmdbMetadataMatcher.containsArabicScript(heroSubtitle)
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = item.genre.ifEmpty { item.plot },
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+                CompositionLocalProvider(
+                    LocalLayoutDirection provides if (subtitleIsArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+                ) {
+                    Text(
+                        text = heroSubtitle,
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Start,
+                        style = TextStyle(
+                            textDirection = if (subtitleIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(14.dp))

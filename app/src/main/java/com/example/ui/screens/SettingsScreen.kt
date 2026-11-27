@@ -52,6 +52,7 @@ import com.example.sync.SyncContentType
 import com.example.ui.components.KrasLogo
 import com.example.ui.components.SynchronizationSettingsCard
 import com.example.ui.components.TmdbDiagnosticsCard
+import com.example.ui.components.TmdbMetadataLanguageCard
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.premium.AppearanceExperienceSettingsCard
 import com.example.ui.premium.PlayerAmbientCinemaSettingsBlock
@@ -300,6 +301,21 @@ fun SettingsScreen(
                 onSyncNowClick = onSyncTmdbNowClick,
                 onToggleAutoSync = onToggleTmdbAutoSync,
                 onDisconnectClick = onDisconnectTmdbAccountClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+            )
+        }
+
+        // 1c-2. Settings -> TMDb -> Metadata Language (العربية Default / English / Follow App Language)
+        item {
+            TmdbMetadataLanguageCard(
+                selectedLanguage = userSettings.tmdbMetadataLanguage,
+                appLanguageIsArabic = isArabic,
+                isUiArabic = isArabic,
+                onSelectLanguage = { selectedLang ->
+                    onUpdateSettings(userSettings.copy(tmdbMetadataLanguage = selectedLang))
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 16.dp)

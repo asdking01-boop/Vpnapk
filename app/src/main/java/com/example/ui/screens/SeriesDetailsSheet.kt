@@ -19,14 +19,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.data.api.TmdbMetadataMatcher
 import com.example.data.model.*
 import com.example.ui.components.DetailsOverviewSection
+import com.example.ui.components.LocalPreferArabicMetadata
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.theme.*
 
@@ -258,13 +265,14 @@ fun SeriesDetailsSheet(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Synopsis & Cast
+                    val preferArabicMetadata = LocalPreferArabicMetadata.current
                     DetailsOverviewSection(
                         itemKey = "${seriesItem.id}_${details.seriesId}",
                         mediaTitle = details.name,
                         sectionTitle = "Overview",
                         plot = details.plot,
                         isLoading = isLoading,
-                        isArabic = false
+                        isArabic = preferArabicMetadata && TmdbMetadataMatcher.containsArabicScript(details.plot)
                     )
 
                     if (details.cast.isNotEmpty()) {
@@ -310,6 +318,27 @@ fun SeriesDetailsSheet(
                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                                     )
                                 }
+                            }
+                        }
+                        if (activeSeason != null && activeSeason.overview.isNotBlank()) {
+                            val isArabicSeasonOverview = TmdbMetadataMatcher.containsArabicScript(activeSeason.overview)
+                            Spacer(modifier = Modifier.height(10.dp))
+                            CompositionLocalProvider(
+                                LocalLayoutDirection provides if (isArabicSeasonOverview) LayoutDirection.Rtl else LayoutDirection.Ltr
+                            ) {
+                                Text(
+                                    text = activeSeason.overview,
+                                    color = TextSecondary,
+                                    fontSize = 12.sp,
+                                    lineHeight = 18.sp,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Start,
+                                    style = TextStyle(
+                                        textDirection = if (isArabicSeasonOverview) TextDirection.Rtl else TextDirection.ContentOrLtr
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
                         }
                         Spacer(modifier = Modifier.height(12.dp))
@@ -371,13 +400,23 @@ fun SeriesDetailsSheet(
                                 ResolutionBadge(resolution = epBadge)
                             }
                             if (ep.plot.isNotEmpty()) {
-                                Text(
-                                    text = ep.plot,
-                                    color = TextSecondary,
-                                    fontSize = 11.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                val isArabicPlot = TmdbMetadataMatcher.containsArabicScript(ep.plot)
+                                CompositionLocalProvider(
+                                    LocalLayoutDirection provides if (isArabicPlot) LayoutDirection.Rtl else LayoutDirection.Ltr
+                                ) {
+                                    Text(
+                                        text = ep.plot,
+                                        color = TextSecondary,
+                                        fontSize = 11.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Start,
+                                        style = TextStyle(
+                                            textDirection = if (isArabicPlot) TextDirection.Rtl else TextDirection.ContentOrLtr
+                                        ),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
                             }
                             Text(
                                 text = "${ep.durationSec / 60}m",

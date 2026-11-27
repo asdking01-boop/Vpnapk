@@ -22,10 +22,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.data.api.TmdbMetadataMatcher
 import com.example.data.model.CardStyle
 import com.example.data.model.FavoriteItem
 import com.example.data.model.MediaItem
@@ -33,6 +39,7 @@ import com.example.data.model.WatchProgress
 import com.example.ui.components.HeroBannerCarousel
 import com.example.ui.components.HeroBannerSkeleton
 import com.example.ui.components.LiquidGlassChip
+import com.example.ui.components.LocalPreferArabicMetadata
 import com.example.ui.components.MediaRow
 import com.example.ui.components.MediaRowSkeleton
 import com.example.ui.components.ResolutionBadge
@@ -56,8 +63,10 @@ fun HomeScreen(
     isLoading: Boolean,
     cardStyle: CardStyle,
     modifier: Modifier = Modifier,
-    favorites: List<FavoriteItem> = emptyList()
+    favorites: List<FavoriteItem> = emptyList(),
+    onEnsureLocalizedMetadata: (MediaItem) -> Unit = {}
 ) {
+    val preferArabicMetadata = LocalPreferArabicMetadata.current
     var selectedQuickFilter by remember { mutableStateOf("All") }
     var showHeroInfoDialog by remember { mutableStateOf<MediaItem?>(null) }
 
@@ -86,6 +95,11 @@ fun HomeScreen(
         else heroCandidates[
             ((currentHeroIndex % heroCandidates.size) + heroCandidates.size) % heroCandidates.size
         ]
+    }
+
+    // Lightweight on-demand localization for the active Hero Banner item (no IPTV sync triggered)
+    LaunchedEffect(featuredItem?.id, preferArabicMetadata) {
+        featuredItem?.let(onEnsureLocalizedMetadata)
     }
 
     val continueWatchingItems = remember(watchHistory, movies, series) {
@@ -380,20 +394,47 @@ fun HomeScreen(
                     }
                 },
                 text = {
+                    val localizedDialogGenre = TmdbMetadataMatcher.localizeGenres(
+                        item.genre.ifEmpty { item.categoryName },
+                        preferArabic = preferArabicMetadata
+                    )
+                    val verifiedDialogPlot = TmdbMetadataMatcher.sanitizeSynopsis(item.plot, item.name)
+                    val dialogPlotIsArabic = TmdbMetadataMatcher.containsArabicScript(verifiedDialogPlot)
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "${item.year.ifEmpty { "2025" }} • ${item.duration.ifEmpty { "Full HD / 4K" }} • ${item.genre.ifEmpty { item.categoryName }}",
+                            text = "${item.year.ifEmpty { "2025" }} • ${item.duration.ifEmpty { "Full HD / 4K" }} • $localizedDialogGenre",
                             color = KrasRedBright,
                             fontSize = 12.sp,
                             fontFamily = OutfitFontFamily,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            style = TextStyle(
+                                textDirection = if (TmdbMetadataMatcher.containsArabicScript(localizedDialogGenre)) TextDirection.Rtl else TextDirection.Ltr
+                            )
                         )
-                        Text(
-                            text = item.plot.ifEmpty { "Stream in crystal clear quality with adaptive multi-bitrate playback." },
-                            color = TextSecondary,
-                            fontSize = 13.sp,
-                            lineHeight = 19.sp
-                        )
+                        if (verifiedDialogPlot.isNotEmpty()) {
+                            CompositionLocalProvider(
+                                LocalLayoutDirection provides if (dialogPlotIsArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+                            ) {
+                                Text(
+                                    text = verifiedDialogPlot,
+                                    color = TextSecondary,
+                                    fontSize = 13.sp,
+                                    lineHeight = 19.sp,
+                                    textAlign = TextAlign.Start,
+                                    style = TextStyle(
+                                        textDirection = if (dialogPlotIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = if (preferArabicMetadata) "ملخص القصة غير متوفر" else "Story synopsis not available",
+                                color = TextMuted,
+                                fontSize = 13.sp,
+                                lineHeight = 19.sp
+                            )
+                        }
                     }
                 },
                 confirmButton = {

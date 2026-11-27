@@ -38,9 +38,14 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -48,9 +53,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
+import com.example.data.api.TmdbMetadataMatcher
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
 import com.example.data.model.UserSettings
+import com.example.ui.components.LocalPreferArabicMetadata
 import com.example.ui.components.ResolutionBadge
 import com.example.ui.theme.OutfitFontFamily
 import com.example.ui.theme.RatingYellow
@@ -80,6 +87,7 @@ fun MovieReelsScreen(
     onResolveTrailerKey: suspend (MediaItem) -> String?,
     onUpdateSettings: (UserSettings) -> Unit,
     isArabic: Boolean,
+    onEnsureLocalizedMetadata: (MediaItem) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val experience = LocalPremiumExperienceState.current
@@ -171,13 +179,18 @@ fun MovieReelsScreen(
         val pagerState = rememberPagerState(pageCount = { reelItems.size })
 
         // Pre-resolve official trailer key for active page + next page
-        LaunchedEffect(pagerState.settledPage, reelItems) {
+        LaunchedEffect(userSettings.tmdbMetadataLanguage, userSettings.language) {
+            trailerKeyMap.clear()
+        }
+
+        LaunchedEffect(pagerState.settledPage, reelItems, userSettings.tmdbMetadataLanguage) {
             val idx = pagerState.settledPage
             val targets = listOfNotNull(
                 reelItems.getOrNull(idx),
                 reelItems.getOrNull(idx + 1)
             )
             for (item in targets) {
+                onEnsureLocalizedMetadata(item)
                 if (!trailerKeyMap.containsKey(item.id)) {
                     val resolved = try {
                         onResolveTrailerKey(item).orEmpty()
@@ -530,28 +543,55 @@ private fun MovieReelPage(
                 overflow = TextOverflow.Ellipsis
             )
 
-            // Genre line
-            if (item.genre.isNotBlank()) {
-                Text(
-                    text = item.genre,
-                    color = palette.primaryBright,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+            // Localized Genre line (with RTL alignment when Arabic)
+            val preferArabicMeta = LocalPreferArabicMetadata.current
+            val localizedReelGenre = remember(item.genre, preferArabicMeta) {
+                TmdbMetadataMatcher.localizeGenres(item.genre, preferArabic = preferArabicMeta)
+            }
+            if (localizedReelGenre.isNotBlank()) {
+                val genreIsArabic = TmdbMetadataMatcher.containsArabicScript(localizedReelGenre)
+                CompositionLocalProvider(
+                    LocalLayoutDirection provides if (genreIsArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+                ) {
+                    Text(
+                        text = localizedReelGenre,
+                        color = palette.primaryBright,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Start,
+                        style = TextStyle(
+                            textDirection = if (genreIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
 
-            // Brief Synopsis
-            if (item.plot.isNotBlank()) {
-                Text(
-                    text = item.plot,
-                    color = Color.White.copy(alpha = 0.82f),
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+            // Brief Synopsis (verified & RTL aligned when Arabic)
+            val verifiedReelPlot = remember(item.plot, item.name) {
+                TmdbMetadataMatcher.sanitizeSynopsis(item.plot, item.name)
+            }
+            if (verifiedReelPlot.isNotBlank()) {
+                val plotIsArabic = TmdbMetadataMatcher.containsArabicScript(verifiedReelPlot)
+                CompositionLocalProvider(
+                    LocalLayoutDirection provides if (plotIsArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+                ) {
+                    Text(
+                        text = verifiedReelPlot,
+                        color = Color.White.copy(alpha = 0.82f),
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Start,
+                        style = TextStyle(
+                            textDirection = if (plotIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
 
             // Official Trailer Status / Trigger Chip (when not currently playing embedded trailer)

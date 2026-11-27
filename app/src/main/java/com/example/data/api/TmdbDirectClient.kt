@@ -600,16 +600,19 @@ class TmdbDirectClient(
         if (cleanKey.isEmpty() || tmdbId <= 0) return@withContext null
 
         val typeKey = if (isSeries) "tv" else "movie"
+        val preferArabic = language.startsWith("ar", ignoreCase = true)
         val cacheKey = "$typeKey:$tmdbId:${language.lowercase()}"
         detailsCache[cacheKey]?.let { return@withContext it }
 
+        val queryParams = linkedMapOf(
+            "append_to_response" to "credits,videos,similar,recommendations",
+            "language" to language,
+            "include_video_language" to if (preferArabic) "ar,ar-SA,en,null" else "en,null"
+        )
         val request = buildAuthorizedGetRequest(
             path = "/$typeKey/$tmdbId",
             apiKeyOrBearer = cleanKey,
-            queryParams = mapOf(
-                "append_to_response" to "credits,videos,similar,recommendations",
-                "language" to language
-            )
+            queryParams = queryParams
         )
 
         try {
@@ -617,7 +620,7 @@ class TmdbDirectClient(
                 if (!resp.isSuccessful) return@withContext null
                 val body = resp.body?.string().orEmpty()
                 val json = parseJsonObjectSafe(body) ?: return@withContext null
-                val parsed = parseDirectMediaDetailsJson(json, isSeries) ?: return@withContext null
+                val parsed = parseDirectMediaDetailsJson(json, isSeries, preferArabic) ?: return@withContext null
                 detailsCache[cacheKey] = parsed
                 parsed
             }
@@ -675,6 +678,118 @@ class TmdbDirectClient(
     }
 
     /**
+     * Fetches season episodes localized in Arabic (`ar-SA`) when [preferArabic] is true,
+     * automatically merging English (`en-US`) episode descriptions whenever an Arabic episode
+     * overview is missing so no episode description is ever empty if English exists.
+     */
+    suspend fun fetchTvSeasonEpisodesLocalized(
+        apiKey: String,
+        tvId: Int,
+        seasonNumber: Int,
+        preferArabic: Boolean
+    ): List<TmdbEpisodeMetadata> = withContext(Dispatchers.IO) {
+        if (!preferArabic) {
+            return@withContext fetchTvSeasonEpisodes(apiKey, tvId, seasonNumber, TmdbMetadataMatcher.TMDB_LANG_ENGLISH)
+        }
+        val arabicEps = fetchTvSeasonEpisodes(apiKey, tvId, seasonNumber, TmdbMetadataMatcher.TMDB_LANG_ARABIC)
+        val needsEnglishFallback = arabicEps.isEmpty() || arabicEps.any { it.overview.isBlank() }
+        if (!needsEnglishFallback) return@withContext arabicEps
+
+        val englishEps = fetchTvSeasonEpisodes(apiKey, tvId, seasonNumber, TmdbMetadataMatcher.TMDB_LANG_ENGLISH)
+        if (arabicEps.isEmpty()) return@withContext englishEps
+        if (englishEps.isEmpty()) return@withContext arabicEps
+
+        val enByNum = englishEps.associateBy { it.episodeNumber }
+        arabicEps.map { arEp ->
+            val enEp = enByNum[arEp.episodeNumber]
+            val validArOverview = TmdbMetadataMatcher.sanitizeSynopsis(arEp.overview, arEp.title)
+            val validEnOverview = TmdbMetadataMatcher.sanitizeSynopsis(enEp?.overview, enEp?.title.orEmpty())
+            arEp.copy(
+                // Keep original/English episode title when Arabic title is blank or generic
+                title = enEp?.title?.takeIf { it.isNotBlank() } ?: arEp.title,
+                overview = validArOverview.ifEmpty { validEnOverview },
+                stillUrl = arEp.stillUrl.ifBlank { enEp?.stillUrl.orEmpty() },
+                rating = if (arEp.rating > 0.0) arEp.rating else (enEp?.rating ?: 0.0),
+                durationSec = if (arEp.durationSec > 0) arEp.durationSec else (enEp?.durationSec ?: 0),
+                airDate = arEp.airDate.ifBlank { enEp?.airDate.orEmpty() }
+            )
+        }
+    }
+
+    /**
+     * Fetches actor biography directly from TMDb `/person/{id}` using `language=ar-SA` when
+     * [preferArabic] is true, automatically falling back to `en-US` when Arabic biography is
+     * unavailable. Always preserves the original actor name.
+     */
+    suspend fun fetchPersonBiography(
+        apiKey: String,
+        personId: Int,
+        fallbackName: String = "",
+        fallbackCharacter: String = "",
+        fallbackProfileUrl: String = "",
+        preferArabic: Boolean = true
+    ): TmdbPersonBiography? = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isEmpty() || personId <= 0) return@withContext null
+
+        fun fetchSingleLang(lang: String): JSONObject? {
+            val req = buildAuthorizedGetRequest(
+                path = "/person/$personId",
+                apiKeyOrBearer = cleanKey,
+                queryParams = mapOf("language" to lang)
+            )
+            return try {
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) null
+                    else parseJsonObjectSafe(resp.body?.string().orEmpty())
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        val primaryLang = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+        val primaryJson = fetchSingleLang(primaryLang)
+        val primaryBio = TmdbMetadataMatcher.cleanSynopsisFormatting(primaryJson?.optString("biography", ""))
+        val enJson = if (preferArabic && (primaryJson == null || primaryBio.isBlank())) {
+            fetchSingleLang(TmdbMetadataMatcher.TMDB_LANG_ENGLISH)
+        } else {
+            null
+        }
+        val enBio = TmdbMetadataMatcher.cleanSynopsisFormatting(enJson?.optString("biography", ""))
+        val source = primaryJson ?: enJson ?: return@withContext null
+
+        // Preserve original actor name (prefer fallbackName / en-US name over localized transliterations)
+        val enName = enJson?.optString("name", "")?.trim().orEmpty()
+        val rawName = source.optString("name", "").trim()
+        val preservedName = fallbackName.trim().ifBlank { enName.ifBlank { rawName } }
+
+        val resolvedBio = primaryBio.ifBlank { enBio }
+        val resolvedLang = if (preferArabic && primaryBio.isNotBlank()) {
+            TmdbMetadataMatcher.TMDB_LANG_ARABIC
+        } else {
+            TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+        }
+        val profile = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+            source.optString("profile_path", ""),
+            size = "w185"
+        ).ifBlank { fallbackProfileUrl }
+
+        TmdbPersonBiography(
+            personId = personId,
+            name = preservedName,
+            character = fallbackCharacter,
+            biography = resolvedBio,
+            birthday = source.optString("birthday", "").takeIf { it != "null" }.orEmpty().trim(),
+            placeOfBirth = source.optString("place_of_birth", "").takeIf { it != "null" }.orEmpty().trim(),
+            knownForDepartment = source.optString("known_for_department", "").trim(),
+            profileUrl = profile,
+            languageTag = resolvedLang,
+            cachedAtMs = System.currentTimeMillis()
+        )
+    }
+
+    /**
      * Searches TMDb candidates directly across cleaned bilingual query variants for both
      * smart auto-matching and manual TMDb match selection.
      */
@@ -694,7 +809,7 @@ class TmdbDirectClient(
             .ifEmpty { listOf(rawQuery.trim()) }
             .take(3)
         val endpoint = if (isSeries) "/search/tv" else "/search/movie"
-        val languages = if (preferArabic) listOf("ar", "en-US") else listOf("en-US")
+        val languages = if (preferArabic) listOf(TmdbMetadataMatcher.TMDB_LANG_ARABIC, TmdbMetadataMatcher.TMDB_LANG_ENGLISH) else listOf(TmdbMetadataMatcher.TMDB_LANG_ENGLISH)
         val byId = LinkedHashMap<Int, TmdbSearchCandidate>()
 
         fun runOne(q: String, lang: String, includeYear: Boolean) {
@@ -903,7 +1018,7 @@ class TmdbDirectClient(
         val cleaned = TmdbMetadataMatcher.cleanIptvTitle(rawTitle)
         val effectiveTitle = cleaned.cleanTitle.ifBlank { rawTitle.trim() }
         val effectiveYear = year.filter { it.isDigit() }.take(4).ifBlank { cleaned.extractedYear }
-        val primaryLang = if (preferArabic) "ar" else "en-US"
+        val primaryLang = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
         val typeKey = if (isSeries) "tv" else "movie"
 
         val accurateCacheKey = "accurate:$typeKey:$tmdbId:${effectiveTitle.lowercase()}:$effectiveYear:$primaryLang"
@@ -942,26 +1057,35 @@ class TmdbDirectClient(
 
         val finalMetadata = if (preferArabic) {
             val primaryValidOverview = TmdbMetadataMatcher.sanitizeSynopsis(primaryDetails?.overview, effectiveTitle)
+            val hasMissingSeasonOverview = isSeries && primaryDetails?.seasons?.any { it.overview.isBlank() } == true
             val needsEnglishMerge = primaryDetails == null ||
                 primaryValidOverview.isEmpty() ||
                 primaryDetails.backdropUrl.isBlank() ||
                 primaryDetails.trailerYoutubeKey.isBlank() ||
                 primaryDetails.castMembers.isEmpty() ||
-                primaryDetails.similarItems.isEmpty()
+                primaryDetails.similarItems.isEmpty() ||
+                hasMissingSeasonOverview ||
+                TmdbMetadataMatcher.containsArabicScript(primaryDetails.title)
             if (!needsEnglishMerge && primaryDetails != null) {
-                primaryDetails.copy(overview = primaryValidOverview)
+                primaryDetails.copy(
+                    title = primaryDetails.originalTitle.ifBlank { primaryDetails.title },
+                    overview = primaryValidOverview,
+                    genres = TmdbMetadataMatcher.localizeGenres(primaryDetails.genres, preferArabic = true)
+                )
             } else {
                 val englishDetails = fetchMediaDetailsById(
                     apiKey = cleanKey,
                     tmdbId = resolvedId,
                     isSeries = isSeries,
-                    language = "en-US"
+                    language = TmdbMetadataMatcher.TMDB_LANG_ENGLISH
                 )
-                mergePreferredWithFallback(primaryDetails, englishDetails, effectiveTitle)
+                mergePreferredWithFallback(primaryDetails, englishDetails, effectiveTitle, preferArabic = true)
             }
         } else {
             primaryDetails?.copy(
-                overview = TmdbMetadataMatcher.sanitizeSynopsis(primaryDetails.overview, effectiveTitle)
+                title = primaryDetails.title.ifBlank { primaryDetails.originalTitle },
+                overview = TmdbMetadataMatcher.sanitizeSynopsis(primaryDetails.overview, effectiveTitle),
+                genres = TmdbMetadataMatcher.localizeGenres(primaryDetails.genres, preferArabic = false)
             )
         }
 
@@ -1119,7 +1243,7 @@ class TmdbDirectClient(
         }
     }
 
-    private fun parseDirectMediaDetailsJson(json: JSONObject, isSeries: Boolean): TmdbMediaMetadata? {
+    private fun parseDirectMediaDetailsJson(json: JSONObject, isSeries: Boolean, preferArabic: Boolean = false): TmdbMediaMetadata? {
         val tmdbId = json.optInt("id", 0)
         val title = if (isSeries) {
             json.optString("name", "").trim().ifBlank { json.optString("original_name", "").trim() }
@@ -1161,7 +1285,9 @@ class TmdbDirectClient(
         if (castArr != null) {
             for (i in 0 until castArr.length().coerceAtMost(12)) {
                 val cObj = castArr.optJSONObject(i) ?: continue
-                val name = cObj.optString("name", "").trim()
+                // Preserve original actor name (TMDb `original_name` keeps the actor's original Latin/native name)
+                val name = cObj.optString("original_name", "").trim()
+                    .ifBlank { cObj.optString("name", "").trim() }
                 if (name.isNotEmpty()) {
                     val profileUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
                         cObj.optString("profile_path", ""),
@@ -1237,8 +1363,9 @@ class TmdbDirectClient(
             }
         }
 
-        // Official YouTube trailer key from appended videos
+        // Official YouTube trailer key from appended videos (prefer Arabic audio/subtitles when preferArabic is enabled)
         var trailerYoutubeKey = ""
+        var trailerLanguage = ""
         val videosArr = json.optJSONObject("videos")?.optJSONArray("results")
         if (videosArr != null) {
             var bestScore = -1
@@ -1249,21 +1376,46 @@ class TmdbDirectClient(
                 if (!site.equals("YouTube", ignoreCase = true) || key.isBlank()) continue
                 val type = obj.optString("type", "")
                 val official = obj.optBoolean("official", false)
-                val score = when {
+                val isoLang = obj.optString("iso_639_1", "").lowercase()
+                val videoName = obj.optString("name", "").lowercase()
+                val isArabicSubOrDub = isoLang == "ar" ||
+                    videoName.contains("مترجم") ||
+                    videoName.contains("عربي") ||
+                    videoName.contains("arabic")
+                val baseScore = when {
                     type.equals("Trailer", ignoreCase = true) && official -> 100
                     type.equals("Trailer", ignoreCase = true) -> 80
                     type.equals("Teaser", ignoreCase = true) && official -> 60
                     type.equals("Teaser", ignoreCase = true) -> 40
                     else -> 10
                 }
+                val langBonus = if (preferArabic) {
+                    when {
+                        isoLang == "ar" -> 50
+                        isArabicSubOrDub -> 40
+                        isoLang == "en" -> 15
+                        else -> 0
+                    }
+                } else {
+                    when {
+                        isoLang == "en" -> 30
+                        else -> 0
+                    }
+                }
+                val score = baseScore + langBonus
                 if (score > bestScore) {
                     bestScore = score
                     trailerYoutubeKey = key
+                    trailerLanguage = when {
+                        isArabicSubOrDub -> "ar"
+                        isoLang.isNotBlank() -> isoLang
+                        else -> "en"
+                    }
                 }
             }
         }
 
-        // Similar & recommended titles
+        // Similar & recommended titles (preserve original/English titles)
         val similarItems = mutableListOf<TmdbSimilarItem>()
         val seenSimilar = HashSet<Int>()
         fun collectSimilar(arr: JSONArray?) {
@@ -1273,10 +1425,20 @@ class TmdbDirectClient(
                 val s = arr.optJSONObject(i) ?: continue
                 val sid = s.optInt("id", 0)
                 if (sid <= 0 || !seenSimilar.add(sid)) continue
-                val sTitle = if (isSeries) {
-                    s.optString("name", "").trim().ifBlank { s.optString("original_name", "").trim() }
+                val sLocalizedTitle = if (isSeries) {
+                    s.optString("name", "").trim()
                 } else {
-                    s.optString("title", "").trim().ifBlank { s.optString("original_title", "").trim() }
+                    s.optString("title", "").trim()
+                }
+                val sOrigTitle = if (isSeries) {
+                    s.optString("original_name", "").trim()
+                } else {
+                    s.optString("original_title", "").trim()
+                }
+                val sTitle = if (preferArabic) {
+                    sOrigTitle.ifBlank { sLocalizedTitle }
+                } else {
+                    sLocalizedTitle.ifBlank { sOrigTitle }
                 }
                 if (sTitle.isBlank()) continue
                 val sDate = if (isSeries) s.optString("first_air_date", "") else s.optString("release_date", "")
@@ -1284,7 +1446,7 @@ class TmdbDirectClient(
                     TmdbSimilarItem(
                         tmdbId = sid,
                         title = sTitle,
-                        originalTitle = if (isSeries) s.optString("original_name", "").trim() else s.optString("original_title", "").trim(),
+                        originalTitle = sOrigTitle,
                         posterUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(s.optString("poster_path", ""), size = "w500"),
                         backdropUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(s.optString("backdrop_path", ""), size = "w1280"),
                         releaseYear = sDate.take(4),
@@ -1299,17 +1461,26 @@ class TmdbDirectClient(
 
         val rawOverview = json.optString("overview", "").trim()
         val rating = json.optDouble("vote_average", 0.0).let { if (it.isNaN()) 0.0 else it }
+        val resolvedGenres = TmdbMetadataMatcher.localizeGenres(
+            genresList.joinToString(if (preferArabic) "، " else ", "),
+            preferArabic = preferArabic
+        )
+        val preservedTitle = if (preferArabic) {
+            originalTitle.ifBlank { title }
+        } else {
+            title.ifBlank { originalTitle }
+        }
 
         return TmdbMediaMetadata(
             tmdbId = tmdbId,
-            title = title,
+            title = preservedTitle,
             overview = rawOverview,
             posterUrl = posterUrl,
             backdropUrl = backdropUrl,
             rating = rating,
             releaseYear = releaseYear,
             releaseDate = releaseDate,
-            genres = genresList.joinToString(", "),
+            genres = resolvedGenres,
             cast = castList.joinToString(", "),
             director = director,
             runtimeMinutes = runtimeMinutes,
@@ -1317,6 +1488,7 @@ class TmdbDirectClient(
             originalTitle = originalTitle,
             castMembers = castMembers,
             trailerYoutubeKey = trailerYoutubeKey,
+            trailerLanguage = trailerLanguage,
             similarItems = similarItems,
             cachedAtMs = System.currentTimeMillis()
         )
@@ -1325,32 +1497,88 @@ class TmdbDirectClient(
     private fun mergePreferredWithFallback(
         preferred: TmdbMediaMetadata?,
         fallback: TmdbMediaMetadata?,
-        mediaTitle: String
+        mediaTitle: String,
+        preferArabic: Boolean = false
     ): TmdbMediaMetadata? {
         if (preferred == null) {
-            return fallback?.copy(overview = TmdbMetadataMatcher.sanitizeSynopsis(fallback.overview, mediaTitle))
+            return fallback?.copy(
+                title = fallback.title.ifBlank { fallback.originalTitle },
+                overview = TmdbMetadataMatcher.sanitizeSynopsis(fallback.overview, mediaTitle),
+                genres = TmdbMetadataMatcher.localizeGenres(fallback.genres, preferArabic = preferArabic)
+            )
         }
         if (fallback == null) {
-            return preferred.copy(overview = TmdbMetadataMatcher.sanitizeSynopsis(preferred.overview, mediaTitle))
+            return preferred.copy(
+                title = if (preferArabic) preferred.originalTitle.ifBlank { preferred.title } else preferred.title.ifBlank { preferred.originalTitle },
+                overview = TmdbMetadataMatcher.sanitizeSynopsis(preferred.overview, mediaTitle),
+                genres = TmdbMetadataMatcher.localizeGenres(preferred.genres, preferArabic = preferArabic)
+            )
         }
         val preferredOverview = TmdbMetadataMatcher.sanitizeSynopsis(preferred.overview, mediaTitle)
         val fallbackOverview = TmdbMetadataMatcher.sanitizeSynopsis(fallback.overview, mediaTitle)
+
+        // Keep original/English movie & series titles while localizing overview, genres, and seasons
+        val preservedTitle = fallback.title.ifBlank {
+            preferred.originalTitle.ifBlank { fallback.originalTitle.ifBlank { preferred.title } }
+        }
+
+        // Merge seasons per season number so missing Arabic season descriptions fall back to English
+        val fallbackSeasonsByNum = fallback.seasons.associateBy { it.seasonNumber }
+        val mergedSeasons = if (preferred.seasons.isNotEmpty()) {
+            preferred.seasons.map { prefSeason ->
+                val enSeason = fallbackSeasonsByNum[prefSeason.seasonNumber]
+                val prefSeasonOverview = TmdbMetadataMatcher.sanitizeSynopsis(prefSeason.overview, prefSeason.name)
+                val enSeasonOverview = enSeason?.let { TmdbMetadataMatcher.sanitizeSynopsis(it.overview, it.name) }.orEmpty()
+                prefSeason.copy(
+                    name = prefSeason.name.ifBlank { enSeason?.name ?: "Season ${prefSeason.seasonNumber}" },
+                    overview = prefSeasonOverview.ifEmpty { enSeasonOverview },
+                    posterUrl = prefSeason.posterUrl.ifBlank { enSeason?.posterUrl.orEmpty() },
+                    airDate = prefSeason.airDate.ifBlank { enSeason?.airDate.orEmpty() },
+                    episodeCount = prefSeason.episodeCount.coerceAtLeast(enSeason?.episodeCount ?: 0)
+                )
+            }
+        } else {
+            fallback.seasons
+        }
+
+        // Preserve original actor names from English/original credits
+        val mergedCastMembers = if (fallback.castMembers.isNotEmpty()) {
+            fallback.castMembers
+        } else {
+            preferred.castMembers
+        }
+        val mergedCast = fallback.cast.ifBlank { preferred.cast }
+        val mergedDirector = fallback.director.ifBlank { preferred.director }
+
+        val mergedGenres = TmdbMetadataMatcher.localizeGenres(
+            preferred.genres.ifBlank { fallback.genres },
+            preferArabic = preferArabic
+        )
+
+        // Prefer Arabic trailer when preferArabic is enabled and an Arabic trailer exists; fall back to English
+        val usePreferredTrailer = preferred.trailerYoutubeKey.isNotBlank() &&
+            (!preferArabic || preferred.trailerLanguage == "ar" || fallback.trailerYoutubeKey.isBlank())
+        val mergedTrailerKey = if (usePreferredTrailer) preferred.trailerYoutubeKey else fallback.trailerYoutubeKey
+        val mergedTrailerLang = if (usePreferredTrailer) preferred.trailerLanguage else fallback.trailerLanguage
+
         return preferred.copy(
+            title = preservedTitle,
             overview = preferredOverview.ifEmpty { fallbackOverview },
             posterUrl = preferred.posterUrl.ifBlank { fallback.posterUrl },
             backdropUrl = preferred.backdropUrl.ifBlank { fallback.backdropUrl },
-            genres = preferred.genres.ifBlank { fallback.genres },
-            cast = preferred.cast.ifBlank { fallback.cast },
-            castMembers = preferred.castMembers.ifEmpty { fallback.castMembers },
-            director = preferred.director.ifBlank { fallback.director },
+            genres = mergedGenres,
+            cast = mergedCast,
+            castMembers = mergedCastMembers,
+            director = mergedDirector,
             releaseYear = preferred.releaseYear.ifBlank { fallback.releaseYear },
             releaseDate = preferred.releaseDate.ifBlank { fallback.releaseDate },
             rating = if (preferred.rating > 0.0) preferred.rating else fallback.rating,
             runtimeMinutes = if (preferred.runtimeMinutes > 0) preferred.runtimeMinutes else fallback.runtimeMinutes,
-            seasons = preferred.seasons.ifEmpty { fallback.seasons },
+            seasons = mergedSeasons,
             originalTitle = preferred.originalTitle.ifBlank { fallback.originalTitle },
-            trailerYoutubeKey = preferred.trailerYoutubeKey.ifBlank { fallback.trailerYoutubeKey },
-            similarItems = preferred.similarItems.ifEmpty { fallback.similarItems }
+            trailerYoutubeKey = mergedTrailerKey,
+            trailerLanguage = mergedTrailerLang,
+            similarItems = if (fallback.similarItems.isNotEmpty()) fallback.similarItems else preferred.similarItems
         )
     }
 
@@ -1446,23 +1674,27 @@ class TmdbDirectClient(
     suspend fun fetchOfficialYoutubeTrailerKey(
         apiKey: String,
         tmdbId: Int,
-        isSeries: Boolean
+        isSeries: Boolean,
+        preferArabic: Boolean = false
     ): String? = withContext(Dispatchers.IO) {
         val cleanKey = apiKey.trim()
         if (cleanKey.isEmpty() || tmdbId <= 0) return@withContext null
 
-        val cacheKey = "${if (isSeries) "tv" else "movie"}_$tmdbId"
+        val langTag = if (preferArabic) TmdbMetadataMatcher.TMDB_LANG_ARABIC else TmdbMetadataMatcher.TMDB_LANG_ENGLISH
+        val cacheKey = "${if (isSeries) "tv" else "movie"}_${tmdbId}_$langTag"
         trailerKeyCache[cacheKey]?.let { cached ->
             return@withContext cached.ifEmpty { null }
         }
 
         val mediaSegment = if (isSeries) "tv" else "movie"
-        val url = "$TMDB_BASE_URL/$mediaSegment/$tmdbId/videos?api_key=${URLEncoder.encode(cleanKey, "UTF-8")}&language=en-US"
-        val request = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .get()
-            .build()
+        val request = buildAuthorizedGetRequest(
+            path = "/$mediaSegment/$tmdbId/videos",
+            apiKeyOrBearer = cleanKey,
+            queryParams = mapOf(
+                "language" to langTag,
+                "include_video_language" to if (preferArabic) "ar,ar-SA,en,null" else "en,null"
+            )
+        )
 
         val foundKey = try {
             httpClient.newCall(request).execute().use { resp ->
@@ -1478,13 +1710,26 @@ class TmdbDirectClient(
                     if (!site.equals("YouTube", ignoreCase = true) || key.isBlank()) continue
                     val type = obj.optString("type", "")
                     val official = obj.optBoolean("official", false)
-                    val score = when {
+                    val isoLang = obj.optString("iso_639_1", "").lowercase()
+                    val vName = obj.optString("name", "")
+                    val isArabicVideo = isoLang == "ar" ||
+                        vName.contains("مترجم") ||
+                        vName.contains("عربي") ||
+                        vName.contains("arabic", ignoreCase = true)
+                    val baseScore = when {
                         type.equals("Trailer", ignoreCase = true) && official -> 100
                         type.equals("Trailer", ignoreCase = true) -> 80
                         type.equals("Teaser", ignoreCase = true) && official -> 60
                         type.equals("Teaser", ignoreCase = true) -> 40
                         else -> 10
                     }
+                    val langBonus = when {
+                        preferArabic && isArabicVideo -> 50
+                        preferArabic && isoLang == "en" -> 15
+                        !preferArabic && isoLang == "en" -> 30
+                        else -> 0
+                    }
+                    val score = baseScore + langBonus
                     if (score > bestScore) {
                         bestScore = score
                         bestKey = key

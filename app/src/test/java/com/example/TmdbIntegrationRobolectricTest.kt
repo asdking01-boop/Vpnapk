@@ -5,16 +5,24 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.api.TmdbCastMember
 import com.example.data.api.TmdbDiagnosticStatus
 import com.example.data.api.TmdbDirectClient
+import com.example.data.api.TmdbEpisodeMetadata
 import com.example.data.api.TmdbErrorSanitizer
 import com.example.data.api.TmdbMediaMetadata
 import com.example.data.api.TmdbMetadataMatcher
+import com.example.data.api.TmdbPersonBiography
 import com.example.data.api.TmdbProxyClient
 import com.example.data.api.TmdbSeasonSummary
 import com.example.data.api.TmdbSimilarItem
+import com.example.data.local.KrasRepository
 import com.example.data.local.ManualTmdbBinding
 import com.example.data.local.TmdbMetadataCacheStore
+import com.example.data.model.Episode
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
+import com.example.data.model.Season
+import com.example.data.model.SeriesDetails
+import com.example.data.model.TmdbMetadataLanguage
+import com.example.data.model.UserSettings
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -257,11 +265,19 @@ class TmdbIntegrationRobolectricTest {
         val meta = matched!!
         // Must pick 27205 (exact match), NOT 999999 (results[0] spin-off)
         assertEquals(27205, meta.tmdbId)
-        assertEquals("استهلال", meta.title)
+        // Must request language=ar-SA for localized Arabic metadata
+        assertTrue(
+            "Expected ar-SA request in $requests",
+            requests.any { it.contains("language=ar-SA") }
+        )
+        // Must keep original/English movie title even when Arabic metadata is requested
+        assertEquals("Inception", meta.title)
+        assertEquals("Inception", meta.originalTitle)
         assertEquals("Christopher Nolan", meta.director)
         assertEquals(148, meta.runtimeMinutes)
         assertEquals("https://image.tmdb.org/t/p/w1280/8ZTVqvKDQ8emSGUEMjsS4yHAwrp.jpg", meta.backdropUrl)
-        // Arabic overview was blank -> merged English synopsis, trailer, and similar items
+        // Arabic genres localized while blank Arabic overview falls back to English
+        assertTrue(meta.genres.contains("أكشن"))
         assertTrue(meta.overview.contains("Cobb, a skilled thief"))
         assertEquals("YoHD9XEInc0", meta.trailerYoutubeKey)
         assertEquals(1, meta.castMembers.size)
@@ -434,6 +450,417 @@ class TmdbIntegrationRobolectricTest {
         assertFalse("Must redact session_id value", clean.contains("sess_987654321"))
         assertFalse("Must redact JWT token", clean.contains("supersecret"))
         assertTrue("Must contain redaction marker", clean.contains("[REDACTED]"))
+    }
+
+    // =========================================================================
+    // 5B. Arabic TMDb Metadata Localization (ar-SA), Fallbacks & Separate Cache
+    // =========================================================================
+
+    @Test
+    fun settingsMetadataLanguage_defaultsToArabicAndResolvesAllThreeModes() {
+        val defaultSettings = UserSettings()
+        assertEquals(TmdbMetadataLanguage.ARABIC, defaultSettings.tmdbMetadataLanguage)
+        assertTrue(defaultSettings.resolvePreferArabicMetadata())
+        assertEquals("ar-SA", defaultSettings.resolveTmdbLanguageTag())
+
+        val englishSettings = defaultSettings.copy(tmdbMetadataLanguage = TmdbMetadataLanguage.ENGLISH)
+        assertFalse(englishSettings.resolvePreferArabicMetadata())
+        assertEquals("en-US", englishSettings.resolveTmdbLanguageTag())
+
+        val followAppEnglish = defaultSettings.copy(
+            language = "en",
+            tmdbMetadataLanguage = TmdbMetadataLanguage.FOLLOW_APP
+        )
+        assertFalse(followAppEnglish.resolvePreferArabicMetadata())
+        assertEquals("en-US", followAppEnglish.resolveTmdbLanguageTag())
+
+        val followAppArabic = defaultSettings.copy(
+            language = "ar",
+            tmdbMetadataLanguage = TmdbMetadataLanguage.FOLLOW_APP
+        )
+        assertTrue(followAppArabic.resolvePreferArabicMetadata())
+        assertEquals("ar-SA", followAppArabic.resolveTmdbLanguageTag())
+
+        // Verify persistence through KrasRepository SharedPreferences
+        val repo = KrasRepository(context)
+        repo.saveUserSettings(englishSettings)
+        assertEquals(TmdbMetadataLanguage.ENGLISH, repo.getUserSettings().tmdbMetadataLanguage)
+
+        repo.saveUserSettings(followAppArabic)
+        assertEquals(TmdbMetadataLanguage.FOLLOW_APP, repo.getUserSettings().tmdbMetadataLanguage)
+
+        repo.saveUserSettings(defaultSettings)
+        assertEquals(TmdbMetadataLanguage.ARABIC, repo.getUserSettings().tmdbMetadataLanguage)
+    }
+
+    @Test
+    fun directClient_arSaLocalizesDescriptionGenresSeasonsEpisodesBioAndTrailer_preservingOriginalNames() = runBlocking {
+        val requests = CopyOnWriteArrayList<String>()
+        val mockHttp = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                val req = chain.request()
+                val url = req.url.toString()
+                requests.add(url)
+                val body = when {
+                    url.contains("/tv/1396/season/1") && url.contains("language=ar-SA") -> """
+                        {
+                          "season_number": 1,
+                          "overview": "يبدأ والتر وايت رحلته الخطيرة بعد تشخيصه بالسرطان.",
+                          "episodes": [
+                            {"episode_number": 1, "name": "الحلقة الأولى", "overview": "يكتشف معلم كيمياء إصابته بالسرطان فيقرر تأمين مستقبل عائلته."},
+                            {"episode_number": 2, "name": "القطة في الحقيبة", "overview": ""}
+                          ]
+                        }
+                    """.trimIndent()
+
+                    url.contains("/tv/1396/season/1") && url.contains("language=en-US") -> """
+                        {
+                          "season_number": 1,
+                          "overview": "Walter White begins his dangerous journey.",
+                          "episodes": [
+                            {"episode_number": 1, "name": "Pilot", "overview": "A chemistry teacher gets a terminal diagnosis."},
+                            {"episode_number": 2, "name": "Cat's in the Bag...", "overview": "Walt and Jesse try to dispose of the aftermath."}
+                          ]
+                        }
+                    """.trimIndent()
+
+                    url.contains("/person/17419") && url.contains("language=ar-SA") -> """
+                        {
+                          "id": 17419,
+                          "name": "براين كرانستون",
+                          "biography": "ممثل ومخرج ومنتج أمريكي اشتهر بدور والتر وايت.",
+                          "birthday": "1956-03-07",
+                          "place_of_birth": "Hollywood, California, USA",
+                          "known_for_department": "Acting",
+                          "profile_path": "/aGSvZg7uITJEXVeCetaTy49U1N4.jpg"
+                        }
+                    """.trimIndent()
+
+                    url.contains("/person/99901") && url.contains("language=ar-SA") -> """
+                        {
+                          "id": 99901,
+                          "name": "آرون بول",
+                          "biography": "",
+                          "birthday": "1979-08-27",
+                          "place_of_birth": "Emmett, Idaho, USA",
+                          "known_for_department": "Acting",
+                          "profile_path": "/aaron.jpg"
+                        }
+                    """.trimIndent()
+
+                    url.contains("/person/99901") && url.contains("language=en-US") -> """
+                        {
+                          "id": 99901,
+                          "name": "Aaron Paul",
+                          "biography": "Aaron Paul is an American actor best known for portraying Jesse Pinkman.",
+                          "birthday": "1979-08-27",
+                          "place_of_birth": "Emmett, Idaho, USA",
+                          "known_for_department": "Acting",
+                          "profile_path": "/aaron.jpg"
+                        }
+                    """.trimIndent()
+
+                    url.contains("/tv/1396") && url.contains("language=ar-SA") -> """
+                        {
+                          "id": 1396,
+                          "name": "اختلال ضال",
+                          "original_name": "Breaking Bad",
+                          "overview": "يتحول معلم كيمياء في مدرسة ثانوية إلى عالم الجريمة لتأمين مستقبل عائلته.",
+                          "poster_path": "/ztkUQFLlC19CCMYHW9o1zWhJRNq.jpg",
+                          "backdrop_path": "/tsRy63Mu5cu8etL1X7ZLyf7UP1M.jpg",
+                          "vote_average": 8.9,
+                          "first_air_date": "2008-01-20",
+                          "episode_run_time": [47],
+                          "genres": [{"id": 18, "name": "دراما"}, {"id": 80, "name": "جريمة"}],
+                          "created_by": [{"id": 66633, "name": "فينس غيليغان", "original_name": "Vince Gilligan"}],
+                          "credits": {
+                            "cast": [
+                              {
+                                "id": 17419,
+                                "name": "براين كرانستون",
+                                "original_name": "Bryan Cranston",
+                                "character": "Walter White",
+                                "profile_path": "/aGSvZg7uITJEXVeCetaTy49U1N4.jpg"
+                              }
+                            ],
+                            "crew": []
+                          },
+                          "videos": {
+                            "results": [
+                              {"site": "YouTube", "type": "Trailer", "official": true, "iso_639_1": "en", "key": "EN_TRAILER_KEY"},
+                              {"site": "YouTube", "type": "Trailer", "official": true, "iso_639_1": "ar", "key": "AR_TRAILER_KEY"}
+                            ]
+                          },
+                          "seasons": [
+                            {"season_number": 1, "name": "الموسم 1", "episode_count": 7, "overview": "بداية قصة والتر وايت في الموسم الأول.", "poster_path": "/s1.jpg", "air_date": "2008-01-20"},
+                            {"season_number": 2, "name": "الموسم 2", "episode_count": 13, "overview": "", "poster_path": "/s2.jpg", "air_date": "2009-03-08"}
+                          ]
+                        }
+                    """.trimIndent()
+
+                    url.contains("/tv/1396") && url.contains("language=en-US") -> """
+                        {
+                          "id": 1396,
+                          "name": "Breaking Bad",
+                          "original_name": "Breaking Bad",
+                          "overview": "A high school chemistry teacher turns to crime.",
+                          "poster_path": "/ztkUQFLlC19CCMYHW9o1zWhJRNq.jpg",
+                          "backdrop_path": "/tsRy63Mu5cu8etL1X7ZLyf7UP1M.jpg",
+                          "vote_average": 8.9,
+                          "first_air_date": "2008-01-20",
+                          "episode_run_time": [47],
+                          "genres": [{"id": 18, "name": "Drama"}, {"id": 80, "name": "Crime"}],
+                          "created_by": [{"id": 66633, "name": "Vince Gilligan"}],
+                          "credits": {
+                            "cast": [
+                              {"id": 17419, "name": "Bryan Cranston", "original_name": "Bryan Cranston", "character": "Walter White", "profile_path": "/aGSvZg7uITJEXVeCetaTy49U1N4.jpg"}
+                            ],
+                            "crew": []
+                          },
+                          "videos": {
+                            "results": [
+                              {"site": "YouTube", "type": "Trailer", "official": true, "iso_639_1": "en", "key": "EN_TRAILER_KEY"}
+                            ]
+                          },
+                          "seasons": [
+                            {"season_number": 1, "name": "Season 1", "episode_count": 7, "overview": "English season 1 overview.", "poster_path": "/s1.jpg", "air_date": "2008-01-20"},
+                            {"season_number": 2, "name": "Season 2", "episode_count": 13, "overview": "Walt and Jesse face escalating stakes in Season 2.", "poster_path": "/s2.jpg", "air_date": "2009-03-08"}
+                          ]
+                        }
+                    """.trimIndent()
+
+                    else -> "{}"
+                }
+                jsonResponse(req, 200, body)
+            })
+            .build()
+
+        val client = TmdbDirectClient(httpClient = mockHttp)
+        val fakeKey = "1234567890abcdef1234567890abcdef"
+
+        // 1) Series metadata in ar-SA with English fallback for empty Season 2 overview
+        val meta = client.fetchAccurateMediaMetadata(
+            apiKey = fakeKey,
+            rawTitle = "Breaking Bad",
+            year = "2008",
+            isSeries = true,
+            tmdbId = 1396,
+            preferArabic = true
+        )
+        assertNotNull(meta)
+        val series = meta!!
+        assertTrue("Expected ar-SA request", requests.any { it.contains("language=ar-SA") })
+        assertEquals("Breaking Bad", series.title) // Original title preserved!
+        assertEquals("Breaking Bad", series.originalTitle)
+        assertTrue("Description must be Arabic", series.overview.contains("معلم كيمياء"))
+        assertTrue("Genres must be Arabic", series.genres.contains("دراما") && series.genres.contains("جريمة"))
+        assertEquals("Bryan Cranston", series.castMembers.first().name) // Original actor name preserved!
+        assertEquals("Vince Gilligan", series.director)
+        assertEquals("AR_TRAILER_KEY", series.trailerYoutubeKey) // Prefers Arabic trailer
+        assertEquals("ar", series.trailerLanguage)
+        // Season 1 keeps Arabic overview; Season 2 falls back to English overview (never empty)
+        assertTrue(series.seasons.first { it.seasonNumber == 1 }.overview.contains("بداية قصة"))
+        assertTrue(series.seasons.first { it.seasonNumber == 2 }.overview.contains("escalating stakes"))
+
+        // 2) Season episode descriptions in ar-SA with per-episode English fallback
+        val epList = client.fetchTvSeasonEpisodesLocalized(
+            apiKey = fakeKey,
+            tvId = 1396,
+            seasonNumber = 1,
+            preferArabic = true
+        )
+        assertTrue("Episode 1 should have Arabic overview", epList.first { it.episodeNumber == 1 }.overview.contains("معلم كيمياء"))
+        assertTrue("Episode 2 blank Arabic should fall back to English", epList.first { it.episodeNumber == 2 }.overview.contains("dispose of the aftermath"))
+
+        // 3) Actor biography in ar-SA preserving original actor name
+        val arBio = client.fetchPersonBiography(
+            apiKey = fakeKey,
+            personId = 17419,
+            fallbackName = "Bryan Cranston",
+            fallbackCharacter = "Walter White",
+            preferArabic = true
+        )
+        assertNotNull(arBio)
+        assertEquals("Bryan Cranston", arBio!!.name)
+        assertTrue("Bio should be Arabic", arBio.biography.contains("ممثل ومخرج"))
+        assertEquals("ar-SA", arBio.languageTag)
+
+        // 4) Actor biography falls back to English when Arabic bio is empty
+        val fallbackBio = client.fetchPersonBiography(
+            apiKey = fakeKey,
+            personId = 99901,
+            fallbackName = "Aaron Paul",
+            fallbackCharacter = "Jesse Pinkman",
+            preferArabic = true
+        )
+        assertNotNull(fallbackBio)
+        assertEquals("Aaron Paul", fallbackBio!!.name)
+        assertTrue("Fallback bio should be English", fallbackBio.biography.contains("Jesse Pinkman"))
+        assertEquals("en-US", fallbackBio.languageTag)
+
+        // 5) SeriesDetails enrichment propagates localized season overview + episode plot without touching original name
+        val baseSeriesDetails = SeriesDetails(
+            seriesId = 10,
+            name = "Breaking Bad",
+            seasons = listOf(
+                Season(
+                    seasonNumber = 1,
+                    name = "Season 1",
+                    episodeCount = 2,
+                    episodes = listOf(
+                        Episode(id = "ep1", episodeNum = 1, title = "Pilot", plot = ""),
+                        Episode(id = "ep2", episodeNum = 2, title = "Cat's in the Bag...", plot = "")
+                    )
+                )
+            )
+        )
+        val enrichedDetails = TmdbProxyClient.enrichSeriesDetails(
+            details = baseSeriesDetails,
+            metadata = series,
+            seasonEpisodesMap = mapOf(1 to epList),
+            overrideValidExistingPlot = true,
+            preferArabic = true
+        )
+        assertEquals("Breaking Bad", enrichedDetails.name)
+        assertTrue(enrichedDetails.plot.contains("معلم كيمياء"))
+        assertTrue(enrichedDetails.genre.contains("دراما"))
+        assertTrue(enrichedDetails.seasons.first().overview.contains("بداية قصة"))
+        assertTrue(enrichedDetails.seasons.first().episodes[0].plot.contains("معلم كيمياء"))
+        assertTrue(enrichedDetails.seasons.first().episodes[1].plot.contains("dispose of the aftermath"))
+    }
+
+    @Test
+    fun cacheStore_storesArabicAndEnglishSeparatelyForMediaSeasonsAndActorBiographies() {
+        val store1 = TmdbMetadataCacheStore(context)
+        store1.clearAllCache()
+        val now = 1_760_000_000_000L
+
+        val arMeta = TmdbMediaMetadata(
+            tmdbId = 27205,
+            title = "Inception",
+            originalTitle = "Inception",
+            overview = "لص محترف يسرق الأسرار عبر تقنية مشاركة الأحلام.",
+            posterUrl = "https://image.tmdb.org/t/p/w500/poster.jpg",
+            backdropUrl = "https://image.tmdb.org/t/p/w1280/backdrop.jpg",
+            rating = 8.4,
+            releaseYear = "2010",
+            releaseDate = "2010-07-15",
+            genres = "أكشن، خيال علمي",
+            cast = "Leonardo DiCaprio",
+            director = "Christopher Nolan",
+            trailerYoutubeKey = "AR_TRAILER",
+            trailerLanguage = "ar",
+            cachedAtMs = now
+        )
+        val enMeta = TmdbMediaMetadata(
+            tmdbId = 27205,
+            title = "Inception",
+            originalTitle = "Inception",
+            overview = "A skilled thief steals secrets through dream-sharing technology.",
+            posterUrl = "https://image.tmdb.org/t/p/w500/poster.jpg",
+            backdropUrl = "https://image.tmdb.org/t/p/w1280/backdrop.jpg",
+            rating = 8.4,
+            releaseYear = "2010",
+            releaseDate = "2010-07-15",
+            genres = "Action, Science Fiction",
+            cast = "Leonardo DiCaprio",
+            director = "Christopher Nolan",
+            trailerYoutubeKey = "EN_TRAILER",
+            trailerLanguage = "en",
+            cachedAtMs = now
+        )
+
+        store1.putForMediaItem("vod_27205", isSeries = false, preferArabic = true, metadata = arMeta, nowMs = now)
+        store1.putForMediaItem("vod_27205", isSeries = false, preferArabic = false, metadata = enMeta, nowMs = now)
+
+        store1.putSeasonEpisodes(
+            tmdbId = 1396,
+            seasonNumber = 1,
+            preferArabic = true,
+            episodes = listOf(
+                TmdbEpisodeMetadata(
+                    episodeNumber = 1,
+                    seasonNumber = 1,
+                    title = "Pilot",
+                    overview = "وصف الحلقة بالعربية",
+                    stillUrl = "",
+                    rating = 8.5,
+                    durationSec = 3480,
+                    airDate = "2008-01-20"
+                )
+            )
+        )
+        store1.putSeasonEpisodes(
+            tmdbId = 1396,
+            seasonNumber = 1,
+            preferArabic = false,
+            episodes = listOf(
+                TmdbEpisodeMetadata(
+                    episodeNumber = 1,
+                    seasonNumber = 1,
+                    title = "Pilot",
+                    overview = "English episode overview",
+                    stillUrl = "",
+                    rating = 8.5,
+                    durationSec = 3480,
+                    airDate = "2008-01-20"
+                )
+            )
+        )
+
+        store1.putPersonBiography(
+            personId = 6193,
+            preferArabic = true,
+            bio = TmdbPersonBiography(
+                personId = 6193,
+                name = "Leonardo DiCaprio",
+                biography = "ممثل ومنتج أفلام أمريكي.",
+                languageTag = "ar-SA",
+                cachedAtMs = now
+            )
+        )
+        store1.putPersonBiography(
+            personId = 6193,
+            preferArabic = false,
+            bio = TmdbPersonBiography(
+                personId = 6193,
+                name = "Leonardo DiCaprio",
+                biography = "American actor and film producer.",
+                languageTag = "en-US",
+                cachedAtMs = now
+            )
+        )
+
+        // Reload fresh instance from disk to verify separate ar-SA and en-US persistence
+        val store2 = TmdbMetadataCacheStore(context)
+        val loadedAr = store2.getForMediaItem("vod_27205", 27205, isSeries = false, preferArabic = true)
+        val loadedEn = store2.getForMediaItem("vod_27205", 27205, isSeries = false, preferArabic = false)
+        assertNotNull(loadedAr)
+        assertNotNull(loadedEn)
+        assertEquals("Inception", loadedAr!!.title)
+        assertTrue(loadedAr.overview.contains("مشاركة الأحلام"))
+        assertEquals("ar", loadedAr.trailerLanguage)
+        assertTrue(loadedEn!!.overview.contains("dream-sharing"))
+        assertEquals("en", loadedEn.trailerLanguage)
+
+        assertEquals("وصف الحلقة بالعربية", store2.getSeasonEpisodes(1396, 1, preferArabic = true).first().overview)
+        assertEquals("English episode overview", store2.getSeasonEpisodes(1396, 1, preferArabic = false).first().overview)
+
+        val loadedArBio = store2.getPersonBiography(6193, preferArabic = true)
+        val loadedEnBio = store2.getPersonBiography(6193, preferArabic = false)
+        assertEquals("Leonardo DiCaprio", loadedArBio?.name)
+        assertTrue(loadedArBio?.biography.orEmpty().contains("ممثل ومنتج"))
+        assertEquals("Leonardo DiCaprio", loadedEnBio?.name)
+        assertTrue(loadedEnBio?.biography.orEmpty().contains("American actor"))
+    }
+
+    @Test
+    fun localizeGenres_translatesEnglishGenresToArabicAndViceVersa() {
+        val arabicGenres = TmdbMetadataMatcher.localizeGenres("Action, Science Fiction, Drama", preferArabic = true)
+        assertTrue("Expected Arabic genres, got: $arabicGenres", arabicGenres.contains("أكشن") && arabicGenres.contains("خيال علمي") && arabicGenres.contains("دراما"))
+
+        val englishGenres = TmdbMetadataMatcher.localizeGenres("أكشن، خيال علمي، دراما", preferArabic = false)
+        assertTrue("Expected English genres, got: $englishGenres", englishGenres.contains("Action") && englishGenres.contains("Science Fiction") && englishGenres.contains("Drama"))
     }
 
     // =========================================================================

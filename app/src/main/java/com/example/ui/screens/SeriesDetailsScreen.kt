@@ -24,12 +24,18 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.data.api.TmdbCastMember
 import com.example.data.api.TmdbMediaMetadata
 import com.example.data.api.TmdbMetadataMatcher
 import com.example.data.api.TmdbSearchCandidate
@@ -71,7 +77,9 @@ fun SeriesDetailsScreen(
     watchHistory: List<WatchProgress>,
     onSeriesClick: (MediaItem) -> Unit,
     isArabic: Boolean = false,
+    preferArabicMetadata: Boolean = isArabic,
     richMetadata: TmdbMediaMetadata? = null,
+    onActorClick: ((TmdbCastMember) -> Unit)? = null,
     manualMatchCandidates: List<TmdbSearchCandidate> = emptyList(),
     isManualMatchSearching: Boolean = false,
     onSearchManualMatch: (String, String) -> Unit = { _, _ -> },
@@ -336,14 +344,25 @@ fun SeriesDetailsScreen(
                                 }
                             }
 
-                            if (details.genre.isNotBlank() || seriesItem.genre.isNotBlank()) {
+                            val localizedSeriesGenre = remember(details.genre, seriesItem.genre, seriesItem.categoryName, preferArabicMetadata) {
+                                TmdbMetadataMatcher.localizeGenres(
+                                    details.genre.ifBlank { seriesItem.genre.ifBlank { seriesItem.categoryName } },
+                                    preferArabic = preferArabicMetadata
+                                )
+                            }
+                            if (localizedSeriesGenre.isNotBlank()) {
+                                val genreIsArabic = TmdbMetadataMatcher.containsArabicScript(localizedSeriesGenre)
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = details.genre.ifBlank { seriesItem.genre.ifBlank { seriesItem.categoryName } },
+                                    text = localizedSeriesGenre,
                                     color = TextSecondary,
                                     fontSize = 11.sp,
                                     maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = TextStyle(
+                                        textDirection = if (genreIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                                    ),
+                                    modifier = Modifier.testTag("series_details_genre_text")
                                 )
                             }
                         }
@@ -476,10 +495,16 @@ fun SeriesDetailsScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (officialTrailerKey.isNotBlank()) {
-                                    if (isArabic) "الإعلان الرسمي" else "Official Trailer"
-                                } else {
-                                    if (isArabic) "الإعلان الدعائي" else "Trailer"
+                                text = when {
+                                    officialTrailerKey.isNotBlank() && richMetadata?.trailerLanguage == "ar" -> {
+                                        if (isArabic) "الإعلان الرسمي (عربي)" else "Trailer (AR)"
+                                    }
+                                    officialTrailerKey.isNotBlank() -> {
+                                        if (isArabic) "الإعلان الرسمي" else "Official Trailer"
+                                    }
+                                    else -> {
+                                        if (isArabic) "الإعلان الدعائي" else "Trailer"
+                                    }
                                 },
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -557,7 +582,8 @@ fun SeriesDetailsScreen(
                         castMembers = richMetadata?.castMembers.orEmpty(),
                         fallbackCastCsv = details.cast,
                         director = richMetadata?.director?.ifBlank { details.director } ?: details.director,
-                        isArabic = isArabic
+                        isArabic = isArabic,
+                        onActorClick = onActorClick
                     )
                 }
             }
@@ -609,7 +635,37 @@ fun SeriesDetailsScreen(
                                 }
                             }
                         }
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Localized Season description (Arabic with proper RTL alignment, or English fallback)
+                        val seasonOverview = remember(activeSeason?.seasonNumber, activeSeason?.overview, activeSeason?.name) {
+                            TmdbMetadataMatcher.sanitizeSynopsis(
+                                activeSeason?.overview.orEmpty(),
+                                activeSeason?.name.orEmpty()
+                            )
+                        }
+                        if (seasonOverview.isNotEmpty()) {
+                            val seasonOverviewIsArabic = TmdbMetadataMatcher.containsArabicScript(seasonOverview)
+                            CompositionLocalProvider(
+                                LocalLayoutDirection provides if (seasonOverviewIsArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+                            ) {
+                                Text(
+                                    text = seasonOverview,
+                                    color = TextSecondary,
+                                    fontSize = 12.5.sp,
+                                    lineHeight = 19.sp,
+                                    textAlign = TextAlign.Start,
+                                    style = TextStyle(
+                                        textDirection = if (seasonOverviewIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                                        .testTag("season_overview_text")
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                        }
                     }
                 }
             }
@@ -683,15 +739,27 @@ fun SeriesDetailsScreen(
                                 ResolutionBadge(resolution = epBadge, isLive = false)
                             }
 
-                            if (ep.plot.isNotEmpty()) {
+                            val verifiedEpPlot = TmdbMetadataMatcher.sanitizeSynopsis(ep.plot, ep.title)
+                            if (verifiedEpPlot.isNotEmpty()) {
+                                val epPlotIsArabic = TmdbMetadataMatcher.containsArabicScript(verifiedEpPlot)
                                 Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = ep.plot,
-                                    color = TextSecondary,
-                                    fontSize = 11.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                CompositionLocalProvider(
+                                    LocalLayoutDirection provides if (epPlotIsArabic) LayoutDirection.Rtl else LayoutDirection.Ltr
+                                ) {
+                                    Text(
+                                        text = verifiedEpPlot,
+                                        color = TextSecondary,
+                                        fontSize = 11.sp,
+                                        lineHeight = 16.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Start,
+                                        style = TextStyle(
+                                            textDirection = if (epPlotIsArabic) TextDirection.Rtl else TextDirection.Ltr
+                                        ),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
                             }
 
                             if (ep.durationSec > 0) {

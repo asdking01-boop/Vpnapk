@@ -2,10 +2,12 @@ package com.example.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,6 +31,7 @@ import com.example.ui.theme.*
 /**
  * Displays verified cast members with circular actor portrait photos (and graceful initials
  * avatars when an actor has no portrait on TMDb) plus Director attribution.
+ * Tapping an actor card opens their localized TMDb biography when [onActorClick] is provided.
  */
 @Composable
 fun TmdbCastCarouselSection(
@@ -36,6 +39,7 @@ fun TmdbCastCarouselSection(
     fallbackCastCsv: String,
     director: String,
     isArabic: Boolean,
+    onActorClick: ((TmdbCastMember) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val effectiveMembers = remember(castMembers, fallbackCastCsv) {
@@ -99,7 +103,14 @@ fun TmdbCastCarouselSection(
                     .testTag("details_cast_carousel")
             ) {
                 items(effectiveMembers, key = { "${it.id}_${it.name}" }) { member ->
-                    CastActorCard(member = member)
+                    CastActorCard(
+                        member = member,
+                        onClick = if (onActorClick != null && member.id > 0) {
+                            { onActorClick(member) }
+                        } else {
+                            null
+                        }
+                    )
                 }
             }
         }
@@ -107,7 +118,10 @@ fun TmdbCastCarouselSection(
 }
 
 @Composable
-private fun CastActorCard(member: TmdbCastMember) {
+private fun CastActorCard(
+    member: TmdbCastMember,
+    onClick: (() -> Unit)? = null
+) {
     val context = LocalContext.current
     var photoFailed by remember(member.profileUrl) { mutableStateOf(false) }
     val showPhoto = member.profileUrl.isNotBlank() && !photoFailed
@@ -122,7 +136,19 @@ private fun CastActorCard(member: TmdbCastMember) {
     }
 
     Column(
-        modifier = Modifier.width(76.dp),
+        modifier = Modifier
+            .width(78.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .then(
+                if (onClick != null) {
+                    Modifier
+                        .clickable(onClick = onClick)
+                        .testTag("cast_actor_card_${member.id}")
+                } else {
+                    Modifier
+                }
+            )
+            .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(5.dp)
     ) {
