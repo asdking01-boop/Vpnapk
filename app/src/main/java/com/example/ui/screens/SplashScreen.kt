@@ -475,7 +475,42 @@ fun ApprovedRed3DKLogo(
     }
 }
 
-private fun DrawScope.drawApproved3DK(
+internal fun buildApproved3DKSilhouettePath(width: Float, height: Float): Path {
+    val w = width
+    val h = height
+    return Path().apply {
+        // Left vertical pillar
+        moveTo(w * 0.30f, h * 0.12f)
+        lineTo(w * 0.43f, h * 0.12f)
+        lineTo(w * 0.43f, h * 0.60f)
+        lineTo(w * 0.18f, h * 0.88f)
+        lineTo(w * 0.18f, h * 0.24f)
+        cubicTo(w * 0.18f, h * 0.165f, w * 0.228f, h * 0.12f, w * 0.30f, h * 0.12f)
+        close()
+
+        // Lower-right leg
+        moveTo(w * 0.44f, h * 0.52f)
+        lineTo(w * 0.565f, h * 0.385f)
+        lineTo(w * 0.855f, h * 0.88f)
+        lineTo(w * 0.665f, h * 0.88f)
+        cubicTo(w * 0.615f, h * 0.88f, w * 0.582f, h * 0.852f, w * 0.552f, h * 0.800f)
+        lineTo(w * 0.425f, h * 0.585f)
+        close()
+
+        // Sweeping foreground crimson ribbon
+        moveTo(w * 0.18f, h * 0.88f)
+        cubicTo(w * 0.18f, h * 0.71f, w * 0.27f, h * 0.54f, w * 0.45f, h * 0.355f)
+        lineTo(w * 0.615f, h * 0.185f)
+        cubicTo(w * 0.665f, h * 0.135f, w * 0.715f, h * 0.12f, w * 0.785f, h * 0.12f)
+        lineTo(w * 0.855f, h * 0.12f)
+        lineTo(w * 0.555f, h * 0.45f)
+        cubicTo(w * 0.435f, h * 0.582f, w * 0.362f, h * 0.705f, w * 0.318f, h * 0.822f)
+        cubicTo(w * 0.300f, h * 0.865f, w * 0.272f, h * 0.88f, w * 0.225f, h * 0.88f)
+        close()
+    }
+}
+
+internal fun DrawScope.drawApproved3DK(
     lightSweepProgress: Float,
     depthLightingAlpha: Float
 ) {

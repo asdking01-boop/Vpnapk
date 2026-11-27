@@ -96,6 +96,15 @@ enum class AmbientCinemaIntensity(
     HIGH("High", "مرتفع", 0.90f)
 }
 
+enum class StartupAnimationMode(
+    val label: String,
+    val arabicLabel: String
+) {
+    CLASSIC_ORIGINAL("Classic Original", "الكلاسيكية الأصلية"),
+    CINEMATIC_K_ZOOM_THROUGH("Cinematic K Zoom-Through", "العبور السينمائي عبر K"),
+    DISABLED("Disabled", "معطّل")
+}
+
 
 data class Account(
     val id: String,
@@ -267,8 +276,20 @@ data class UserSettings(
     val hapticFeedbackEnabled: Boolean = true,
     val batterySavingMode: Boolean = false,
     val reelsAutoplayEnabled: Boolean = true,
-    val reelsWifiOnlyAutoplay: Boolean = true
+    val reelsWifiOnlyAutoplay: Boolean = true,
+    // KRAS TV — 3D Logo & Cinematic K Zoom-Through Intro (fully reversible)
+    val startupAnimationMode: StartupAnimationMode = StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH,
+    val usePremium3DLogo: Boolean = true,
+    val playZoomThroughBassSound: Boolean = false
 ) {
+    /**
+     * Restores the original Classic KRAS TV logo while strictly preserving all user data,
+     * accounts, playlists, favorites, watch history, theme, and playback settings.
+     */
+    fun restoreOriginalLogo(): UserSettings = copy(
+        usePremium3DLogo = false
+    )
+
     /**
      * Restores the exact Classic Original appearance and disables all Premium 2.0 visual effects,
      * while strictly preserving accounts, playlists, favorites, watch history, language, parental PIN,

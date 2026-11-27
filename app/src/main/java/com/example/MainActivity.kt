@@ -58,6 +58,7 @@ import android.os.Build
 import com.example.data.local.KrasRepository
 import com.example.data.model.MediaItem
 import com.example.data.model.MediaType
+import com.example.data.model.StartupAnimationMode
 import com.example.data.model.TmdbAuthStatus
 import com.example.player.PlayerImmersiveHelper
 import com.example.ui.components.AppUpdateDialogs
@@ -83,6 +84,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Keep the system window pure AMOLED black so there is zero white flash or duplicate splash
+        window.setBackgroundDrawableResource(android.R.color.black)
 
         // Restore any interrupted Do Not Disturb state from a previous session on IO dispatcher
         lifecycleScope.launch(Dispatchers.IO) {
@@ -91,6 +94,11 @@ class MainActivity : ComponentActivity() {
 
         val isColdStart = (savedInstanceState == null && !hasColdStarted)
         hasColdStarted = true
+        val initialStartupMode = if (isColdStart) {
+            viewModel.getInitialStartupSettings().startupAnimationMode
+        } else {
+            StartupAnimationMode.DISABLED
+        }
 
         intent?.data?.let { deepLinkUri ->
             viewModel.handleTmdbAuthCallback(deepLinkUri)
@@ -136,7 +144,9 @@ class MainActivity : ComponentActivity() {
                     mutableStateOf(crashPrefs.getString(KrasApplication.KEY_CRASH_REPORT, null))
                 }
 
-                var isSplashActive by remember { mutableStateOf(isColdStart) }
+                var isSplashActive by remember {
+                    mutableStateOf(isColdStart && initialStartupMode != StartupAnimationMode.DISABLED)
+                }
                 var currentScreen by remember { mutableStateOf(NavScreen.HOME) }
                 var isSearchOpen by remember { mutableStateOf(false) }
                 var isLoginOpen by remember { mutableStateOf(false) }
@@ -215,10 +225,14 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // Play original cinematic intro sound on cold start launch only
+                // Play startup audio on cold start launch only, matching selected Startup Animation mode
                 LaunchedEffect(Unit) {
                     if (isSplashActive) {
-                        viewModel.playIntroSoundIfEnabled()
+                        when (initialStartupMode) {
+                            StartupAnimationMode.CLASSIC_ORIGINAL -> viewModel.playIntroSoundIfEnabled()
+                            StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH -> viewModel.playZoomThroughBassIfEnabled()
+                            StartupAnimationMode.DISABLED -> Unit
+                        }
                     }
                 }
 
@@ -865,18 +879,31 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    // Cinematic 3D Glass KRAS TV Splash Overlay (preloads HomeScreen underneath)
+                    // Cold-Start Startup Animation Overlay (preloads live HomeScreen underneath)
                     if (isSplashActive) {
-                        SplashScreen(
-                            isLoading = isLoading,
-                            onSplashFinished = {
-                                viewModel.stopIntroSound()
-                                isSplashActive = false
-                                if (activeAccount == null) {
-                                    isLoginOpen = true
-                                }
+                        val finishSplash: () -> Unit = {
+                            viewModel.stopIntroSound()
+                            isSplashActive = false
+                            if (activeAccount == null) {
+                                isLoginOpen = true
                             }
-                        )
+                        }
+                        when (initialStartupMode) {
+                            StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH -> {
+                                CinematicKZoomThroughSplash(
+                                    onSplashFinished = finishSplash
+                                )
+                            }
+                            StartupAnimationMode.CLASSIC_ORIGINAL -> {
+                                SplashScreen(
+                                    isLoading = isLoading,
+                                    onSplashFinished = finishSplash
+                                )
+                            }
+                            StartupAnimationMode.DISABLED -> {
+                                isSplashActive = false
+                            }
+                        }
                     }
                 }
             }

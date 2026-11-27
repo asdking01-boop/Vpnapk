@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.R
+import com.example.ui.premium.LocalPremiumExperienceState
 import com.example.ui.theme.KrasRed
 import com.example.ui.theme.KrasRedBright
 import com.example.ui.theme.OutfitFontFamily
@@ -54,12 +55,13 @@ fun KrasLogo(
     letterAlphaProvider: ((Char) -> Float)? = null,
     letterOffsetProvider: ((Char) -> Float)? = null,
     wordSweepProgress: Float = 0f,
-    onKPositioned: ((LayoutCoordinates) -> Unit)? = null
+    onKPositioned: ((LayoutCoordinates) -> Unit)? = null,
+    usePremium3DLogo: Boolean = LocalPremiumExperienceState.current.usePremium3DLogo
 ) {
-    // Exact aspect ratio of the K glyph in ic_kras_k is 44.5 / 54 ≈ 0.824
+    // Exact aspect ratio of the original K glyph in ic_kras_k is 44.5 / 54 ≈ 0.824 (kept untouched)
     val kWidth = height * (44.5f / 54f)
-    val spacerLetter = height * 0.13f
-    val spacerWord = height * 0.28f
+    val spacerLetter = if (usePremium3DLogo) height * 0.10f else height * 0.13f
+    val spacerWord = if (usePremium3DLogo) height * 0.30f else height * 0.28f
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -68,7 +70,7 @@ fun KrasLogo(
             .width(IntrinsicSize.Max)
             .testTag("kras_tv_logo")
     ) {
-        // 1. THE 3D GLOSSY RED CRYSTAL & METALLIC SILVER 'K'
+        // 1. THE ORIGINAL 3D METALLIC RED LETTER 'K' (Preserved 100% unchanged)
         Box(
             modifier = Modifier
                 .size(width = kWidth, height = height)
@@ -84,11 +86,12 @@ fun KrasLogo(
 
         Spacer(modifier = Modifier.width(spacerLetter))
 
-        // 2. "RAS TV" 3D Glass & Metallic Silver Letters
+        // 2. "RAS TV" — Sculpted 3D Metallic Red Letters (Premium) OR Preserved Classic Original
         if (letterAlphaProvider != null) {
-            // Animated per-letter reveal mode with reflective light sweep (used in Intro sequence)
+            // Animated per-letter reveal mode with reflective light sweep
             Row(
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = if (usePremium3DLogo) Arrangement.spacedBy(height * 0.08f) else Arrangement.Start,
                 modifier = Modifier
                     .width(IntrinsicSize.Max)
                     .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
@@ -117,32 +120,56 @@ fun KrasLogo(
                     }
             ) {
                 listOf('R', 'A', 'S').forEach { ch ->
-                    KrasLogoLetter(
-                        char = ch,
-                        height = height,
-                        alpha = letterAlphaProvider(ch),
-                        offsetY = letterOffsetProvider?.invoke(ch) ?: 0f
-                    )
+                    if (usePremium3DLogo) {
+                        Premium3DLogoGlyph(
+                            char = ch,
+                            height = height,
+                            alpha = letterAlphaProvider(ch),
+                            offsetY = letterOffsetProvider?.invoke(ch) ?: 0f
+                        )
+                    } else {
+                        KrasLogoLetter(
+                            char = ch,
+                            height = height,
+                            alpha = letterAlphaProvider(ch),
+                            offsetY = letterOffsetProvider?.invoke(ch) ?: 0f
+                        )
+                    }
                 }
                 Spacer(modifier = Modifier.width(spacerWord))
                 listOf('T', 'V').forEach { ch ->
-                    KrasLogoLetter(
-                        char = ch,
-                        height = height,
-                        alpha = letterAlphaProvider(ch),
-                        offsetY = letterOffsetProvider?.invoke(ch) ?: 0f
-                    )
+                    if (usePremium3DLogo) {
+                        Premium3DLogoGlyph(
+                            char = ch,
+                            height = height,
+                            alpha = letterAlphaProvider(ch),
+                            offsetY = letterOffsetProvider?.invoke(ch) ?: 0f
+                        )
+                    } else {
+                        KrasLogoLetter(
+                            char = ch,
+                            height = height,
+                            alpha = letterAlphaProvider(ch),
+                            offsetY = letterOffsetProvider?.invoke(ch) ?: 0f
+                        )
+                    }
                 }
             }
         } else {
-            // Static crisp mode (used in Home header, Login, Video Player, etc.)
+            // Static crisp mode (used consistently across Home header, Login, Video Player, Settings, Skeletons)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.width(IntrinsicSize.Max)
             ) {
-                KrasLogoText(text = "RAS", height = height)
-                Spacer(modifier = Modifier.width(spacerWord))
-                KrasLogoText(text = "TV", height = height)
+                if (usePremium3DLogo) {
+                    Premium3DLogoSegment(text = "RAS", height = height)
+                    Spacer(modifier = Modifier.width(spacerWord))
+                    Premium3DLogoSegment(text = "TV", height = height)
+                } else {
+                    KrasLogoText(text = "RAS", height = height)
+                    Spacer(modifier = Modifier.width(spacerWord))
+                    KrasLogoText(text = "TV", height = height)
+                }
             }
         }
     }

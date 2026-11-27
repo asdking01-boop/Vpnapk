@@ -2697,4 +2697,111 @@ class ExampleRobolectricTest {
     assertTrue(repo.isFavorite("movie_101"))
     assertEquals(450_000L, repo.getWatchHistory().firstOrNull { it.mediaId == "movie_101" }?.positionMs)
   }
+
+  @Test
+  fun `startup animation modes 3d logo persistence restore original logo and zoom through timeline phases`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val repo = com.example.data.local.KrasRepository(context)
+
+    // 1. Verify defaults: Cinematic K Zoom-Through enabled, Premium 3D Logo enabled, Bass Sound disabled by default
+    val defaults = com.example.data.model.UserSettings()
+    assertEquals(com.example.data.model.StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH, defaults.startupAnimationMode)
+    assertTrue(defaults.usePremium3DLogo)
+    assertFalse(defaults.playZoomThroughBassSound)
+
+    // Seed user data to ensure logo/startup switches never delete user data
+    repo.addAccount(
+      com.example.data.model.Account(
+        id = "acc_logo_test",
+        name = "Logo Preservation User",
+        serverUrl = "http://iptv.example.com:8080",
+        username = "bob",
+        password = "pw",
+        isActive = true
+      )
+    )
+    repo.toggleFavorite(
+      com.example.data.model.MediaItem(
+        id = "movie_logo_1",
+        streamId = 777,
+        name = "Dune Part Two",
+        type = com.example.data.model.MediaType.MOVIE
+      )
+    )
+
+    // 2. Persist all 3 StartupAnimationMode options & optional bass sound
+    for (mode in com.example.data.model.StartupAnimationMode.entries) {
+      val updated = repo.getUserSettings().copy(
+        startupAnimationMode = mode,
+        playZoomThroughBassSound = (mode == com.example.data.model.StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH),
+        usePremium3DLogo = true
+      )
+      repo.saveUserSettings(updated)
+      val reloaded = repo.getUserSettings()
+      assertEquals(mode, reloaded.startupAnimationMode)
+      assertEquals(mode == com.example.data.model.StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH, reloaded.playZoomThroughBassSound)
+      assertTrue(reloaded.usePremium3DLogo)
+    }
+
+    // 3. Restore Original Logo reverts only usePremium3DLogo without touching user data or other preferences
+    val beforeRestore = repo.getUserSettings().copy(
+      language = "Arabic",
+      startupAnimationMode = com.example.data.model.StartupAnimationMode.CLASSIC_ORIGINAL,
+      usePremium3DLogo = true
+    )
+    repo.saveUserSettings(beforeRestore)
+    val restoredLogo = beforeRestore.restoreOriginalLogo()
+    repo.saveUserSettings(restoredLogo)
+
+    val afterRestore = repo.getUserSettings()
+    assertFalse(afterRestore.usePremium3DLogo)
+    assertEquals("Arabic", afterRestore.language)
+    assertEquals(com.example.data.model.StartupAnimationMode.CLASSIC_ORIGINAL, afterRestore.startupAnimationMode)
+    assertTrue(repo.getAccounts().any { it.id == "acc_logo_test" })
+    assertTrue(repo.isFavorite("movie_logo_1"))
+
+    // 4. Verify Cinematic K Zoom-Through 0.0–1.8s timeline phases
+    val f0 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(0L)
+    assertEquals(0f, f0.kAlpha, 0.001f)
+    assertEquals(0f, f0.lightSweepProgress, 0.001f)
+    assertEquals(0f, f0.portalOpenProgress, 0.001f)
+    assertEquals(1f, f0.backdropAlpha, 0.001f)
+    assertFalse(f0.isFinished)
+
+    // End of Phase 1 (0.4s): original 3D K fully revealed at center on pure black
+    val f400 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(400L)
+    assertEquals(1f, f400.kAlpha, 0.001f)
+    assertEquals(1f, f400.kScale, 0.01f)
+    assertEquals(0f, f400.lightSweepProgress, 0.001f)
+    assertEquals(1f, f400.backdropAlpha, 0.001f)
+
+    // End of Phase 2 (0.8s): light reflection sweep completed, soft red glow & depth active
+    val f800 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(800L)
+    assertEquals(1f, f800.lightSweepProgress, 0.001f)
+    assertTrue(f800.depthLightingAlpha >= 0.99f)
+    assertTrue(f800.centerGlowAlpha > 0.5f)
+    assertTrue(f800.kScale > f400.kScale)
+
+    // Mid Phase 3 (1.15s): accelerating zoom, motion blur active, portal beginning to open
+    val f1150 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(1150L)
+    assertTrue(f1150.kScale > f800.kScale)
+    assertTrue(f1150.motionBlurDp > 0f)
+    assertTrue(f1150.portalOpenProgress > 0f)
+    assertTrue(f1150.speedStreaksAlpha > 0f)
+
+    // End of Phase 3 (1.5s): K enlarged dramatically beyond screen bounds
+    val f1500 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(1500L)
+    assertTrue(f1500.kScale >= 25f)
+    assertTrue(f1500.portalOpenProgress > f1150.portalOpenProgress)
+    assertFalse(f1500.isFinished)
+
+    // End of Phase 4 (1.8s): seamless live Home reveal complete, backdrop & K shell completely cleared
+    val f1800 = com.example.ui.screens.CinematicKZoomThroughTimeline.evaluate(1800L)
+    assertTrue(f1800.kScale >= 55f)
+    assertEquals(1f, f1800.portalOpenProgress, 0.001f)
+    assertEquals(0f, f1800.backdropAlpha, 0.001f)
+    assertEquals(0f, f1800.kShellAlpha, 0.001f)
+    assertEquals(0f, f1800.motionBlurDp, 0.001f)
+    assertTrue(f1800.isFinished)
+  }
 }

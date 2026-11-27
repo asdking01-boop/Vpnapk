@@ -1083,6 +1083,15 @@ class KrasRepository(context: Context) {
             AmbientCinemaIntensity.MEDIUM
         }
 
+        val startupAnimMode = try {
+            StartupAnimationMode.valueOf(
+                prefs.getString("startupAnimationMode", StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH.name)
+                    ?: StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH.name
+            )
+        } catch (_: Exception) {
+            StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH
+        }
+
         val canonicalProxyUrl = migrateStoredTmdbProxyUrl()
 
         return UserSettings(
@@ -1123,7 +1132,10 @@ class KrasRepository(context: Context) {
             hapticFeedbackEnabled = prefs.getBoolean("hapticFeedbackEnabled", true),
             batterySavingMode = prefs.getBoolean("batterySavingMode", false),
             reelsAutoplayEnabled = prefs.getBoolean("reelsAutoplayEnabled", true),
-            reelsWifiOnlyAutoplay = prefs.getBoolean("reelsWifiOnlyAutoplay", true)
+            reelsWifiOnlyAutoplay = prefs.getBoolean("reelsWifiOnlyAutoplay", true),
+            startupAnimationMode = startupAnimMode,
+            usePremium3DLogo = prefs.getBoolean("usePremium3DLogo", true),
+            playZoomThroughBassSound = prefs.getBoolean("playZoomThroughBassSound", false)
         )
     }
 
@@ -1163,6 +1175,9 @@ class KrasRepository(context: Context) {
             putBoolean("batterySavingMode", settings.batterySavingMode)
             putBoolean("reelsAutoplayEnabled", settings.reelsAutoplayEnabled)
             putBoolean("reelsWifiOnlyAutoplay", settings.reelsWifiOnlyAutoplay)
+            putString("startupAnimationMode", settings.startupAnimationMode.name)
+            putBoolean("usePremium3DLogo", settings.usePremium3DLogo)
+            putBoolean("playZoomThroughBassSound", settings.playZoomThroughBassSound)
         }.apply()
     }
 

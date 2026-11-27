@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.MovieFilter
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.*
@@ -28,7 +29,9 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.AmbientCinemaIntensity
 import com.example.data.model.InterfaceStyle
 import com.example.data.model.KrasPremiumTheme
+import com.example.data.model.StartupAnimationMode
 import com.example.data.model.UserSettings
+import com.example.ui.components.KrasLogo
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.theme.KrasRed
 import com.example.ui.theme.KrasRedBright
@@ -177,6 +180,217 @@ fun AppearanceExperienceSettingsCard(
                         )
                     }
                 }
+            }
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+            // 1B. Startup Animation Selector (Settings → Appearance & Experience → Startup Animation)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MovieFilter,
+                    contentDescription = null,
+                    tint = activeAccent,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = if (isArabic) "حركة بدء التشغيل" else "Startup Animation",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Text(
+                text = if (isArabic) {
+                    "تعمل عند التشغيل البارد فقط وتراعي إعدادات تقليل الحركة في النظام"
+                } else {
+                    "Plays on cold launch only and respects system reduced-motion settings"
+                },
+                color = TextSecondary,
+                fontSize = 11.sp
+            )
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("startup_animation_selector"),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                StartupAnimationMode.entries.forEach { mode ->
+                    val isSelected = userSettings.startupAnimationMode == mode
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (isSelected) activeAccent.copy(alpha = 0.20f)
+                                else Color.White.copy(alpha = 0.05f)
+                            )
+                            .border(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) activeAccent else Color.White.copy(alpha = 0.12f),
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable {
+                                onUpdateSettings(userSettings.copy(startupAnimationMode = mode))
+                                statusBanner = if (isArabic) {
+                                    "تم تعيين حركة البدء: ${mode.arabicLabel}"
+                                } else {
+                                    "Startup animation set to ${mode.label}"
+                                }
+                            }
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
+                            .testTag("startup_anim_${mode.name.lowercase()}"),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isArabic) mode.arabicLabel else mode.label,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            val desc = when (mode) {
+                                StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH -> if (isArabic) {
+                                    "تغوص الكاميرا بسلاسة عبر حرف K ثلاثي الأبعاد مباشرة إلى الشاشة الرئيسية"
+                                } else {
+                                    "Camera travels seamlessly through the 3D K directly into Home (1.8s)"
+                                }
+                                StartupAnimationMode.CLASSIC_ORIGINAL -> if (isArabic) {
+                                    "شاشة البداية الكلاسيكية الأصلية لـ KRAS TV"
+                                } else {
+                                    "Original classic KRAS TV 3D glass intro animation"
+                                }
+                                StartupAnimationMode.DISABLED -> if (isArabic) {
+                                    "دخول فوري إلى الشاشة الرئيسية دون حركة بدء"
+                                } else {
+                                    "Launch directly into Home with no startup animation"
+                                }
+                            }
+                            Text(
+                                text = desc,
+                                color = TextSecondary,
+                                fontSize = 11.sp,
+                                lineHeight = 14.sp
+                            )
+                        }
+                        if (isSelected) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Selected",
+                                tint = activeAccent,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (userSettings.startupAnimationMode == StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH) {
+                FeatureToggleRow(
+                    title = if (isArabic) "صوت الباص السينمائي لحركة البدء" else "Zoom-Through Cinematic Bass Sound",
+                    subtitle = if (isArabic) {
+                        "تأثير صوتي سينمائي قصير أثناء الغوص عبر حرف K (معطّل افتراضياً)"
+                    } else {
+                        "Optional short cinematic sub-bass swell during K zoom-through (off by default)"
+                    },
+                    checked = userSettings.playZoomThroughBassSound,
+                    onCheckedChange = {
+                        onUpdateSettings(userSettings.copy(playZoomThroughBassSound = it))
+                    },
+                    accentColor = activeAccent,
+                    testTagName = "toggle_zoom_through_bass_sound"
+                )
+            }
+
+            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+            // 1C. KRAS TV 3D Logo Identity & Reversible Restore Original Logo
+            Text(
+                text = if (isArabic) "هوية شعار KRAS TV" else "KRAS TV Logo Identity",
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            // Live AMOLED Logo Preview
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color.Black)
+                    .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(14.dp))
+                    .padding(vertical = 18.dp, horizontal = 12.dp)
+                    .testTag("logo_style_preview_box"),
+                contentAlignment = Alignment.Center
+            ) {
+                KrasLogo(
+                    height = 30.dp,
+                    usePremium3DLogo = userSettings.usePremium3DLogo
+                )
+            }
+
+            FeatureToggleRow(
+                title = if (isArabic) "الشعار المعدني ثلاثي الأبعاد" else "Premium 3D Metallic Logo",
+                subtitle = if (isArabic) {
+                    "تطبيق تصميم 3D الأحمر المعدني اللامع على حروف R و A و S و T و V مع الإبقاء على K الأصلية"
+                } else {
+                    "Matches R, A, S, T, V to the original glossy metallic 3D K across the app"
+                },
+                checked = userSettings.usePremium3DLogo,
+                onCheckedChange = { enabled ->
+                    onUpdateSettings(userSettings.copy(usePremium3DLogo = enabled))
+                    statusBanner = if (enabled) {
+                        if (isArabic) "تم تفعيل شعار KRAS TV ثلاثي الأبعاد" else "Premium 3D Logo active"
+                    } else {
+                        if (isArabic) "تمت استعادة الشعار الأصلي" else "Original KRAS TV logo restored"
+                    }
+                },
+                accentColor = activeAccent,
+                testTagName = "toggle_premium_3d_logo"
+            )
+
+            OutlinedButton(
+                onClick = {
+                    onUpdateSettings(userSettings.restoreOriginalLogo())
+                    statusBanner = if (isArabic) {
+                        "تمت استعادة الشعار الأصلي بنجاح"
+                    } else {
+                        "Restored original KRAS TV logo — all data preserved"
+                    }
+                },
+                enabled = userSettings.usePremium3DLogo,
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = Color.White,
+                    disabledContentColor = TextSecondary
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (userSettings.usePremium3DLogo) KrasRed.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.14f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 48.dp)
+                    .testTag("restore_original_logo_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Restore,
+                    contentDescription = null,
+                    tint = if (userSettings.usePremium3DLogo) KrasRedBright else TextSecondary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (isArabic) "استعادة الشعار الأصلي" else "Restore Original Logo",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp
+                )
             }
 
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))

@@ -251,11 +251,27 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         loadInitialData()
     }
 
+    fun getInitialStartupSettings(): UserSettings {
+        return repository.getUserSettings()
+    }
+
     fun playIntroSoundIfEnabled() {
-        if (_userSettings.value.playIntroSound) {
+        if (repository.getUserSettings().playIntroSound) {
             viewModelScope.launch {
                 try {
                     CinematicSoundPlayer.playCinematicIntro()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    fun playZoomThroughBassIfEnabled() {
+        if (repository.getUserSettings().playZoomThroughBassSound) {
+            viewModelScope.launch {
+                try {
+                    CinematicSoundPlayer.playZoomThroughBass()
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }

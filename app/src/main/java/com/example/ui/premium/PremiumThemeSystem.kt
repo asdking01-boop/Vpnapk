@@ -200,7 +200,8 @@ data class PremiumExperienceState(
     val animationsEnabled: Boolean = true,
     val hapticsEnabled: Boolean = false,
     val batterySavingActive: Boolean = false,
-    val systemReducedMotion: Boolean = false
+    val systemReducedMotion: Boolean = false,
+    val usePremium3DLogo: Boolean = true
 )
 
 val LocalPremiumExperienceState = compositionLocalOf { PremiumExperienceState() }
@@ -271,7 +272,8 @@ fun resolvePremiumExperienceState(
         animationsEnabled = animationsAllowed,
         hapticsEnabled = isPremium && userSettings.hapticFeedbackEnabled && !batterySaving,
         batterySavingActive = batterySaving,
-        systemReducedMotion = systemReducedMotion
+        systemReducedMotion = systemReducedMotion,
+        usePremium3DLogo = userSettings.usePremium3DLogo
     )
 }
 
