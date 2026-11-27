@@ -1371,7 +1371,9 @@ class KrasRepository(context: Context) {
             mediaDao.updateTmdbMetadata(
                 id = item.id,
                 posterUrl = item.streamIcon,
-                backdropUrl = item.backdrop.ifBlank { item.streamIcon },
+                backdropUrl = item.backdrop.takeIf {
+                    com.example.data.api.TmdbMetadataMatcher.isValidBackdropUrl(it, item.streamIcon)
+                }.orEmpty(),
                 plot = item.plot,
                 genre = item.genre,
                 cast = item.cast,

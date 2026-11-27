@@ -30,10 +30,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.data.api.TmdbMediaMetadata
+import com.example.data.api.TmdbMetadataMatcher
+import com.example.data.api.TmdbSearchCandidate
 import com.example.data.model.*
+import com.example.ui.components.CinematicDetailsBackdrop
 import com.example.ui.components.DetailsOverviewSection
 import com.example.ui.components.MediaCard
 import com.example.ui.components.ResolutionBadge
+import com.example.ui.components.TmdbCastCarouselSection
+import com.example.ui.components.TmdbManualMatchDialog
 import com.example.ui.theme.*
 
 /**
@@ -65,12 +71,19 @@ fun SeriesDetailsScreen(
     watchHistory: List<WatchProgress>,
     onSeriesClick: (MediaItem) -> Unit,
     isArabic: Boolean = false,
+    richMetadata: TmdbMediaMetadata? = null,
+    manualMatchCandidates: List<TmdbSearchCandidate> = emptyList(),
+    isManualMatchSearching: Boolean = false,
+    onSearchManualMatch: (String, String) -> Unit = { _, _ -> },
+    onApplyManualMatch: (TmdbSearchCandidate) -> Unit = {},
+    onClearManualMatch: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onDismiss)
 
     val context = LocalContext.current
     var selectedSeasonIndex by remember { mutableStateOf(0) }
+    var showManualMatchDialog by remember(seriesItem.id) { mutableStateOf(false) }
 
     val details = seriesDetails ?: SeriesDetails(
         seriesId = seriesItem.streamId,
@@ -119,20 +132,45 @@ fun SeriesDetailsScreen(
         }
     }
 
-    // Similar series recommendations
-    val similarSeries = remember(seriesItem, allSeries) {
-        allSeries.filter { other ->
-            other.id != seriesItem.id && (
+    // Similar series recommendations (prioritize TMDb similar matches in catalog, then same category/genre)
+    val similarSeries = remember(seriesItem, allSeries, richMetadata?.similarItems) {
+        val tmdbSimilar = richMetadata?.similarItems.orEmpty()
+        val tmdbSimIds = tmdbSimilar.map { it.tmdbId }.toSet()
+        val tmdbSimTitles = tmdbSimilar.map { TmdbMetadataMatcher.cleanIptvTitle(it.title).cleanTitle.lowercase() }.toSet()
+
+        val matchedByTmdb = if (tmdbSimIds.isNotEmpty() || tmdbSimTitles.isNotEmpty()) {
+            allSeries.filter { other ->
+                other.id != seriesItem.id && (
+                    (other.tmdbId > 0 && other.tmdbId in tmdbSimIds) ||
+                        TmdbMetadataMatcher.cleanIptvTitle(other.name).cleanTitle.lowercase() in tmdbSimTitles
+                    )
+            }
+        } else {
+            emptyList()
+        }
+        val matchedIds = matchedByTmdb.map { it.id }.toSet()
+        val fallbackByCategory = allSeries.filter { other ->
+            other.id != seriesItem.id && other.id !in matchedIds && (
                 other.categoryId == seriesItem.categoryId ||
-                other.categoryName.equals(seriesItem.categoryName, ignoreCase = true) ||
-                (other.genre.isNotBlank() && seriesItem.genre.isNotBlank() && other.genre.contains(seriesItem.genre.split(",").firstOrNull()?.trim() ?: "", ignoreCase = true))
-            )
-        }.take(15)
+                    other.categoryName.equals(seriesItem.categoryName, ignoreCase = true) ||
+                    (other.genre.isNotBlank() && seriesItem.genre.isNotBlank() && other.genre.contains(seriesItem.genre.split(",").firstOrNull()?.trim() ?: "", ignoreCase = true))
+                )
+        }
+        (matchedByTmdb + fallbackByCategory).take(15)
     }
 
+    val officialTrailerKey = richMetadata?.trailerYoutubeKey.orEmpty().trim()
     val trailerQuery = remember(seriesItem) {
         val y = seriesItem.year.take(4)
-        if (y.isNotBlank()) "${seriesItem.name} $y official trailer" else "${seriesItem.name} official trailer"
+        val clean = TmdbMetadataMatcher.cleanIptvTitle(seriesItem.name).cleanTitle.ifBlank { seriesItem.name }
+        if (y.isNotBlank()) "$clean $y official trailer" else "$clean official trailer"
+    }
+
+    val effectiveBackdropUrl = remember(details.backdrop, richMetadata?.backdropUrl) {
+        richMetadata?.backdropUrl?.takeIf { it.isNotBlank() } ?: details.backdrop
+    }
+    val effectivePosterUrl = remember(details.cover, seriesItem.streamIcon, richMetadata?.posterUrl) {
+        details.cover.ifBlank { seriesItem.streamIcon.ifBlank { richMetadata?.posterUrl.orEmpty() } }
     }
 
     Box(
@@ -146,51 +184,18 @@ fun SeriesDetailsScreen(
                 .fillMaxSize()
                 .padding(bottom = 80.dp)
         ) {
-            // 1. Cinematic Backdrop Header Hero
+            // 1. Cinematic Backdrop Header Hero (TMDb backdrop -> Blurred IPTV poster fallback -> Atmospheric gradient)
             item(key = "series_backdrop_hero") {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(380.dp)
                 ) {
-                    val bg = (details.backdrop.ifBlank { details.cover.ifBlank { seriesItem.streamIcon } }).takeIf { it.isNotBlank() }
-                    if (bg != null) {
-                        AsyncImage(
-                            model = bg,
-                            contentDescription = details.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(CinemaCardElevated),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = details.name.take(1),
-                                color = KrasRedBright,
-                                fontSize = 48.sp,
-                                fontWeight = FontWeight.Black
-                            )
-                        }
-                    }
-
-                    // Multi-layer Gradient Scrim
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(
-                                        Color.Black.copy(alpha = 0.75f),
-                                        Color.Transparent,
-                                        Color.Black.copy(alpha = 0.5f),
-                                        CinemaBlack
-                                    )
-                                )
-                            )
+                    CinematicDetailsBackdrop(
+                        backdropUrl = effectiveBackdropUrl,
+                        posterUrl = effectivePosterUrl,
+                        contentDescription = details.name,
+                        modifier = Modifier.fillMaxSize()
                     )
 
                     // Top Bar (Back and Favorite)
@@ -436,15 +441,16 @@ fun SeriesDetailsScreen(
                             )
                         }
 
-                        // Trailer Button
+                        // Trailer Button (Official TMDb YouTube Trailer when available, else search fallback)
                         OutlinedButton(
                             onClick = {
                                 try {
-                                    val intent = Intent(
-                                        Intent.ACTION_VIEW,
+                                    val trailerUri = if (officialTrailerKey.isNotBlank()) {
+                                        Uri.parse("https://www.youtube.com/watch?v=${Uri.encode(officialTrailerKey)}")
+                                    } else {
                                         Uri.parse("https://www.youtube.com/results?search_query=${Uri.encode(trailerQuery)}")
-                                    )
-                                    context.startActivity(intent)
+                                    }
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, trailerUri))
                                 } catch (e: Exception) {
                                     e.printStackTrace()
                                 }
@@ -459,7 +465,7 @@ fun SeriesDetailsScreen(
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(44.dp)
+                                .height(48.dp)
                                 .testTag("series_trailer_button")
                         ) {
                             Icon(
@@ -470,16 +476,22 @@ fun SeriesDetailsScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (isArabic) "الإعلان الدعائي" else "Trailer",
+                                text = if (officialTrailerKey.isNotBlank()) {
+                                    if (isArabic) "الإعلان الرسمي" else "Official Trailer"
+                                } else {
+                                    if (isArabic) "الإعلان الدعائي" else "Trailer"
+                                },
                                 fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
                 }
             }
 
-            // 3. Series Synopsis & Cast
+            // 3. Series Synopsis, Cast with Actor Photos & Manual TMDb Match
             item(key = "series_synopsis_section") {
                 Column(
                     modifier = Modifier
@@ -495,43 +507,58 @@ fun SeriesDetailsScreen(
                         isArabic = isArabic
                     )
 
-                    if (details.cast.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Row {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val firstAir = richMetadata?.releaseDate?.takeIf { it.isNotBlank() } ?: details.releaseDate
+                        if (firstAir.isNotBlank()) {
                             Text(
-                                text = if (isArabic) "بطولة: " else "Starring: ",
+                                text = if (isArabic) "أول عرض: $firstAir" else "First Aired: $firstAir",
                                 color = TextMuted,
+                                fontSize = 11.sp
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.width(1.dp))
+                        }
+
+                        TextButton(
+                            onClick = { showManualMatchDialog = true },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .defaultMinSize(minHeight = 48.dp)
+                                .testTag("series_fix_match_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ManageSearch,
+                                contentDescription = if (isArabic) "تصحيح مطابقة TMDb" else "Fix TMDb Match",
+                                tint = AccentCyan,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (details.tmdbId <= 0) {
+                                    if (isArabic) "مطابقة TMDb" else "Match TMDb"
+                                } else {
+                                    if (isArabic) "تصحيح المطابقة" else "Fix Match"
+                                },
+                                color = AccentCyan,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = details.cast,
-                                color = Color.White.copy(alpha = 0.9f),
-                                fontSize = 12.sp,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
 
-                    if (details.director.isNotEmpty()) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row {
-                            Text(
-                                text = if (isArabic) "إخراج: " else "Director: ",
-                                color = TextMuted,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = details.director,
-                                color = Color.White.copy(alpha = 0.9f),
-                                fontSize = 12.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    TmdbCastCarouselSection(
+                        castMembers = richMetadata?.castMembers.orEmpty(),
+                        fallbackCastCsv = details.cast,
+                        director = richMetadata?.director?.ifBlank { details.director } ?: details.director,
+                        isArabic = isArabic
+                    )
                 }
             }
 
@@ -738,6 +765,27 @@ fun SeriesDetailsScreen(
                     }
                 }
             }
+        }
+
+        if (showManualMatchDialog) {
+            TmdbManualMatchDialog(
+                initialTitle = seriesItem.name,
+                initialYear = details.releaseDate.ifBlank { seriesItem.year },
+                isSeries = true,
+                candidates = manualMatchCandidates,
+                isSearching = isManualMatchSearching,
+                isArabic = isArabic,
+                onSearch = { query, year -> onSearchManualMatch(query, year) },
+                onSelectCandidate = { candidate ->
+                    showManualMatchDialog = false
+                    onApplyManualMatch(candidate)
+                    onClearManualMatch()
+                },
+                onDismiss = {
+                    showManualMatchDialog = false
+                    onClearManualMatch()
+                }
+            )
         }
     }
 }

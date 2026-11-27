@@ -90,7 +90,12 @@ data class TmdbMediaMetadata(
     val director: String,
     val runtimeMinutes: Int = 0,
     val seasons: List<TmdbSeasonSummary> = emptyList(),
-    val originalTitle: String = ""
+    val originalTitle: String = "",
+    val castMembers: List<TmdbCastMember> = emptyList(),
+    val trailerYoutubeKey: String = "",
+    val similarItems: List<TmdbSimilarItem> = emptyList(),
+    val cachedAtMs: Long = 0L,
+    val isManualMatch: Boolean = false
 )
 
 data class TmdbRequestTokenResult(
@@ -1206,7 +1211,7 @@ class TmdbProxyClient(
         tmdbId: Int = 0,
         preferArabic: Boolean = false
     ): TmdbMediaMetadata? = withContext(Dispatchers.IO) {
-        val cleaned = extractTmdbQuery(rawTitle)
+        val cleaned = TmdbMetadataMatcher.cleanIptvTitle(rawTitle)
         val effectiveTitle = cleaned.cleanTitle.ifBlank { rawTitle.trim() }
         val effectiveYear = year.filter { it.isDigit() }.take(4).ifBlank { cleaned.extractedYear }
         val primaryLang = if (preferArabic) "ar" else "en-US"
@@ -1219,6 +1224,23 @@ class TmdbProxyClient(
         val negativeTs = negativeLookupCache[accurateKey]
         if (negativeTs != null && (System.currentTimeMillis() - negativeTs) < NEGATIVE_CACHE_TTL_MS) {
             return@withContext null
+        }
+
+        // Step 1: Resolve verified TMDb ID using multi-candidate scored search when ID is unknown.
+        // This guarantees we never blindly trust results[0] even on older Worker deployments.
+        var bestSearchCandidate: TmdbSearchCandidate? = null
+        val verifiedSearchId = if (tmdbId > 0) {
+            tmdbId
+        } else {
+            val candidates = searchCandidates(
+                rawProxyUrl = rawProxyUrl,
+                rawQuery = rawTitle,
+                year = effectiveYear,
+                isSeries = isSeries,
+                preferArabic = preferArabic
+            )
+            bestSearchCandidate = candidates.firstOrNull { it.confidenceScore > 0.0 }
+            bestSearchCandidate?.tmdbId ?: 0
         }
 
         suspend fun fetchSingle(targetId: Int, lang: String): TmdbMediaMetadata? {
@@ -1238,10 +1260,8 @@ class TmdbProxyClient(
                 }
             } ?: return null
 
-            // When searching without an explicit TMDb ID, strictly verify that the returned candidate
-            // actually matches the cleaned title & release year.
             if (targetId <= 0 && !TmdbMetadataMatcher.isConfidentMatch(
-                    queryTitle = effectiveTitle,
+                    queryTitle = rawTitle,
                     queryYear = effectiveYear,
                     candidateTitle = raw.title,
                     candidateOriginalTitle = raw.originalTitle,
@@ -1253,12 +1273,19 @@ class TmdbProxyClient(
             return raw
         }
 
-        val primary = fetchSingle(tmdbId, primaryLang)
-        val resolvedId = primary?.tmdbId?.takeIf { it > 0 } ?: tmdbId
+        val primary = fetchSingle(verifiedSearchId, primaryLang)
+        val resolvedId = primary?.tmdbId?.takeIf { it > 0 } ?: verifiedSearchId
 
-        val finalMeta = if (preferArabic) {
+        var finalMeta = if (preferArabic) {
             val validArabicOverview = TmdbMetadataMatcher.sanitizeSynopsis(primary?.overview, effectiveTitle)
-            if (primary != null && validArabicOverview.isNotEmpty()) {
+            val needsEnglishMerge = primary == null ||
+                validArabicOverview.isEmpty() ||
+                primary.backdropUrl.isBlank() ||
+                primary.trailerYoutubeKey.isBlank() ||
+                primary.castMembers.isEmpty() ||
+                primary.similarItems.isEmpty()
+
+            if (!needsEnglishMerge && primary != null) {
                 primary.copy(overview = validArabicOverview)
             } else {
                 val englishFallback = fetchSingle(resolvedId, "en-US")
@@ -1276,13 +1303,16 @@ class TmdbProxyClient(
                             backdropUrl = primary.backdropUrl.ifBlank { englishFallback.backdropUrl },
                             genres = primary.genres.ifBlank { englishFallback.genres },
                             cast = primary.cast.ifBlank { englishFallback.cast },
+                            castMembers = primary.castMembers.ifEmpty { englishFallback.castMembers },
                             director = primary.director.ifBlank { englishFallback.director },
                             releaseYear = primary.releaseYear.ifBlank { englishFallback.releaseYear },
                             releaseDate = primary.releaseDate.ifBlank { englishFallback.releaseDate },
                             rating = if (primary.rating > 0.0) primary.rating else englishFallback.rating,
                             runtimeMinutes = if (primary.runtimeMinutes > 0) primary.runtimeMinutes else englishFallback.runtimeMinutes,
                             seasons = primary.seasons.ifEmpty { englishFallback.seasons },
-                            originalTitle = primary.originalTitle.ifBlank { englishFallback.originalTitle }
+                            originalTitle = primary.originalTitle.ifBlank { englishFallback.originalTitle },
+                            trailerYoutubeKey = primary.trailerYoutubeKey.ifBlank { englishFallback.trailerYoutubeKey },
+                            similarItems = primary.similarItems.ifEmpty { englishFallback.similarItems }
                         )
                     }
                 }
@@ -1291,12 +1321,285 @@ class TmdbProxyClient(
             primary?.copy(overview = TmdbMetadataMatcher.sanitizeSynopsis(primary.overview, effectiveTitle))
         }
 
+        // Resilient fallback for proxy deployments that expose `/api/tmdb/search/movie` & `/api/tmdb/search/tv`
+        // while detail routes (`/api/tmdb/movie/{id}`, `/api/tmdb/tv/{id}`) are not yet deployed (HTTP 404).
+        if (finalMeta == null) {
+            if (bestSearchCandidate == null && effectiveTitle.isNotBlank()) {
+                val fallbackCandidates = searchCandidates(
+                    rawProxyUrl = rawProxyUrl,
+                    rawQuery = rawTitle,
+                    year = effectiveYear,
+                    isSeries = isSeries,
+                    preferArabic = preferArabic
+                )
+                bestSearchCandidate = if (tmdbId > 0) {
+                    fallbackCandidates.firstOrNull { it.tmdbId == tmdbId }
+                        ?: fallbackCandidates.firstOrNull { it.confidenceScore > 0.0 }
+                } else {
+                    fallbackCandidates.firstOrNull { it.confidenceScore > 0.0 }
+                }
+            }
+            bestSearchCandidate?.let { cand ->
+                val sanitizedOverview = TmdbMetadataMatcher.sanitizeSynopsis(cand.overview, effectiveTitle)
+                finalMeta = TmdbMediaMetadata(
+                    tmdbId = cand.tmdbId,
+                    title = cand.title,
+                    originalTitle = cand.originalTitle,
+                    overview = sanitizedOverview,
+                    posterUrl = cand.posterUrl,
+                    backdropUrl = cand.backdropUrl,
+                    rating = cand.rating,
+                    releaseYear = cand.releaseYear,
+                    releaseDate = cand.releaseDate,
+                    genres = TmdbMetadataMatcher.mapTmdbGenreIds(cand.genreIds, preferArabic = preferArabic),
+                    cast = "",
+                    director = "",
+                    cachedAtMs = System.currentTimeMillis()
+                )
+            }
+        }
+
         if (finalMeta != null) {
             targetCache[accurateKey] = finalMeta
         } else {
             negativeLookupCache[accurateKey] = System.currentTimeMillis()
         }
         finalMeta
+    }
+
+    /**
+     * Searches TMDb candidates through the proxy (`/api/tmdb/search/movie` or `/api/tmdb/search/tv`)
+     * across cleaned bilingual query variants, returning deduplicated candidates scored by confidence.
+     * Used by both smart automatic matching and user-driven manual TMDb matching.
+     */
+    suspend fun searchCandidates(
+        rawProxyUrl: String,
+        rawQuery: String,
+        year: String = "",
+        isSeries: Boolean = false,
+        preferArabic: Boolean = false
+    ): List<TmdbSearchCandidate> = withContext(Dispatchers.IO) {
+        val endpoint = parseProxyEndpoint(rawProxyUrl)
+        val baseUrl = endpoint.baseUrl
+        if (baseUrl.isBlank() || rawQuery.isBlank()) return@withContext emptyList()
+
+        val cleaned = TmdbMetadataMatcher.cleanIptvTitle(rawQuery)
+        val effectiveYear = year.filter { it.isDigit() }.take(4).ifBlank { cleaned.extractedYear }
+        val queryVariants = TmdbMetadataMatcher.buildSearchQueries(rawQuery)
+            .ifEmpty { listOf(rawQuery.trim()) }
+            .take(3)
+        val searchPath = if (isSeries) "api/tmdb/search/tv" else "api/tmdb/search/movie"
+        val languages = if (preferArabic) listOf("ar", "en-US") else listOf("en-US")
+
+        val byId = LinkedHashMap<Int, TmdbSearchCandidate>()
+
+        fun executeOneSearch(queryText: String, lang: String, includeYear: Boolean) {
+            val sb = StringBuilder("$baseUrl/$searchPath?query=${URLEncoder.encode(queryText, "UTF-8")}")
+                .append("&language=${URLEncoder.encode(lang, "UTF-8")}")
+            if (includeYear && effectiveYear.length == 4) {
+                sb.append("&year=$effectiveYear")
+            }
+            val request = buildAuthenticatedRequest(
+                url = sb.toString(),
+                proxyAuthToken = endpoint.proxyAuthToken
+            )
+            try {
+                httpClient.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) return
+                    val body = resp.body?.string().orEmpty().trim()
+                    if (!body.startsWith("{")) return
+                    val json = try { JSONObject(body) } catch (_: Exception) { null } ?: return
+                    val results = json.optJSONArray("results")
+                        ?: json.optJSONObject("data")?.optJSONArray("results")
+                        ?: return
+
+                    for (i in 0 until results.length().coerceAtMost(15)) {
+                        val obj = results.optJSONObject(i) ?: continue
+                        val id = obj.optInt("id", obj.optInt("tmdbId", 0))
+                        if (id <= 0) continue
+
+                        val title = if (isSeries) {
+                            obj.optString("name", obj.optString("title", "")).trim()
+                        } else {
+                            obj.optString("title", obj.optString("name", "")).trim()
+                        }
+                        val origTitle = if (isSeries) {
+                            obj.optString("original_name", obj.optString("originalTitle", "")).trim()
+                        } else {
+                            obj.optString("original_title", obj.optString("originalTitle", "")).trim()
+                        }
+                        val displayTitle = title.ifBlank { origTitle }
+                        if (displayTitle.isBlank()) continue
+
+                        val rDate = if (isSeries) {
+                            obj.optString("first_air_date", obj.optString("releaseDate", "")).trim()
+                        } else {
+                            obj.optString("release_date", obj.optString("releaseDate", "")).trim()
+                        }
+                        val candYear = rDate.take(4)
+
+                        val posterUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                            obj.optString("posterUrl", "").ifBlank { obj.optString("poster_path", "") },
+                            size = "w500"
+                        )
+                        val backdropUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                            obj.optString("backdropUrl", "").ifBlank { obj.optString("backdrop_path", "") },
+                            size = "w1280"
+                        )
+                        val rating = obj.optDouble("vote_average", obj.optDouble("rating", 0.0))
+                            .let { if (it.isNaN()) 0.0 else it }
+                        val overview = TmdbMetadataMatcher.cleanSynopsisFormatting(obj.optString("overview", ""))
+
+                        val confidence = TmdbMetadataMatcher.scoreCandidateMatch(
+                            queryTitle = rawQuery,
+                            queryYear = effectiveYear,
+                            candidateTitle = title,
+                            candidateOriginalTitle = origTitle,
+                            candidateYear = candYear
+                        )
+
+                        val genreIds = mutableListOf<Int>()
+                        val gArr = obj.optJSONArray("genre_ids")
+                        if (gArr != null) {
+                            for (gIdx in 0 until gArr.length()) {
+                                val gId = gArr.optInt(gIdx, 0)
+                                if (gId > 0) genreIds.add(gId)
+                            }
+                        }
+
+                        val candidate = TmdbSearchCandidate(
+                            tmdbId = id,
+                            title = displayTitle,
+                            originalTitle = origTitle,
+                            releaseYear = candYear,
+                            releaseDate = rDate,
+                            overview = overview,
+                            posterUrl = posterUrl,
+                            backdropUrl = backdropUrl,
+                            rating = rating,
+                            genreIds = genreIds,
+                            isSeries = isSeries,
+                            confidenceScore = confidence
+                        )
+
+                        val existing = byId[id]
+                        if (existing == null || candidate.confidenceScore > existing.confidenceScore ||
+                            (existing.overview.isBlank() && candidate.overview.isNotBlank())
+                        ) {
+                            byId[id] = if (existing != null) {
+                                candidate.copy(
+                                    releaseDate = candidate.releaseDate.ifBlank { existing.releaseDate },
+                                    overview = candidate.overview.ifBlank { existing.overview },
+                                    posterUrl = candidate.posterUrl.ifBlank { existing.posterUrl },
+                                    backdropUrl = candidate.backdropUrl.ifBlank { existing.backdropUrl },
+                                    genreIds = candidate.genreIds.ifEmpty { existing.genreIds },
+                                    confidenceScore = maxOf(candidate.confidenceScore, existing.confidenceScore)
+                                )
+                            } else {
+                                candidate
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        for (q in queryVariants) {
+            for (lang in languages) {
+                if (effectiveYear.length == 4) {
+                    executeOneSearch(q, lang, includeYear = true)
+                }
+                if (byId.values.none { it.confidenceScore >= 0.85 }) {
+                    executeOneSearch(q, lang, includeYear = false)
+                }
+            }
+            if (byId.values.any { it.confidenceScore >= 0.92 }) break
+        }
+
+        byId.values.sortedWith(
+            compareByDescending<TmdbSearchCandidate> { it.confidenceScore }
+                .thenByDescending { it.backdropUrl.isNotBlank() }
+                .thenByDescending { it.rating }
+        ).take(15)
+    }
+
+    /**
+     * Verifies that TMDb image CDN (`image.tmdb.org`) responds successfully for Diagnostics.
+     */
+    suspend fun verifyImageUrl(imageUrl: String): TmdbDiagnosticCheck = withContext(Dispatchers.IO) {
+        val normalized = TmdbMetadataMatcher.normalizeTmdbImageUrl(imageUrl, size = "w500")
+        if (normalized.isBlank()) {
+            return@withContext TmdbDiagnosticCheck(
+                status = TmdbDiagnosticStatus.WARNING,
+                summary = "No image URL available to test"
+            )
+        }
+        val start = System.currentTimeMillis()
+        try {
+            val headReq = Request.Builder()
+                .url(normalized)
+                .header("Accept", "image/*")
+                .head()
+                .build()
+            httpClient.newCall(headReq).execute().use { resp ->
+                val latency = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+                if (resp.isSuccessful) {
+                    return@withContext TmdbDiagnosticCheck(
+                        status = TmdbDiagnosticStatus.PASSED,
+                        summary = "Image CDN reachable (${latency}ms)",
+                        httpCode = resp.code,
+                        latencyMs = latency
+                    )
+                }
+                if (resp.code == 405) {
+                    // Fallback to lightweight ranged GET if server rejects HEAD
+                    val getReq = Request.Builder()
+                        .url(normalized)
+                        .header("Range", "bytes=0-1023")
+                        .get()
+                        .build()
+                    httpClient.newCall(getReq).execute().use { getResp ->
+                        val getLatency = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+                        return@withContext if (getResp.isSuccessful) {
+                            TmdbDiagnosticCheck(
+                                status = TmdbDiagnosticStatus.PASSED,
+                                summary = "Image CDN reachable (${getLatency}ms)",
+                                httpCode = getResp.code,
+                                latencyMs = getLatency
+                            )
+                        } else {
+                            TmdbDiagnosticCheck(
+                                status = TmdbDiagnosticStatus.FAILED,
+                                summary = "Image CDN returned HTTP ${getResp.code}",
+                                httpCode = getResp.code,
+                                latencyMs = getLatency
+                            )
+                        }
+                    }
+                }
+                TmdbDiagnosticCheck(
+                    status = TmdbDiagnosticStatus.FAILED,
+                    summary = "Image CDN returned HTTP ${resp.code}",
+                    httpCode = resp.code,
+                    latencyMs = latency
+                )
+            }
+        } catch (e: Exception) {
+            val latency = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+            TmdbDiagnosticCheck(
+                status = TmdbDiagnosticStatus.FAILED,
+                summary = TmdbErrorSanitizer.sanitize(e.localizedMessage ?: e.javaClass.simpleName),
+                latencyMs = latency
+            )
+        }
+    }
+
+    fun clearMemoryCaches() {
+        movieCache.clear()
+        tvCache.clear()
+        seasonEpisodesCache.clear()
+        negativeLookupCache.clear()
     }
 
     companion object {
@@ -1593,26 +1896,127 @@ class TmdbProxyClient(
             val title = source.optString("title", source.optString("name", "")).trim()
             if (tmdbId <= 0 && title.isEmpty()) return null
 
+            val isTv = source.optString("mediaType", source.optString("media_type", "")).equals("tv", ignoreCase = true) ||
+                source.has("seasons") || source.has("first_air_date")
+
             val seasonsArray = source.optJSONArray("seasons") ?: JSONArray()
             val seasons = mutableListOf<TmdbSeasonSummary>()
             for (i in 0 until seasonsArray.length()) {
                 val sObj = seasonsArray.optJSONObject(i) ?: continue
-                val sNum = sObj.optInt("seasonNumber", 0)
+                val sNum = sObj.optInt("seasonNumber", sObj.optInt("season_number", 0))
                 if (sNum >= 1) {
+                    val sPoster = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                        sObj.optString("posterUrl", "").ifBlank { sObj.optString("poster_path", "") },
+                        size = "w500"
+                    )
                     seasons.add(
                         TmdbSeasonSummary(
                             seasonNumber = sNum,
                             name = sObj.optString("name", "Season $sNum"),
-                            episodeCount = sObj.optInt("episodeCount", 0),
+                            episodeCount = sObj.optInt("episodeCount", sObj.optInt("episode_count", 0)),
                             overview = sObj.optString("overview", ""),
-                            posterUrl = sObj.optString("posterUrl", ""),
-                            airDate = sObj.optString("airDate", "")
+                            posterUrl = sPoster,
+                            airDate = sObj.optString("airDate", sObj.optString("air_date", ""))
                         )
                     )
                 }
             }
 
-            val releaseDate = source.optString("releaseDate", "").trim()
+            // Parse castMembers (from upgraded proxy `castMembers` OR raw TMDb `credits.cast`)
+            val castMembers = mutableListOf<TmdbCastMember>()
+            val castMembersArr = source.optJSONArray("castMembers")
+                ?: source.optJSONObject("credits")?.optJSONArray("cast")
+            if (castMembersArr != null) {
+                for (i in 0 until castMembersArr.length().coerceAtMost(12)) {
+                    val cObj = castMembersArr.optJSONObject(i) ?: continue
+                    val cName = cObj.optString("name", "").trim()
+                    if (cName.isNotEmpty()) {
+                        val profileUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                            cObj.optString("profileUrl", "").ifBlank { cObj.optString("profile_path", "") },
+                            size = "w185"
+                        )
+                        castMembers.add(
+                            TmdbCastMember(
+                                id = cObj.optInt("id", 0),
+                                name = cName,
+                                character = cObj.optString("character", "").trim(),
+                                profileUrl = profileUrl
+                            )
+                        )
+                    }
+                }
+            }
+
+            // Parse official YouTube trailer key (proxy `trailerYoutubeKey` OR raw TMDb `videos.results`)
+            var trailerKey = source.optString("trailerYoutubeKey", source.optString("trailer_key", "")).trim()
+            if (trailerKey.isBlank()) {
+                val videosArr = source.optJSONObject("videos")?.optJSONArray("results")
+                if (videosArr != null) {
+                    var bestScore = -1
+                    for (i in 0 until videosArr.length()) {
+                        val v = videosArr.optJSONObject(i) ?: continue
+                        val site = v.optString("site", "")
+                        val key = v.optString("key", "").trim()
+                        if (!site.equals("YouTube", ignoreCase = true) || key.isBlank()) continue
+                        val type = v.optString("type", "")
+                        val official = v.optBoolean("official", false)
+                        val score = when {
+                            type.equals("Trailer", ignoreCase = true) && official -> 100
+                            type.equals("Trailer", ignoreCase = true) -> 80
+                            type.equals("Teaser", ignoreCase = true) && official -> 60
+                            type.equals("Teaser", ignoreCase = true) -> 40
+                            else -> 10
+                        }
+                        if (score > bestScore) {
+                            bestScore = score
+                            trailerKey = key
+                        }
+                    }
+                }
+            }
+
+            // Parse similar / recommended items
+            val similarItems = mutableListOf<TmdbSimilarItem>()
+            val seenSimilar = HashSet<Int>()
+            fun collectSimilar(arr: JSONArray?) {
+                if (arr == null) return
+                for (i in 0 until arr.length()) {
+                    if (similarItems.size >= 12) return
+                    val s = arr.optJSONObject(i) ?: continue
+                    val sid = s.optInt("tmdbId", s.optInt("id", 0))
+                    if (sid <= 0 || !seenSimilar.add(sid)) continue
+                    val sIsSeries = s.optString("mediaType", s.optString("media_type", "")).let {
+                        if (it.isBlank()) isTv else it.equals("tv", ignoreCase = true) || it.equals("series", ignoreCase = true)
+                    }
+                    val sTitle = s.optString("title", s.optString("name", "")).trim()
+                    if (sTitle.isBlank()) continue
+                    val sDate = s.optString("releaseDate", s.optString("release_date", s.optString("first_air_date", ""))).trim()
+                    val sYear = s.optString("releaseYear", "").trim().ifBlank { sDate.take(4) }
+                    similarItems.add(
+                        TmdbSimilarItem(
+                            tmdbId = sid,
+                            title = sTitle,
+                            originalTitle = s.optString("originalTitle", s.optString("original_title", s.optString("original_name", ""))).trim(),
+                            posterUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                                s.optString("posterUrl", "").ifBlank { s.optString("poster_path", "") },
+                                size = "w500"
+                            ),
+                            backdropUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                                s.optString("backdropUrl", "").ifBlank { s.optString("backdrop_path", "") },
+                                size = "w1280"
+                            ),
+                            releaseYear = sYear,
+                            rating = s.optDouble("rating", s.optDouble("vote_average", 0.0)).let { if (it.isNaN()) 0.0 else it },
+                            isSeries = sIsSeries
+                        )
+                    )
+                }
+            }
+            collectSimilar(source.optJSONArray("similar"))
+            collectSimilar(source.optJSONObject("recommendations")?.optJSONArray("results"))
+            collectSimilar(source.optJSONObject("similar")?.optJSONArray("results"))
+
+            val releaseDate = source.optString("releaseDate", source.optString("release_date", source.optString("first_air_date", ""))).trim()
             val releaseYear = source.optString("releaseYear", source.optString("year", "")).trim()
                 .ifBlank { releaseDate.take(4) }
 
@@ -1621,21 +2025,38 @@ class TmdbProxyClient(
                 source.optString("original_title", source.optString("original_name", ""))
             ).trim()
 
+            val posterUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                source.optString("posterUrl", "").ifBlank { source.optString("poster_path", "") },
+                size = "w500"
+            )
+            val backdropUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                source.optString("backdropUrl", "").ifBlank { source.optString("backdrop_path", "") },
+                size = "w1280"
+            )
+
+            val castCsv = jsonFieldAsJoinedString(source, "cast").ifBlank {
+                castMembers.take(10).joinToString(", ") { it.name }
+            }
+
             return TmdbMediaMetadata(
                 tmdbId = tmdbId,
                 title = title,
                 overview = source.optString("overview", "").trim(),
-                posterUrl = source.optString("posterUrl", "").trim(),
-                backdropUrl = source.optString("backdropUrl", "").trim(),
-                rating = source.optDouble("rating", 0.0).let { if (it.isNaN()) 0.0 else it },
+                posterUrl = posterUrl,
+                backdropUrl = backdropUrl,
+                rating = source.optDouble("rating", source.optDouble("vote_average", 0.0)).let { if (it.isNaN()) 0.0 else it },
                 releaseYear = releaseYear,
                 releaseDate = releaseDate,
                 genres = jsonFieldAsJoinedString(source, "genres"),
-                cast = jsonFieldAsJoinedString(source, "cast"),
+                cast = castCsv,
                 director = source.optString("director", "").trim(),
-                runtimeMinutes = source.optInt("runtimeMinutes", 0),
+                runtimeMinutes = source.optInt("runtimeMinutes", source.optInt("runtime", 0)),
                 seasons = seasons,
-                originalTitle = originalTitle
+                originalTitle = originalTitle,
+                castMembers = castMembers,
+                trailerYoutubeKey = trailerKey,
+                similarItems = similarItems,
+                cachedAtMs = System.currentTimeMillis()
             )
         }
 
@@ -1650,7 +2071,10 @@ class TmdbProxyClient(
                         seasonNumber = obj.optInt("seasonNumber", defaultSeasonNum),
                         title = obj.optString("title", "Episode $epNum"),
                         overview = obj.optString("overview", ""),
-                        stillUrl = obj.optString("stillUrl", ""),
+                        stillUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                            obj.optString("stillUrl", "").ifBlank { obj.optString("still_path", "") },
+                            size = "w500"
+                        ),
                         rating = obj.optDouble("rating", 0.0).let { if (it.isNaN()) 0.0 else it },
                         durationSec = obj.optInt("durationSec", 0),
                         airDate = obj.optString("airDate", "")
@@ -1673,9 +2097,18 @@ class TmdbProxyClient(
                 validExistingPlot.ifEmpty { validTmdbOverview }
             }
 
+            val resolvedPoster = tmdb.posterUrl.ifBlank { item.streamIcon }
+            val existingRealBackdrop = if (TmdbMetadataMatcher.isValidBackdropUrl(item.backdrop, item.streamIcon)) {
+                TmdbMetadataMatcher.normalizeTmdbImageUrl(item.backdrop, size = "w1280")
+            } else {
+                ""
+            }
+            // Never copy portrait poster into backdrop so the UI can cleanly render blurred poster fallback
+            val resolvedBackdrop = tmdb.backdropUrl.ifBlank { existingRealBackdrop }
+
             return item.copy(
-                streamIcon = tmdb.posterUrl.ifBlank { item.streamIcon },
-                backdrop = tmdb.backdropUrl.ifBlank { tmdb.posterUrl.ifBlank { item.backdrop } },
+                streamIcon = resolvedPoster,
+                backdrop = resolvedBackdrop,
                 plot = resolvedPlot,
                 genre = tmdb.genres.ifBlank { item.genre },
                 rating = if (tmdb.rating > 0.0) tmdb.rating else item.rating,
@@ -1760,9 +2193,15 @@ class TmdbProxyClient(
                 validExistingPlot.ifEmpty { validTmdbOverview }
             }
 
+            val existingRealBackdrop = if (TmdbMetadataMatcher.isValidBackdropUrl(details.backdrop, details.cover)) {
+                TmdbMetadataMatcher.normalizeTmdbImageUrl(details.backdrop, size = "w1280")
+            } else {
+                ""
+            }
+
             return details.copy(
                 cover = metadata.posterUrl.ifBlank { details.cover },
-                backdrop = metadata.backdropUrl.ifBlank { metadata.posterUrl.ifBlank { details.backdrop } },
+                backdrop = metadata.backdropUrl.ifBlank { existingRealBackdrop },
                 plot = resolvedPlot,
                 cast = metadata.cast.ifBlank { details.cast },
                 director = metadata.director.ifBlank { details.director },

@@ -207,6 +207,11 @@ class MainActivity : ComponentActivity() {
                 val updateState by viewModel.updateState.collectAsState()
                 val tmdbAccountState by viewModel.tmdbAccountState.collectAsState()
                 val smartSyncState by viewModel.smartSyncState.collectAsState()
+                val tmdbDiagnosticsReport by viewModel.tmdbDiagnosticsReport.collectAsState()
+                val selectedMovieRichMetadata by viewModel.selectedMovieRichMetadata.collectAsState()
+                val selectedSeriesRichMetadata by viewModel.selectedSeriesRichMetadata.collectAsState()
+                val manualMatchCandidates by viewModel.manualMatchCandidates.collectAsState()
+                val isManualMatchSearching by viewModel.isManualMatchSearching.collectAsState()
                 val navigateToSettingsFromAuth by viewModel.navigateToSettingsFromAuth.collectAsState()
 
                 LaunchedEffect(navigateToSettingsFromAuth) {
@@ -672,7 +677,10 @@ class MainActivity : ComponentActivity() {
                                         smartSyncState = smartSyncState,
                                         onSyncNowClick = { viewModel.syncNowManual() },
                                         onFullRefreshClick = { viewModel.fullRefreshManual() },
-                                        onSyncSingleTypeClick = { type -> viewModel.syncSingleContentTypeManual(type) }
+                                        onSyncSingleTypeClick = { type -> viewModel.syncSingleContentTypeManual(type) },
+                                        tmdbDiagnosticsReport = tmdbDiagnosticsReport,
+                                        onTestTmdbConnectionClick = { viewModel.runTmdbConnectionDiagnostics() },
+                                        onRefreshTmdbMetadataClick = { viewModel.refreshTmdbMetadataManual() }
                                     )
                                 }
                             }
@@ -805,7 +813,17 @@ class MainActivity : ComponentActivity() {
                                 onBack = { viewModel.dismissMovieDetails() },
                                 watchHistory = watchHistory,
                                 isLoadingDetails = isMovieDetailsLoading,
-                                isArabic = userSettings.language.equals("Arabic", ignoreCase = true)
+                                isArabic = isArabic,
+                                richMetadata = selectedMovieRichMetadata,
+                                manualMatchCandidates = manualMatchCandidates,
+                                isManualMatchSearching = isManualMatchSearching,
+                                onSearchManualMatch = { q, y ->
+                                    viewModel.searchManualTmdbMatches(q, y, isSeries = false)
+                                },
+                                onApplyManualMatch = { candidate ->
+                                    viewModel.applyManualTmdbMatch(activeMovie, candidate)
+                                },
+                                onClearManualMatch = { viewModel.clearManualMatchState() }
                             )
                         }
                     }
@@ -844,7 +862,17 @@ class MainActivity : ComponentActivity() {
                                 onSeriesClick = { nextSeries ->
                                     viewModel.showMediaDetails(nextSeries)
                                 },
-                                isArabic = userSettings.language.equals("Arabic", ignoreCase = true)
+                                isArabic = isArabic,
+                                richMetadata = selectedSeriesRichMetadata,
+                                manualMatchCandidates = manualMatchCandidates,
+                                isManualMatchSearching = isManualMatchSearching,
+                                onSearchManualMatch = { q, y ->
+                                    viewModel.searchManualTmdbMatches(q, y, isSeries = true)
+                                },
+                                onApplyManualMatch = { candidate ->
+                                    viewModel.applyManualTmdbMatch(activeSeries, candidate)
+                                },
+                                onClearManualMatch = { viewModel.clearManualMatchState() }
                             )
                         }
                     }

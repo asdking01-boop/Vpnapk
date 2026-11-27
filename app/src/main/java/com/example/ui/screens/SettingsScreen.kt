@@ -41,6 +41,7 @@ import com.example.data.model.LiveChannelOrder
 import com.example.data.model.SubscriptionInfo
 import com.example.data.model.SubscriptionInfoHelper
 import com.example.data.model.SubscriptionStatus
+import com.example.data.api.TmdbDiagnosticsReport
 import com.example.data.model.TmdbAccountUiState
 import com.example.data.model.TmdbAuthStatus
 import com.example.data.model.TmdbSyncStatus
@@ -50,6 +51,7 @@ import com.example.sync.SmartSyncUiState
 import com.example.sync.SyncContentType
 import com.example.ui.components.KrasLogo
 import com.example.ui.components.SynchronizationSettingsCard
+import com.example.ui.components.TmdbDiagnosticsCard
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.premium.AppearanceExperienceSettingsCard
 import com.example.ui.premium.PlayerAmbientCinemaSettingsBlock
@@ -83,7 +85,10 @@ fun SettingsScreen(
     smartSyncState: SmartSyncUiState = SmartSyncUiState(),
     onSyncNowClick: () -> Unit = {},
     onFullRefreshClick: () -> Unit = {},
-    onSyncSingleTypeClick: (SyncContentType) -> Unit = {}
+    onSyncSingleTypeClick: (SyncContentType) -> Unit = {},
+    tmdbDiagnosticsReport: TmdbDiagnosticsReport = TmdbDiagnosticsReport(),
+    onTestTmdbConnectionClick: () -> Unit = {},
+    onRefreshTmdbMetadataClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -295,6 +300,19 @@ fun SettingsScreen(
                 onSyncNowClick = onSyncTmdbNowClick,
                 onToggleAutoSync = onToggleTmdbAutoSync,
                 onDisconnectClick = onDisconnectTmdbAccountClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+            )
+        }
+
+        // 1d. Settings -> TMDb -> Connection Diagnostics
+        item {
+            TmdbDiagnosticsCard(
+                report = tmdbDiagnosticsReport,
+                isArabic = isArabic,
+                onTestConnectionClick = onTestTmdbConnectionClick,
+                onRefreshMetadataClick = onRefreshTmdbMetadataClick,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 16.dp)

@@ -764,7 +764,7 @@ class XtreamClient(
                                         title = movieName,
                                         type = "MOVIE",
                                         posterUrl = streamIcon,
-                                        backdropUrl = streamIcon,
+                                        backdropUrl = "",
                                         categoryId = categoryId,
                                         categoryName = categoryName,
                                         rating = rating,
@@ -949,7 +949,7 @@ class XtreamClient(
                                         title = seriesName,
                                         type = "SERIES",
                                         posterUrl = cover,
-                                        backdropUrl = cover,
+                                        backdropUrl = "",
                                         categoryId = categoryId,
                                         categoryName = categoryName,
                                         rating = rating,
@@ -1189,11 +1189,12 @@ class XtreamClient(
             val streamIcon = info.optString("movie_image", movieData.optString("stream_icon", "")).trim()
 
             val backdropArr = info.optJSONArray("backdrop_path")
-            val backdrop = if (backdropArr != null && backdropArr.length() > 0) {
+            val rawBackdrop = if (backdropArr != null && backdropArr.length() > 0) {
                 backdropArr.optString(0, "").trim()
             } else {
                 info.optString("backdrop_path", "").trim()
             }
+            val backdrop = TmdbMetadataMatcher.normalizeTmdbImageUrl(rawBackdrop, size = "w1280")
 
             val plot = info.optString("plot", movieData.optString("plot", "")).trim()
             val cast = info.optString("cast", movieData.optString("cast", "")).trim()
@@ -1268,11 +1269,12 @@ class XtreamClient(
             val rating = info.optDouble("rating", 8.2)
 
             val backdropArr = info.optJSONArray("backdrop_path")
-            val backdrop = if (backdropArr != null && backdropArr.length() > 0) {
+            val rawBackdrop = if (backdropArr != null && backdropArr.length() > 0) {
                 backdropArr.optString(0, "").trim()
             } else {
                 info.optString("backdrop_path", "").trim()
             }
+            val backdrop = TmdbMetadataMatcher.normalizeTmdbImageUrl(rawBackdrop, size = "w1280")
 
             val youtubeTrailer = info.optString("youtube_trailer", "").trim()
             val tmdbId = info.optInt("tmdb_id", 0).let {

@@ -14,7 +14,9 @@
  */
 
 const TMDB_BASE_URL = "https://api.themoviedb.org/3";
+const TMDB_IMAGE_W185 = "https://image.tmdb.org/t/p/w185";
 const TMDB_IMAGE_W500 = "https://image.tmdb.org/t/p/w500";
+const TMDB_IMAGE_W1280 = "https://image.tmdb.org/t/p/w1280";
 const TMDB_IMAGE_ORIGINAL = "https://image.tmdb.org/t/p/original";
 const ANDROID_PACKAGE_NAME = "com.aistudio.krastv.vmzsqx";
 const DEFAULT_ANDROID_SHA256 =
@@ -2171,17 +2173,78 @@ async function handlePushRating(request, env) {
 // 3. Existing Movie, TV Series, Search, Season & Match Metadata Endpoints
 // ============================================================================
 
+function pickBestYoutubeTrailerKey(details) {
+  const videos = details && details.videos && Array.isArray(details.videos.results)
+    ? details.videos.results
+    : [];
+  const ytVideos = videos.filter(
+    (v) => v && String(v.site || "").toLowerCase() === "youtube" && String(v.key || "").trim().length > 0
+  );
+  if (ytVideos.length === 0) return "";
+  const scored = ytVideos.map((v) => {
+    const type = String(v.type || "").toLowerCase();
+    const official = v.official === true;
+    let score = 0;
+    if (type === "trailer") score += 100;
+    else if (type === "teaser") score += 60;
+    else if (type === "clip") score += 30;
+    else score += 10;
+    if (official) score += 25;
+    return { key: String(v.key).trim(), score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].key;
+}
+
+function formatSimilarList(details, mediaType) {
+  const isTv = mediaType === "tv";
+  const recs = details && details.recommendations && Array.isArray(details.recommendations.results)
+    ? details.recommendations.results
+    : [];
+  const sims = details && details.similar && Array.isArray(details.similar.results)
+    ? details.similar.results
+    : [];
+  const combined = [...recs, ...sims];
+  const seen = new Set();
+  const out = [];
+  for (const item of combined) {
+    if (!item || !item.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    const rDate = (isTv ? item.first_air_date : item.release_date) || "";
+    out.push({
+      tmdbId: Number(item.id),
+      title: (isTv ? item.name || item.title : item.title || item.name) || "",
+      originalTitle: (isTv ? item.original_name || item.original_title : item.original_title || item.original_name) || "",
+      posterUrl: item.poster_path ? `${TMDB_IMAGE_W500}${item.poster_path}` : "",
+      backdropUrl: item.backdrop_path ? `${TMDB_IMAGE_W1280}${item.backdrop_path}` : "",
+      releaseYear: rDate ? String(rDate).slice(0, 4) : "",
+      rating: typeof item.vote_average === "number" ? Number(item.vote_average.toFixed(1)) : 0.0,
+      mediaType
+    });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
 function formatMediaResponse(details, mediaType) {
   const isTv = mediaType === "tv";
   const credits = details.credits || {};
-  const castList = Array.isArray(credits.cast)
-    ? credits.cast.slice(0, 8).map((c) => c.name).filter(Boolean)
-    : [];
+  const rawCast = Array.isArray(credits.cast) ? credits.cast : [];
+  const castMembers = rawCast
+    .filter((c) => c && c.name)
+    .slice(0, 12)
+    .map((c) => ({
+      id: Number(c.id || 0),
+      name: String(c.name || "").trim(),
+      character: String(c.character || "").trim(),
+      profileUrl: c.profile_path ? `${TMDB_IMAGE_W185}${c.profile_path}` : ""
+    }));
+  const castList = castMembers.slice(0, 10).map((c) => c.name).filter(Boolean);
   const crewList = Array.isArray(credits.crew) ? credits.crew : [];
   const directorEntry = isTv
     ? Array.isArray(details.created_by) && details.created_by[0]
       ? details.created_by[0].name
-      : ""
+      : (crewList.find((c) => c.job === "Director" || c.job === "Executive Producer") || {}).name || ""
     : (crewList.find((c) => c.job === "Director") || {}).name || "";
 
   const genres = Array.isArray(details.genres)
@@ -2207,25 +2270,99 @@ function formatMediaResponse(details, mediaType) {
   const runtimeMinutes = isTv
     ? Array.isArray(details.episode_run_time) && details.episode_run_time[0]
       ? details.episode_run_time[0]
-      : 0
+      : (details.last_episode_to_air && details.last_episode_to_air.runtime) || 0
     : details.runtime || 0;
+
+  const trailerYoutubeKey = pickBestYoutubeTrailerKey(details);
+  const similar = formatSimilarList(details, mediaType);
 
   return {
     tmdbId: details.id,
     mediaType,
     title: (isTv ? details.name : details.title) || "",
+    originalTitle: (isTv ? details.original_name : details.original_title) || "",
     overview: details.overview || "",
     posterUrl: details.poster_path ? `${TMDB_IMAGE_W500}${details.poster_path}` : "",
-    backdropUrl: details.backdrop_path ? `${TMDB_IMAGE_ORIGINAL}${details.backdrop_path}` : "",
+    backdropUrl: details.backdrop_path ? `${TMDB_IMAGE_W1280}${details.backdrop_path}` : "",
+    backdropOriginalUrl: details.backdrop_path ? `${TMDB_IMAGE_ORIGINAL}${details.backdrop_path}` : "",
     rating: typeof details.vote_average === "number" ? Number(details.vote_average.toFixed(1)) : 0.0,
     releaseYear,
     releaseDate,
     genres,
     cast: castList,
+    castMembers,
     director: directorEntry || "",
     runtimeMinutes,
+    trailerYoutubeKey,
+    similar,
     seasons
   };
+}
+
+function normalizeMatchText(str) {
+  return String(str || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function selectBestSearchResult(results, query, year, mediaType) {
+  if (!Array.isArray(results) || results.length === 0) return null;
+  const isTv = mediaType === "tv";
+  const normQuery = normalizeMatchText(query);
+  const queryYearNum = year ? Number(year) : 0;
+
+  let bestItem = null;
+  let bestScore = -1;
+
+  for (const item of results.slice(0, 12)) {
+    const title = isTv ? item.name || item.title || "" : item.title || item.name || "";
+    const origTitle = isTv ? item.original_name || "" : item.original_title || "";
+    const rDate = (isTv ? item.first_air_date : item.release_date) || "";
+    const candYear = rDate ? Number(String(rDate).slice(0, 4)) : 0;
+
+    const normTitle = normalizeMatchText(title);
+    const normOrig = normalizeMatchText(origTitle);
+
+    let score = 0;
+    if (normQuery && (normTitle === normQuery || normOrig === normQuery)) {
+      score += 0.9;
+    } else if (
+      normQuery &&
+      (normTitle.includes(normQuery) || normQuery.includes(normTitle) || (normOrig && normOrig.includes(normQuery)))
+    ) {
+      score += 0.65;
+    } else {
+      const qTokens = new Set(normQuery.split(" ").filter(Boolean));
+      const tTokens = new Set((normTitle + " " + normOrig).split(" ").filter(Boolean));
+      let overlap = 0;
+      for (const tok of qTokens) {
+        if (tTokens.has(tok)) overlap++;
+      }
+      if (qTokens.size > 0) score += (overlap / qTokens.size) * 0.6;
+    }
+
+    if (queryYearNum > 0 && candYear > 0) {
+      const diff = Math.abs(queryYearNum - candYear);
+      if (diff === 0) score += 0.25;
+      else if (diff === 1) score += 0.12;
+      else if (diff > 2) score -= 0.4;
+    }
+
+    if (item.backdrop_path) score += 0.04;
+    if (item.poster_path) score += 0.03;
+    if (typeof item.popularity === "number") {
+      score += Math.min(0.08, item.popularity / 500);
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestItem = item;
+    }
+  }
+
+  return bestItem || results[0];
 }
 
 /**
@@ -2248,18 +2385,31 @@ async function handleDirectSearch(url, mediaType, env) {
     else searchParams.primary_release_year = year;
   }
 
-  const res = await tmdbFetch(searchPath, searchParams, env);
+  let res = await tmdbFetch(searchPath, searchParams, env);
+  if (
+    res.ok &&
+    year &&
+    (!res.data || !Array.isArray(res.data.results) || res.data.results.length === 0)
+  ) {
+    res = await tmdbFetch(searchPath, { query, language, page }, env);
+  }
   if (!res.ok) {
     return jsonResponse(
       { ok: false, error: res.error || "TMDb search failed" },
       res.status || 502
     );
   }
+  const rawResults = (res.data && Array.isArray(res.data.results) && res.data.results) || [];
+  const enrichedResults = rawResults.map((r) => ({
+    ...r,
+    posterUrl: r.poster_path ? `${TMDB_IMAGE_W500}${r.poster_path}` : "",
+    backdropUrl: r.backdrop_path ? `${TMDB_IMAGE_W1280}${r.backdrop_path}` : ""
+  }));
   return jsonResponse({
     ok: true,
     status: "ok",
-    data: res.data,
-    results: (res.data && res.data.results) || []
+    data: { ...(res.data || {}), results: enrichedResults },
+    results: enrichedResults
   });
 }
 
@@ -2273,19 +2423,35 @@ async function handleMetadataLookup(url, mediaType, env, explicitId = 0) {
 
   if (!targetId && query) {
     const searchPath = mediaType === "tv" ? "/search/tv" : "/search/movie";
-    const searchParams = { query, language };
+    const attempts = [];
     if (year) {
-      if (mediaType === "tv") searchParams.first_air_date_year = year;
-      else searchParams.primary_release_year = year;
+      attempts.push({ query, language, year });
     }
-    const searchRes = await tmdbFetch(searchPath, searchParams, env);
-    if (
-      searchRes.ok &&
-      searchRes.data &&
-      Array.isArray(searchRes.data.results) &&
-      searchRes.data.results.length > 0
-    ) {
-      targetId = searchRes.data.results[0].id;
+    attempts.push({ query, language, year: "" });
+    if (language.toLowerCase() !== "en-us") {
+      if (year) attempts.push({ query, language: "en-US", year });
+      attempts.push({ query, language: "en-US", year: "" });
+    }
+
+    for (const attempt of attempts) {
+      const searchParams = { query: attempt.query, language: attempt.language };
+      if (attempt.year) {
+        if (mediaType === "tv") searchParams.first_air_date_year = attempt.year;
+        else searchParams.primary_release_year = attempt.year;
+      }
+      const searchRes = await tmdbFetch(searchPath, searchParams, env);
+      if (
+        searchRes.ok &&
+        searchRes.data &&
+        Array.isArray(searchRes.data.results) &&
+        searchRes.data.results.length > 0
+      ) {
+        const best = selectBestSearchResult(searchRes.data.results, query, year, mediaType);
+        if (best && best.id) {
+          targetId = Number(best.id);
+          break;
+        }
+      }
     }
   }
 
@@ -2296,7 +2462,7 @@ async function handleMetadataLookup(url, mediaType, env, explicitId = 0) {
   const detailPath = mediaType === "tv" ? `/tv/${targetId}` : `/movie/${targetId}`;
   const detailRes = await tmdbFetch(
     detailPath,
-    { language, append_to_response: "credits" },
+    { language, append_to_response: "credits,videos,similar,recommendations" },
     env
   );
 
@@ -2304,7 +2470,38 @@ async function handleMetadataLookup(url, mediaType, env, explicitId = 0) {
     return jsonResponse({ ok: false, error: "Failed to fetch TMDb details" }, detailRes.status || 404);
   }
 
-  const formatted = formatMediaResponse(detailRes.data, mediaType);
+  let formatted = formatMediaResponse(detailRes.data, mediaType);
+
+  // Automatic Arabic -> English fallback for missing overview, trailer, or similar items
+  if (
+    language.toLowerCase().startsWith("ar") &&
+    (!formatted.overview || !formatted.trailerYoutubeKey || formatted.similar.length === 0)
+  ) {
+    const enRes = await tmdbFetch(
+      detailPath,
+      { language: "en-US", append_to_response: "credits,videos,similar,recommendations" },
+      env
+    );
+    if (enRes.ok && enRes.data) {
+      const enFormatted = formatMediaResponse(enRes.data, mediaType);
+      formatted = {
+        ...formatted,
+        overview: formatted.overview || enFormatted.overview,
+        originalTitle: formatted.originalTitle || enFormatted.originalTitle,
+        posterUrl: formatted.posterUrl || enFormatted.posterUrl,
+        backdropUrl: formatted.backdropUrl || enFormatted.backdropUrl,
+        backdropOriginalUrl: formatted.backdropOriginalUrl || enFormatted.backdropOriginalUrl,
+        genres: formatted.genres.length > 0 ? formatted.genres : enFormatted.genres,
+        cast: formatted.cast.length > 0 ? formatted.cast : enFormatted.cast,
+        castMembers: formatted.castMembers.length > 0 ? formatted.castMembers : enFormatted.castMembers,
+        director: formatted.director || enFormatted.director,
+        trailerYoutubeKey: formatted.trailerYoutubeKey || enFormatted.trailerYoutubeKey,
+        similar: formatted.similar.length > 0 ? formatted.similar : enFormatted.similar,
+        seasons: formatted.seasons.length > 0 ? formatted.seasons : enFormatted.seasons
+      };
+    }
+  }
+
   return jsonResponse({
     ok: true,
     status: "ok",

@@ -603,14 +603,14 @@ class TmdbDirectClient(
         val cacheKey = "$typeKey:$tmdbId:${language.lowercase()}"
         detailsCache[cacheKey]?.let { return@withContext it }
 
-        val url = "$TMDB_BASE_URL/$typeKey/$tmdbId?api_key=${URLEncoder.encode(cleanKey, "UTF-8")}" +
-            "&append_to_response=credits&language=${URLEncoder.encode(language, "UTF-8")}"
-
-        val request = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .get()
-            .build()
+        val request = buildAuthorizedGetRequest(
+            path = "/$typeKey/$tmdbId",
+            apiKeyOrBearer = cleanKey,
+            queryParams = mapOf(
+                "append_to_response" to "credits,videos,similar,recommendations",
+                "language" to language
+            )
+        )
 
         try {
             httpClient.newCall(request).execute().use { resp ->
@@ -624,6 +624,260 @@ class TmdbDirectClient(
         } catch (_: Exception) {
             null
         }
+    }
+
+    /**
+     * Fetches season episode metadata (titles, synopses, still images, ratings, runtimes)
+     * directly from TMDb v3 (`/tv/{id}/season/{seasonNumber}`).
+     */
+    suspend fun fetchTvSeasonEpisodes(
+        apiKey: String,
+        tvId: Int,
+        seasonNumber: Int,
+        language: String = "en-US"
+    ): List<TmdbEpisodeMetadata> = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isEmpty() || tvId <= 0 || seasonNumber < 1) return@withContext emptyList()
+
+        val request = buildAuthorizedGetRequest(
+            path = "/tv/$tvId/season/$seasonNumber",
+            apiKeyOrBearer = cleanKey,
+            queryParams = mapOf("language" to language)
+        )
+        try {
+            httpClient.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext emptyList()
+                val json = parseJsonObjectSafe(resp.body?.string().orEmpty()) ?: return@withContext emptyList()
+                val epArr = json.optJSONArray("episodes") ?: return@withContext emptyList()
+                val out = mutableListOf<TmdbEpisodeMetadata>()
+                for (i in 0 until epArr.length()) {
+                    val ep = epArr.optJSONObject(i) ?: continue
+                    val epNum = ep.optInt("episode_number", i + 1)
+                    val runtimeMin = ep.optInt("runtime", 0)
+                    out.add(
+                        TmdbEpisodeMetadata(
+                            episodeNumber = epNum,
+                            seasonNumber = ep.optInt("season_number", seasonNumber),
+                            title = ep.optString("name", "Episode $epNum").trim(),
+                            overview = ep.optString("overview", "").trim(),
+                            stillUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(ep.optString("still_path", ""), size = "w500"),
+                            rating = ep.optDouble("vote_average", 0.0).let { if (it.isNaN()) 0.0 else it },
+                            durationSec = if (runtimeMin > 0) runtimeMin * 60 else 0,
+                            airDate = ep.optString("air_date", "").trim()
+                        )
+                    )
+                }
+                out
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Searches TMDb candidates directly across cleaned bilingual query variants for both
+     * smart auto-matching and manual TMDb match selection.
+     */
+    suspend fun searchCandidates(
+        apiKey: String,
+        rawQuery: String,
+        year: String = "",
+        isSeries: Boolean = false,
+        preferArabic: Boolean = false
+    ): List<TmdbSearchCandidate> = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isEmpty() || rawQuery.isBlank()) return@withContext emptyList()
+
+        val cleaned = TmdbMetadataMatcher.cleanIptvTitle(rawQuery)
+        val effectiveYear = year.filter { it.isDigit() }.take(4).ifBlank { cleaned.extractedYear }
+        val queryVariants = TmdbMetadataMatcher.buildSearchQueries(rawQuery)
+            .ifEmpty { listOf(rawQuery.trim()) }
+            .take(3)
+        val endpoint = if (isSeries) "/search/tv" else "/search/movie"
+        val languages = if (preferArabic) listOf("ar", "en-US") else listOf("en-US")
+        val byId = LinkedHashMap<Int, TmdbSearchCandidate>()
+
+        fun runOne(q: String, lang: String, includeYear: Boolean) {
+            val params = LinkedHashMap<String, String>()
+            params["query"] = q
+            params["language"] = lang
+            params["include_adult"] = "false"
+            if (includeYear && effectiveYear.length == 4) {
+                if (isSeries) params["first_air_date_year"] = effectiveYear else params["year"] = effectiveYear
+            }
+            val request = buildAuthorizedGetRequest(endpoint, cleanKey, params)
+            try {
+                httpClient.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) return
+                    val json = parseJsonObjectSafe(resp.body?.string().orEmpty()) ?: return
+                    val results = json.optJSONArray("results") ?: return
+                    for (i in 0 until results.length().coerceAtMost(15)) {
+                        val obj = results.optJSONObject(i) ?: continue
+                        val id = obj.optInt("id", 0)
+                        if (id <= 0) continue
+                        val title = if (isSeries) obj.optString("name", "").trim() else obj.optString("title", "").trim()
+                        val origTitle = if (isSeries) obj.optString("original_name", "").trim() else obj.optString("original_title", "").trim()
+                        val displayTitle = title.ifBlank { origTitle }
+                        if (displayTitle.isBlank()) continue
+                        val rDate = if (isSeries) obj.optString("first_air_date", "") else obj.optString("release_date", "")
+                        val candYear = rDate.take(4)
+                        val posterUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(obj.optString("poster_path", ""), size = "w500")
+                        val backdropUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(obj.optString("backdrop_path", ""), size = "w1280")
+                        val rating = obj.optDouble("vote_average", 0.0).let { if (it.isNaN()) 0.0 else it }
+                        val overview = TmdbMetadataMatcher.cleanSynopsisFormatting(obj.optString("overview", ""))
+                        val confidence = TmdbMetadataMatcher.scoreCandidateMatch(
+                            queryTitle = rawQuery,
+                            queryYear = effectiveYear,
+                            candidateTitle = title,
+                            candidateOriginalTitle = origTitle,
+                            candidateYear = candYear
+                        )
+                        val candidate = TmdbSearchCandidate(
+                            tmdbId = id,
+                            title = displayTitle,
+                            originalTitle = origTitle,
+                            releaseYear = candYear,
+                            overview = overview,
+                            posterUrl = posterUrl,
+                            backdropUrl = backdropUrl,
+                            rating = rating,
+                            isSeries = isSeries,
+                            confidenceScore = confidence
+                        )
+                        val existing = byId[id]
+                        if (existing == null || candidate.confidenceScore > existing.confidenceScore ||
+                            (existing.overview.isBlank() && candidate.overview.isNotBlank())
+                        ) {
+                            byId[id] = if (existing != null) {
+                                candidate.copy(
+                                    overview = candidate.overview.ifBlank { existing.overview },
+                                    posterUrl = candidate.posterUrl.ifBlank { existing.posterUrl },
+                                    backdropUrl = candidate.backdropUrl.ifBlank { existing.backdropUrl },
+                                    confidenceScore = maxOf(candidate.confidenceScore, existing.confidenceScore)
+                                )
+                            } else {
+                                candidate
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        for (q in queryVariants) {
+            for (lang in languages) {
+                if (effectiveYear.length == 4) runOne(q, lang, includeYear = true)
+                if (byId.values.none { it.confidenceScore >= 0.85 }) runOne(q, lang, includeYear = false)
+            }
+            if (byId.values.any { it.confidenceScore >= 0.92 }) break
+        }
+
+        byId.values.sortedWith(
+            compareByDescending<TmdbSearchCandidate> { it.confidenceScore }
+                .thenByDescending { it.backdropUrl.isNotBlank() }
+                .thenByDescending { it.rating }
+        ).take(15)
+    }
+
+    /**
+     * Tests direct TMDb API metadata authorization (`/configuration`) independently of user account auth.
+     * Supports both v3 API keys and v4 Bearer Read Access Tokens. Never logs or returns credentials.
+     */
+    suspend fun testApiConnectivity(apiKey: String): TmdbDiagnosticCheck = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isEmpty()) {
+            return@withContext TmdbDiagnosticCheck(
+                status = TmdbDiagnosticStatus.NOT_CONFIGURED,
+                summary = "No direct API key saved (using KRAS TMDb Proxy)"
+            )
+        }
+        val start = System.currentTimeMillis()
+        try {
+            val req = buildAuthorizedGetRequest("/configuration", cleanKey)
+            httpClient.newCall(req).execute().use { resp ->
+                val latency = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+                if (resp.isSuccessful) {
+                    val mode = if (isBearerToken(cleanKey)) "v4 Bearer" else "v3 API Key"
+                    TmdbDiagnosticCheck(
+                        status = TmdbDiagnosticStatus.PASSED,
+                        summary = "Connected via $mode (${latency}ms)",
+                        httpCode = resp.code,
+                        latencyMs = latency
+                    )
+                } else {
+                    val body = resp.body?.string().orEmpty()
+                    val apiMsg = parseJsonObjectSafe(body)?.optString("status_message", "").orEmpty()
+                    val detail = when (resp.code) {
+                        401 -> "Unauthorized (HTTP 401): Invalid TMDb API key or token"
+                        429 -> "Rate limited (HTTP 429): Too many requests"
+                        else -> "HTTP ${resp.code}${if (apiMsg.isNotBlank()) ": ${TmdbErrorSanitizer.sanitize(apiMsg)}" else ""}"
+                    }
+                    TmdbDiagnosticCheck(
+                        status = TmdbDiagnosticStatus.FAILED,
+                        summary = detail,
+                        httpCode = resp.code,
+                        latencyMs = latency
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            val latency = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+            TmdbDiagnosticCheck(
+                status = TmdbDiagnosticStatus.FAILED,
+                summary = TmdbErrorSanitizer.sanitize(e.localizedMessage ?: e.javaClass.simpleName),
+                latencyMs = latency
+            )
+        }
+    }
+
+    fun clearMemoryCaches() {
+        detailsCache.clear()
+        searchMatchCache.clear()
+        negativeLookupCache.clear()
+        trailerKeyCache.clear()
+    }
+
+    private fun isBearerToken(key: String): Boolean {
+        val k = key.trim()
+        return k.startsWith("eyJ") || k.length > 48
+    }
+
+    private fun buildAuthorizedGetRequest(
+        path: String,
+        apiKeyOrBearer: String,
+        queryParams: Map<String, String> = emptyMap()
+    ): Request {
+        val cleanKey = apiKeyOrBearer.trim()
+        val useBearer = isBearerToken(cleanKey)
+        val sb = StringBuilder("$TMDB_BASE_URL$path")
+        var hasQuery = path.contains("?")
+        fun appendParam(k: String, v: String) {
+            sb.append(if (hasQuery) '&' else '?')
+            hasQuery = true
+            val encodedValue = if (k == "append_to_response") {
+                URLEncoder.encode(v, "UTF-8").replace("%2C", ",")
+            } else {
+                URLEncoder.encode(v, "UTF-8")
+            }
+            sb.append(URLEncoder.encode(k, "UTF-8"))
+                .append('=')
+                .append(encodedValue)
+        }
+        if (!useBearer) {
+            appendParam("api_key", cleanKey)
+        }
+        for ((k, v) in queryParams) {
+            if (v.isNotBlank()) appendParam(k, v)
+        }
+        val builder = Request.Builder()
+            .url(sb.toString())
+            .header("Accept", "application/json")
+            .get()
+        if (useBearer) {
+            builder.header("Authorization", "Bearer $cleanKey")
+        }
+        return builder.build()
     }
 
     /**
@@ -660,29 +914,18 @@ class TmdbDirectClient(
             return@withContext null
         }
 
-        // Resolve verified TMDb ID (direct ID when provided, else strict search match)
+        // Resolve verified TMDb ID (direct ID when provided, else strict bilingual candidate search)
         val resolvedId = if (tmdbId > 0) {
             tmdbId
         } else {
-            val matched = searchAndMatchMedia(
+            val candidates = searchCandidates(
                 apiKey = cleanKey,
-                rawTitle = effectiveTitle,
+                rawQuery = rawTitle,
                 year = effectiveYear,
                 isSeries = isSeries,
-                language = primaryLang
-            ) ?: if (preferArabic) {
-                // Retry search in English if localized Arabic search returned no confident hit
-                searchAndMatchMedia(
-                    apiKey = cleanKey,
-                    rawTitle = effectiveTitle,
-                    year = effectiveYear,
-                    isSeries = isSeries,
-                    language = "en-US"
-                )
-            } else {
-                null
-            }
-            matched?.tmdbId ?: 0
+                preferArabic = preferArabic
+            )
+            candidates.firstOrNull { it.confidenceScore > 0.0 }?.tmdbId ?: 0
         }
 
         if (resolvedId <= 0) {
@@ -699,7 +942,13 @@ class TmdbDirectClient(
 
         val finalMetadata = if (preferArabic) {
             val primaryValidOverview = TmdbMetadataMatcher.sanitizeSynopsis(primaryDetails?.overview, effectiveTitle)
-            if (primaryDetails != null && primaryValidOverview.isNotEmpty()) {
+            val needsEnglishMerge = primaryDetails == null ||
+                primaryValidOverview.isEmpty() ||
+                primaryDetails.backdropUrl.isBlank() ||
+                primaryDetails.trailerYoutubeKey.isBlank() ||
+                primaryDetails.castMembers.isEmpty() ||
+                primaryDetails.similarItems.isEmpty()
+            if (!needsEnglishMerge && primaryDetails != null) {
                 primaryDetails.copy(overview = primaryValidOverview)
             } else {
                 val englishDetails = fetchMediaDetailsById(
@@ -907,11 +1156,27 @@ class TmdbDirectClient(
 
         val credits = json.optJSONObject("credits")
         val castArr = credits?.optJSONArray("cast")
+        val castMembers = mutableListOf<TmdbCastMember>()
         val castList = mutableListOf<String>()
         if (castArr != null) {
-            for (i in 0 until castArr.length().coerceAtMost(8)) {
-                val name = castArr.optJSONObject(i)?.optString("name", "")?.trim().orEmpty()
-                if (name.isNotEmpty()) castList.add(name)
+            for (i in 0 until castArr.length().coerceAtMost(12)) {
+                val cObj = castArr.optJSONObject(i) ?: continue
+                val name = cObj.optString("name", "").trim()
+                if (name.isNotEmpty()) {
+                    val profileUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(
+                        cObj.optString("profile_path", ""),
+                        size = "w185"
+                    )
+                    castMembers.add(
+                        TmdbCastMember(
+                            id = cObj.optInt("id", 0),
+                            name = name,
+                            character = cObj.optString("character", "").trim(),
+                            profileUrl = profileUrl
+                        )
+                    )
+                    if (castList.size < 10) castList.add(name)
+                }
             }
         }
 
@@ -942,7 +1207,8 @@ class TmdbDirectClient(
 
         val runtimeMinutes = if (isSeries) {
             val epRunTimes = json.optJSONArray("episode_run_time")
-            if (epRunTimes != null && epRunTimes.length() > 0) epRunTimes.optInt(0, 0) else 0
+            val fromArr = if (epRunTimes != null && epRunTimes.length() > 0) epRunTimes.optInt(0, 0) else 0
+            if (fromArr > 0) fromArr else json.optJSONObject("last_episode_to_air")?.optInt("runtime", 0) ?: 0
         } else {
             json.optInt("runtime", 0)
         }
@@ -955,14 +1221,14 @@ class TmdbDirectClient(
                     val sObj = seasonsArr.optJSONObject(i) ?: continue
                     val sNum = sObj.optInt("season_number", 0)
                     if (sNum >= 1) {
-                        val sPoster = sObj.optString("poster_path", "").takeIf { it != "null" && it.isNotBlank() }.orEmpty()
+                        val sPoster = TmdbMetadataMatcher.normalizeTmdbImageUrl(sObj.optString("poster_path", ""), size = "w500")
                         seasonsList.add(
                             TmdbSeasonSummary(
                                 seasonNumber = sNum,
                                 name = sObj.optString("name", "Season $sNum").trim(),
                                 episodeCount = sObj.optInt("episode_count", 0),
                                 overview = sObj.optString("overview", "").trim(),
-                                posterUrl = if (sPoster.isNotEmpty()) "https://image.tmdb.org/t/p/w500$sPoster" else "",
+                                posterUrl = sPoster,
                                 airDate = sObj.optString("air_date", "").trim()
                             )
                         )
@@ -970,6 +1236,66 @@ class TmdbDirectClient(
                 }
             }
         }
+
+        // Official YouTube trailer key from appended videos
+        var trailerYoutubeKey = ""
+        val videosArr = json.optJSONObject("videos")?.optJSONArray("results")
+        if (videosArr != null) {
+            var bestScore = -1
+            for (i in 0 until videosArr.length()) {
+                val obj = videosArr.optJSONObject(i) ?: continue
+                val site = obj.optString("site", "")
+                val key = obj.optString("key", "").trim()
+                if (!site.equals("YouTube", ignoreCase = true) || key.isBlank()) continue
+                val type = obj.optString("type", "")
+                val official = obj.optBoolean("official", false)
+                val score = when {
+                    type.equals("Trailer", ignoreCase = true) && official -> 100
+                    type.equals("Trailer", ignoreCase = true) -> 80
+                    type.equals("Teaser", ignoreCase = true) && official -> 60
+                    type.equals("Teaser", ignoreCase = true) -> 40
+                    else -> 10
+                }
+                if (score > bestScore) {
+                    bestScore = score
+                    trailerYoutubeKey = key
+                }
+            }
+        }
+
+        // Similar & recommended titles
+        val similarItems = mutableListOf<TmdbSimilarItem>()
+        val seenSimilar = HashSet<Int>()
+        fun collectSimilar(arr: JSONArray?) {
+            if (arr == null) return
+            for (i in 0 until arr.length()) {
+                if (similarItems.size >= 12) return
+                val s = arr.optJSONObject(i) ?: continue
+                val sid = s.optInt("id", 0)
+                if (sid <= 0 || !seenSimilar.add(sid)) continue
+                val sTitle = if (isSeries) {
+                    s.optString("name", "").trim().ifBlank { s.optString("original_name", "").trim() }
+                } else {
+                    s.optString("title", "").trim().ifBlank { s.optString("original_title", "").trim() }
+                }
+                if (sTitle.isBlank()) continue
+                val sDate = if (isSeries) s.optString("first_air_date", "") else s.optString("release_date", "")
+                similarItems.add(
+                    TmdbSimilarItem(
+                        tmdbId = sid,
+                        title = sTitle,
+                        originalTitle = if (isSeries) s.optString("original_name", "").trim() else s.optString("original_title", "").trim(),
+                        posterUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(s.optString("poster_path", ""), size = "w500"),
+                        backdropUrl = TmdbMetadataMatcher.normalizeTmdbImageUrl(s.optString("backdrop_path", ""), size = "w1280"),
+                        releaseYear = sDate.take(4),
+                        rating = s.optDouble("vote_average", 0.0).let { if (it.isNaN()) 0.0 else it },
+                        isSeries = isSeries
+                    )
+                )
+            }
+        }
+        collectSimilar(json.optJSONObject("recommendations")?.optJSONArray("results"))
+        collectSimilar(json.optJSONObject("similar")?.optJSONArray("results"))
 
         val rawOverview = json.optString("overview", "").trim()
         val rating = json.optDouble("vote_average", 0.0).let { if (it.isNaN()) 0.0 else it }
@@ -988,7 +1314,11 @@ class TmdbDirectClient(
             director = director,
             runtimeMinutes = runtimeMinutes,
             seasons = seasonsList,
-            originalTitle = originalTitle
+            originalTitle = originalTitle,
+            castMembers = castMembers,
+            trailerYoutubeKey = trailerYoutubeKey,
+            similarItems = similarItems,
+            cachedAtMs = System.currentTimeMillis()
         )
     }
 
@@ -1011,13 +1341,16 @@ class TmdbDirectClient(
             backdropUrl = preferred.backdropUrl.ifBlank { fallback.backdropUrl },
             genres = preferred.genres.ifBlank { fallback.genres },
             cast = preferred.cast.ifBlank { fallback.cast },
+            castMembers = preferred.castMembers.ifEmpty { fallback.castMembers },
             director = preferred.director.ifBlank { fallback.director },
             releaseYear = preferred.releaseYear.ifBlank { fallback.releaseYear },
             releaseDate = preferred.releaseDate.ifBlank { fallback.releaseDate },
             rating = if (preferred.rating > 0.0) preferred.rating else fallback.rating,
             runtimeMinutes = if (preferred.runtimeMinutes > 0) preferred.runtimeMinutes else fallback.runtimeMinutes,
             seasons = preferred.seasons.ifEmpty { fallback.seasons },
-            originalTitle = preferred.originalTitle.ifBlank { fallback.originalTitle }
+            originalTitle = preferred.originalTitle.ifBlank { fallback.originalTitle },
+            trailerYoutubeKey = preferred.trailerYoutubeKey.ifBlank { fallback.trailerYoutubeKey },
+            similarItems = preferred.similarItems.ifEmpty { fallback.similarItems }
         )
     }
 

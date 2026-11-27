@@ -9,15 +9,22 @@ import com.example.BuildConfig
 import com.example.KrasApplication
 import com.example.data.api.M3uPlaylistParser
 import com.example.data.api.TmdbConnectionState
+import com.example.data.api.TmdbDiagnosticCheck
+import com.example.data.api.TmdbDiagnosticStatus
+import com.example.data.api.TmdbDiagnosticsReport
 import com.example.data.api.TmdbDirectClient
+import com.example.data.api.TmdbErrorSanitizer
 import com.example.data.api.TmdbHealthResult
 import com.example.data.api.TmdbMediaMetadata
 import com.example.data.api.TmdbMetadataMatcher
 import com.example.data.api.TmdbProxyClient
+import com.example.data.api.TmdbSearchCandidate
 import com.example.data.api.XtreamClient
 import com.example.data.local.ChannelNameNormalizer
 import com.example.data.local.KrasRepository
+import com.example.data.local.ManualTmdbBinding
 import com.example.data.local.QualityDetector
+import com.example.data.local.TmdbMetadataCacheStore
 import com.example.data.local.TmdbSecureSessionStore
 import com.example.data.local.entity.CategoryEntity
 import com.example.data.local.entity.MediaItemEntity
@@ -55,6 +62,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val smartSyncEngine = SmartSyncEngine.getInstance(application)
     private val repository = smartSyncEngine.repository
     private val tmdbSessionStore = TmdbSecureSessionStore(application)
+    private val tmdbCacheStore = TmdbMetadataCacheStore(application)
     private val apiClient = XtreamClient()
     private val tmdbProxyClient = TmdbProxyClient()
     private val tmdbDirectClient = TmdbDirectClient()
@@ -82,6 +90,34 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     // TMDb Account & Two-Way Sync UI State (never exposes passwords or logs credentials)
     private val _tmdbAccountState = MutableStateFlow(TmdbAccountUiState())
     val tmdbAccountState = _tmdbAccountState.asStateFlow()
+
+    // Rich TMDb metadata (cast with actor photos, official trailer key, similar items) for Details screens
+    private val _selectedMovieRichMetadata = MutableStateFlow<TmdbMediaMetadata?>(null)
+    val selectedMovieRichMetadata = _selectedMovieRichMetadata.asStateFlow()
+
+    private val _selectedSeriesRichMetadata = MutableStateFlow<TmdbMediaMetadata?>(null)
+    val selectedSeriesRichMetadata = _selectedSeriesRichMetadata.asStateFlow()
+
+    // Manual TMDb Match Picker state
+    private val _manualMatchCandidates = MutableStateFlow<List<TmdbSearchCandidate>>(emptyList())
+    val manualMatchCandidates = _manualMatchCandidates.asStateFlow()
+
+    private val _isManualMatchSearching = MutableStateFlow(false)
+    val isManualMatchSearching = _isManualMatchSearching.asStateFlow()
+
+    private var manualMatchJob: Job? = null
+    private var diagnosticsJob: Job? = null
+
+    // Settings -> TMDb -> Connection Diagnostics state
+    private val _tmdbDiagnosticsReport = MutableStateFlow(
+        TmdbDiagnosticsReport(
+            lastSuccessfulRequestMs = tmdbCacheStore.getLastSuccessfulRequestMs(),
+            lastErrorMessage = tmdbCacheStore.getLastSanitizedError(),
+            cachedMetadataCount = tmdbCacheStore.getCachedEntryCount(),
+            manualMatchCount = tmdbCacheStore.getManualMatchCount()
+        )
+    )
+    val tmdbDiagnosticsReport = _tmdbDiagnosticsReport.asStateFlow()
 
     // Accounts
     private val _accounts = MutableStateFlow<List<Account>>(emptyList())
@@ -1255,7 +1291,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             if (health.state != TmdbConnectionState.CONNECTED) return@withContext false
         }
 
-        val preferArabic = settings.language.equals("Arabic", ignoreCase = true)
+        val preferArabic = SubscriptionInfoHelper.isArabicLanguage(settings.language)
 
         try {
             val moviesToEnrich = (
@@ -1893,12 +1929,31 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         mediaItem: MediaItem,
         forceRefresh: Boolean = false
     ): MediaItem = withContext(Dispatchers.IO) {
-        val preferArabic = _userSettings.value.language.equals("Arabic", ignoreCase = true)
+        val preferArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
         val langKey = if (preferArabic) "ar" else "en"
         val cacheKey = "${mediaItem.id}:$langKey"
+        val isSeries = mediaItem.type == MediaType.SERIES
 
-        if (!forceRefresh) {
-            enrichedMediaDetailsCache[cacheKey]?.let { return@withContext it }
+        val manualBinding = tmdbCacheStore.getManualBinding(mediaItem.id)
+        val existingExactRich = tmdbCacheStore.getExactLanguageForMediaItem(
+            mediaItemId = mediaItem.id,
+            tmdbId = manualBinding?.tmdbId ?: mediaItem.tmdbId,
+            isSeries = isSeries,
+            preferArabic = preferArabic
+        )
+
+        if (!forceRefresh &&
+            existingExactRich != null &&
+            !tmdbCacheStore.isStale(existingExactRich) &&
+            tmdbCacheStore.isRichMetadataComplete(existingExactRich)
+        ) {
+            enrichedMediaDetailsCache[cacheKey]?.let { cached ->
+                if (TmdbMetadataMatcher.isValidBackdropUrl(cached.backdrop, cached.streamIcon) ||
+                    existingExactRich.backdropUrl.isBlank()
+                ) {
+                    return@withContext cached
+                }
+            }
         }
 
         // Start by merging any previously persisted metadata from Room
@@ -1906,9 +1961,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         var working = if (persisted != null) {
             val persistedPlot = TmdbMetadataMatcher.sanitizeSynopsis(persisted.plot, mediaItem.name)
             val currentPlot = TmdbMetadataMatcher.sanitizeSynopsis(mediaItem.plot, mediaItem.name)
+            val validCurrentBackdrop = mediaItem.backdrop.takeIf {
+                TmdbMetadataMatcher.isValidBackdropUrl(it, mediaItem.streamIcon)
+            }.orEmpty()
+            val validPersistedBackdrop = persisted.backdrop.takeIf {
+                TmdbMetadataMatcher.isValidBackdropUrl(it, persisted.streamIcon.ifBlank { mediaItem.streamIcon })
+            }.orEmpty()
             mediaItem.copy(
                 streamIcon = mediaItem.streamIcon.ifBlank { persisted.streamIcon },
-                backdrop = mediaItem.backdrop.ifBlank { persisted.backdrop },
+                backdrop = validCurrentBackdrop.ifBlank { validPersistedBackdrop },
                 plot = currentPlot.ifEmpty { persistedPlot },
                 genre = mediaItem.genre.ifBlank { persisted.genre },
                 cast = mediaItem.cast.ifBlank { persisted.cast },
@@ -1916,10 +1977,16 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 duration = mediaItem.duration.ifBlank { persisted.duration },
                 year = mediaItem.year.ifBlank { persisted.year },
                 rating = if (mediaItem.rating > 0.0) mediaItem.rating else persisted.rating,
-                tmdbId = if (mediaItem.tmdbId > 0) mediaItem.tmdbId else persisted.tmdbId
+                tmdbId = manualBinding?.tmdbId ?: if (mediaItem.tmdbId > 0) mediaItem.tmdbId else persisted.tmdbId
             )
         } else {
-            mediaItem.copy(plot = TmdbMetadataMatcher.sanitizeSynopsis(mediaItem.plot, mediaItem.name))
+            mediaItem.copy(
+                backdrop = mediaItem.backdrop.takeIf {
+                    TmdbMetadataMatcher.isValidBackdropUrl(it, mediaItem.streamIcon)
+                }.orEmpty(),
+                plot = TmdbMetadataMatcher.sanitizeSynopsis(mediaItem.plot, mediaItem.name),
+                tmdbId = manualBinding?.tmdbId ?: mediaItem.tmdbId
+            )
         }
 
         // Step 1: Fetch real Xtream VOD details first for Movies on Xtream accounts
@@ -1945,9 +2012,12 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 if (vodDetails != null) {
                     val validXtreamPlot = TmdbMetadataMatcher.sanitizeSynopsis(vodDetails.plot, working.name)
                     val existingValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(working.plot, working.name)
+                    val validVodBackdrop = vodDetails.backdrop.takeIf {
+                        TmdbMetadataMatcher.isValidBackdropUrl(it, vodDetails.streamIcon.ifBlank { working.streamIcon })
+                    }.orEmpty()
                     working = working.copy(
                         streamIcon = working.streamIcon.ifBlank { vodDetails.streamIcon },
-                        backdrop = vodDetails.backdrop.ifBlank { working.backdrop },
+                        backdrop = validVodBackdrop.ifBlank { working.backdrop },
                         plot = validXtreamPlot.ifEmpty { existingValidPlot },
                         cast = vodDetails.cast.ifBlank { working.cast },
                         director = vodDetails.director.ifBlank { working.director },
@@ -1955,37 +2025,82 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         year = vodDetails.releaseDate.take(4).ifBlank { working.year },
                         rating = if (vodDetails.rating > 0.0 && working.rating <= 0.0) vodDetails.rating else working.rating,
                         duration = vodDetails.duration.ifBlank { working.duration },
-                        tmdbId = if (vodDetails.tmdbId > 0) vodDetails.tmdbId else working.tmdbId,
+                        tmdbId = manualBinding?.tmdbId ?: if (vodDetails.tmdbId > 0) vodDetails.tmdbId else working.tmdbId,
                         quality = vodDetails.quality.ifBlank { working.quality }
                     )
                 }
             }
         }
 
-        // Step 2: If plot is missing/empty/generic (or Arabic is selected and current plot is non-Arabic),
-        // fetch accurate verified overview & metadata from TMDb
+        // Step 2: Determine if we need to fetch rich TMDb metadata (or refresh stale cache)
         val hasValidPlot = TmdbMetadataMatcher.isValidSynopsis(working.plot, working.name)
         val wantsArabicUpgrade = preferArabic && hasValidPlot && !TmdbMetadataMatcher.containsArabicScript(working.plot)
-        val needsMetadataFill = working.backdrop.isBlank() || working.cast.isBlank() || working.genre.isBlank()
+        val hasRealBackdrop = TmdbMetadataMatcher.isValidBackdropUrl(working.backdrop, working.streamIcon)
+        val hasCompleteRichCache = existingExactRich != null &&
+            !tmdbCacheStore.isStale(existingExactRich) &&
+            tmdbCacheStore.isRichMetadataComplete(existingExactRich)
+        val needsMetadataFill = forceRefresh ||
+            !hasValidPlot ||
+            wantsArabicUpgrade ||
+            !hasRealBackdrop ||
+            working.cast.isBlank() ||
+            working.director.isBlank() ||
+            working.genre.isBlank() ||
+            working.tmdbId <= 0 ||
+            !hasCompleteRichCache
 
-        if (!hasValidPlot || wantsArabicUpgrade || needsMetadataFill) {
+        if (needsMetadataFill && (forceRefresh || !tmdbCacheStore.shouldSkipAfterRecentFailure(working.id, preferArabic))) {
             val tmdbMeta = fetchAccurateTmdbMetadata(
                 rawTitle = working.name,
                 year = working.year,
-                isSeries = working.type == MediaType.SERIES,
-                tmdbId = working.tmdbId,
+                isSeries = isSeries,
+                tmdbId = manualBinding?.tmdbId ?: working.tmdbId,
                 preferArabic = preferArabic
             )
             if (tmdbMeta != null) {
-                val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(tmdbMeta.overview) &&
-                    TmdbMetadataMatcher.isValidSynopsis(tmdbMeta.overview, working.name)
-                val overridePlot = !hasValidPlot || (wantsArabicUpgrade && tmdbHasArabicOverview)
+                val stamped = tmdbMeta.copy(
+                    cachedAtMs = System.currentTimeMillis(),
+                    isManualMatch = manualBinding != null
+                )
+                tmdbCacheStore.putForMediaItem(
+                    mediaItemId = working.id,
+                    isSeries = isSeries,
+                    preferArabic = preferArabic,
+                    metadata = stamped
+                )
+                refreshDiagnosticsCacheCounts()
+
+                val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(stamped.overview) &&
+                    TmdbMetadataMatcher.isValidSynopsis(stamped.overview, working.name)
+                val overridePlot = manualBinding != null || !hasValidPlot || (wantsArabicUpgrade && tmdbHasArabicOverview)
                 working = TmdbProxyClient.enrichMediaItem(
                     item = working,
-                    tmdb = tmdbMeta,
+                    tmdb = stamped,
                     overrideValidExistingPlot = overridePlot
                 )
+            } else {
+                tmdbCacheStore.markLookupFailure(working.id, preferArabic)
+                // Preserve existing cached metadata if API temporarily failed
+                val fallbackCached = existingExactRich ?: tmdbCacheStore.getForMediaItem(
+                    mediaItemId = working.id,
+                    tmdbId = working.tmdbId,
+                    isSeries = isSeries,
+                    preferArabic = preferArabic
+                )
+                if (fallbackCached != null) {
+                    working = TmdbProxyClient.enrichMediaItem(
+                        item = working,
+                        tmdb = fallbackCached,
+                        overrideValidExistingPlot = !hasValidPlot
+                    )
+                }
             }
+        } else if (existingExactRich != null) {
+            working = TmdbProxyClient.enrichMediaItem(
+                item = working,
+                tmdb = existingExactRich,
+                overrideValidExistingPlot = manualBinding != null || !hasValidPlot
+            )
         }
 
         // Step 3: Final strict sanitization (never allow placeholder text) & persist/cache
@@ -1994,7 +2109,6 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         enrichedMediaDetailsCache[cacheKey] = finalItem
 
         if (finalItem.tmdbId > 0 || finalItem.plot.isNotEmpty() || finalItem.cast.isNotBlank() || finalItem.backdrop.isNotBlank()) {
-            // Avoid wiping an existing valid persisted plot with an empty string if lookup failed
             val persistedValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(persisted?.plot, finalItem.name)
             val itemToPersist = if (finalItem.plot.isEmpty() && persistedValidPlot.isNotEmpty()) {
                 finalItem.copy(plot = persistedValidPlot)
@@ -2009,8 +2123,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Resolves verified TMDb metadata using Direct TMDb API v3 when a user API key is configured,
+     * Resolves verified TMDb metadata using Direct TMDb API v3/v4 when a user API key is configured,
      * falling back automatically to the server-side KRAS TMDb Proxy when needed.
+     * Records sanitized success/failure telemetry for Connection Diagnostics.
      */
     private suspend fun fetchAccurateTmdbMetadata(
         rawTitle: String,
@@ -2029,12 +2144,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 tmdbId = tmdbId,
                 preferArabic = preferArabic
             )
-            if (directMeta != null) return directMeta
+            if (directMeta != null) {
+                tmdbCacheStore.recordApiSuccess(if (isSeries) "direct/tv" else "direct/movie")
+                return directMeta
+            }
         }
 
         val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
         if (proxyUrl.isNotBlank()) {
-            return tmdbProxyClient.fetchAccurateMediaMetadata(
+            val proxyMeta = tmdbProxyClient.fetchAccurateMediaMetadata(
                 rawProxyUrl = proxyUrl,
                 rawTitle = rawTitle,
                 year = year,
@@ -2042,30 +2160,60 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 tmdbId = tmdbId,
                 preferArabic = preferArabic
             )
+            if (proxyMeta != null) {
+                tmdbCacheStore.recordApiSuccess(if (isSeries) "proxy/tv" else "proxy/movie")
+                return proxyMeta
+            }
         }
         return null
     }
 
-    // --- On-Demand Series Details (Xtream Codes + M3U + Accurate TMDb Fallback & Bilingual Caching) ---
-    fun loadSeriesDetails(seriesItem: MediaItem) {
-        val preferArabic = _userSettings.value.language.equals("Arabic", ignoreCase = true)
+    // --- On-Demand Series Details (Xtream Codes + M3U + Accurate TMDb Fallback & Persistent Caching) ---
+    fun loadSeriesDetails(seriesItem: MediaItem, forceRefresh: Boolean = false) {
+        val preferArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
         val langKey = if (preferArabic) "ar" else "en"
         val detailsCacheKey = "${seriesItem.streamId}:$langKey"
+        val manualBinding = tmdbCacheStore.getManualBinding(seriesItem.id)
+        val cachedRich = tmdbCacheStore.getForMediaItem(
+            mediaItemId = seriesItem.id,
+            tmdbId = manualBinding?.tmdbId ?: seriesItem.tmdbId,
+            isSeries = true,
+            preferArabic = preferArabic
+        )
+        val cachedExactRich = tmdbCacheStore.getExactLanguageForMediaItem(
+            mediaItemId = seriesItem.id,
+            tmdbId = manualBinding?.tmdbId ?: seriesItem.tmdbId,
+            isSeries = true,
+            preferArabic = preferArabic
+        )
+        if (cachedRich != null) {
+            _selectedSeriesRichMetadata.value = cachedRich
+        }
 
         val cachedDetails = enrichedSeriesDetailsCache[detailsCacheKey]
-        if (cachedDetails != null && TmdbMetadataMatcher.isValidSynopsis(cachedDetails.plot, cachedDetails.name)) {
+        val isCompleteAndFresh = !forceRefresh &&
+            cachedDetails != null &&
+            cachedExactRich != null &&
+            !tmdbCacheStore.isStale(cachedExactRich) &&
+            tmdbCacheStore.isRichMetadataComplete(cachedExactRich) &&
+            TmdbMetadataMatcher.isValidSynopsis(cachedDetails.plot, cachedDetails.name) &&
+            TmdbMetadataMatcher.isValidBackdropUrl(cachedDetails.backdrop, cachedDetails.cover)
+
+        if (isCompleteAndFresh && cachedDetails != null) {
             _currentSeriesDetails.value = cachedDetails
             _isSeriesDetailsLoading.value = false
             return
         }
 
-        if (_currentSeriesDetails.value?.seriesId != seriesItem.streamId) {
+        if (cachedDetails != null) {
+            _currentSeriesDetails.value = cachedDetails
+        } else if (_currentSeriesDetails.value?.seriesId != seriesItem.streamId) {
             _currentSeriesDetails.value = null
         }
 
         seriesDetailsJob?.cancel()
         seriesDetailsJob = viewModelScope.launch {
-            _isSeriesDetailsLoading.value = true
+            _isSeriesDetailsLoading.value = (cachedDetails == null && cachedRich == null)
             try {
                 val active = _activeAccount.value
                 val persisted = withContext(Dispatchers.IO) { repository.getItemById(seriesItem.id) }
@@ -2090,7 +2238,9 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                             seriesId = seriesItem.streamId,
                             name = seriesItem.name,
                             cover = seriesItem.streamIcon,
-                            backdrop = seriesItem.backdrop.ifBlank { seriesItem.streamIcon },
+                            backdrop = seriesItem.backdrop.takeIf {
+                                TmdbMetadataMatcher.isValidBackdropUrl(it, seriesItem.streamIcon)
+                            }.orEmpty(),
                             plot = seriesItem.plot,
                             cast = seriesItem.cast,
                             director = seriesItem.director,
@@ -2099,7 +2249,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                             rating = seriesItem.rating,
                             seasons = emptyList(),
                             quality = seriesItem.quality.ifBlank { seriesItem.resolution },
-                            tmdbId = seriesItem.tmdbId
+                            tmdbId = manualBinding?.tmdbId ?: seriesItem.tmdbId
                         )
                     }
                 }
@@ -2108,32 +2258,57 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 val baseValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(baseDetails.plot, seriesItem.name)
                 val itemValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(seriesItem.plot, seriesItem.name)
                 val persistedValidPlot = TmdbMetadataMatcher.sanitizeSynopsis(persisted?.plot, seriesItem.name)
-                val effectiveTmdbId = baseDetails.tmdbId.takeIf { it > 0 }
+                val effectiveTmdbId = manualBinding?.tmdbId
+                    ?: baseDetails.tmdbId.takeIf { it > 0 }
                     ?: seriesItem.tmdbId.takeIf { it > 0 }
                     ?: (persisted?.tmdbId ?: 0)
 
-                val sanitizedBase = baseDetails.copy(
+                val coverForCheck = baseDetails.cover.ifBlank { seriesItem.streamIcon }
+                val validBackdrop = listOf(baseDetails.backdrop, seriesItem.backdrop, persisted?.backdrop.orEmpty())
+                    .firstOrNull { TmdbMetadataMatcher.isValidBackdropUrl(it, coverForCheck) }
+                    ?.let { TmdbMetadataMatcher.normalizeTmdbImageUrl(it, size = "w1280") }
+                    .orEmpty()
+
+                var sanitizedBase = baseDetails.copy(
                     plot = baseValidPlot.ifEmpty { itemValidPlot.ifEmpty { persistedValidPlot } },
                     cast = baseDetails.cast.ifBlank { seriesItem.cast.ifBlank { persisted?.cast.orEmpty() } },
                     director = baseDetails.director.ifBlank { seriesItem.director.ifBlank { persisted?.director.orEmpty() } },
                     genre = baseDetails.genre.ifBlank { seriesItem.genre.ifBlank { persisted?.genre.orEmpty() } },
-                    backdrop = baseDetails.backdrop.ifBlank { seriesItem.backdrop.ifBlank { persisted?.backdrop.orEmpty() } },
+                    backdrop = validBackdrop,
                     tmdbId = effectiveTmdbId
                 )
+
+                // Immediately apply cached rich metadata so UI is populated before any network round-trip
+                if (cachedRich != null) {
+                    sanitizedBase = TmdbProxyClient.enrichSeriesDetails(
+                        details = sanitizedBase,
+                        metadata = cachedRich,
+                        overrideValidExistingPlot = manualBinding != null ||
+                            !TmdbMetadataMatcher.isValidSynopsis(sanitizedBase.plot, sanitizedBase.name)
+                    )
+                }
 
                 _currentSeriesDetails.value = sanitizedBase
                 if (sanitizedBase.quality.isNotBlank()) {
                     applyDetectedQualityToItem(seriesItem.id, sanitizedBase.quality)
                 }
 
-                // Step 2: Enrich via TMDb (Direct API v3 or Server-Side Proxy) when plot is missing/generic,
-                // Arabic is requested and current plot is non-Arabic, or cast/backdrop/seasons need metadata.
                 val hasValidIptvPlot = TmdbMetadataMatcher.isValidSynopsis(sanitizedBase.plot, sanitizedBase.name)
                 val wantsArabicUpgrade = preferArabic && hasValidIptvPlot && !TmdbMetadataMatcher.containsArabicScript(sanitizedBase.plot)
-                val needsTmdb = !hasValidIptvPlot || wantsArabicUpgrade || sanitizedBase.cast.isBlank() || sanitizedBase.backdrop.isBlank()
+                val hasRealBackdrop = TmdbMetadataMatcher.isValidBackdropUrl(sanitizedBase.backdrop, sanitizedBase.cover.ifBlank { seriesItem.streamIcon })
+                val hasCompleteRichCache = cachedExactRich != null &&
+                    !tmdbCacheStore.isStale(cachedExactRich) &&
+                    tmdbCacheStore.isRichMetadataComplete(cachedExactRich)
+                val needsTmdb = forceRefresh ||
+                    !hasValidIptvPlot ||
+                    wantsArabicUpgrade ||
+                    !hasRealBackdrop ||
+                    sanitizedBase.cast.isBlank() ||
+                    sanitizedBase.director.isBlank() ||
+                    !hasCompleteRichCache
 
                 var finalDetails = sanitizedBase
-                if (needsTmdb) {
+                if (needsTmdb && (forceRefresh || !tmdbCacheStore.shouldSkipAfterRecentFailure(seriesItem.id, preferArabic))) {
                     withContext(Dispatchers.IO) {
                         val tvMeta = fetchAccurateTmdbMetadata(
                             rawTitle = seriesItem.name,
@@ -2143,30 +2318,55 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                             preferArabic = preferArabic
                         )
                         if (tvMeta != null) {
+                            val stamped = tvMeta.copy(
+                                cachedAtMs = System.currentTimeMillis(),
+                                isManualMatch = manualBinding != null
+                            )
+                            tmdbCacheStore.putForMediaItem(
+                                mediaItemId = seriesItem.id,
+                                isSeries = true,
+                                preferArabic = preferArabic,
+                                metadata = stamped
+                            )
+                            refreshDiagnosticsCacheCounts()
+                            if (_selectedSeriesForDetails.value?.id == seriesItem.id) {
+                                _selectedSeriesRichMetadata.value = stamped
+                            }
+
+                            val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
                             val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
                             val epLang = if (preferArabic) "ar" else "en-US"
                             val seasonEpMap = LinkedHashMap<Int, List<com.example.data.api.TmdbEpisodeMetadata>>()
-                            if (proxyUrl.isNotBlank() && tvMeta.tmdbId > 0) {
+                            if (stamped.tmdbId > 0) {
                                 val seasonNumsToFetch = if (sanitizedBase.seasons.isNotEmpty()) {
-                                    sanitizedBase.seasons.map { it.seasonNumber }.distinct()
+                                    sanitizedBase.seasons.map { it.seasonNumber }.distinct().take(6)
                                 } else {
-                                    tvMeta.seasons.map { it.seasonNumber }.distinct().take(5)
+                                    stamped.seasons.map { it.seasonNumber }.distinct().take(5)
                                 }
                                 for (sNum in seasonNumsToFetch) {
-                                    val eps = tmdbProxyClient.fetchTvSeasonEpisodes(proxyUrl, tvMeta.tmdbId, sNum, epLang)
+                                    val eps = if (savedApiKey.isNotEmpty()) {
+                                        tmdbDirectClient.fetchTvSeasonEpisodes(savedApiKey, stamped.tmdbId, sNum, epLang)
+                                            .ifEmpty {
+                                                if (proxyUrl.isNotBlank()) tmdbProxyClient.fetchTvSeasonEpisodes(proxyUrl, stamped.tmdbId, sNum, epLang) else emptyList()
+                                            }
+                                    } else if (proxyUrl.isNotBlank()) {
+                                        tmdbProxyClient.fetchTvSeasonEpisodes(proxyUrl, stamped.tmdbId, sNum, epLang)
+                                    } else {
+                                        emptyList()
+                                    }
                                     if (eps.isNotEmpty()) {
                                         seasonEpMap[sNum] = eps
                                     }
                                 }
                             }
 
-                            val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(tvMeta.overview) &&
-                                TmdbMetadataMatcher.isValidSynopsis(tvMeta.overview, sanitizedBase.name)
-                            val overridePlot = !hasValidIptvPlot || (wantsArabicUpgrade && tmdbHasArabicOverview)
+                            val tmdbHasArabicOverview = TmdbMetadataMatcher.containsArabicScript(stamped.overview) &&
+                                TmdbMetadataMatcher.isValidSynopsis(stamped.overview, sanitizedBase.name)
+                            val overridePlot = manualBinding != null || !hasValidIptvPlot || (wantsArabicUpgrade && tmdbHasArabicOverview)
 
                             finalDetails = TmdbProxyClient.enrichSeriesDetails(
                                 details = sanitizedBase,
-                                metadata = tvMeta,
+                                metadata = stamped,
                                 seasonEpisodesMap = seasonEpMap,
                                 overrideValidExistingPlot = overridePlot
                             )
@@ -2180,12 +2380,17 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                                     plot = sanitizedBase.plot,
                                     tmdbId = effectiveTmdbId
                                 ),
-                                tmdb = tvMeta,
+                                tmdb = stamped,
                                 overrideValidExistingPlot = overridePlot
                             )
                             enrichedMediaDetailsCache["${seriesItem.id}:$langKey"] = enrichedItem
+                            if (_selectedSeriesForDetails.value?.id == seriesItem.id) {
+                                _selectedSeriesForDetails.value = enrichedItem
+                            }
                             repository.updateTmdbMetadata(enrichedItem)
                             applyEnrichedTmdbItemToState(enrichedItem)
+                        } else {
+                            tmdbCacheStore.markLookupFailure(seriesItem.id, preferArabic)
                         }
                     }
                 } else {
@@ -2214,6 +2419,442 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } finally {
                 _isSeriesDetailsLoading.value = false
+            }
+        }
+    }
+
+    // --- Manual TMDb Matching (When automatic match fails or picks the wrong item) ---
+
+    fun searchManualTmdbMatches(query: String, year: String = "", isSeries: Boolean) {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) {
+            _manualMatchCandidates.value = emptyList()
+            _isManualMatchSearching.value = false
+            return
+        }
+        manualMatchJob?.cancel()
+        manualMatchJob = viewModelScope.launch {
+            _isManualMatchSearching.value = true
+            try {
+                val preferArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
+                val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
+                val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
+
+                val results = withContext(Dispatchers.IO) {
+                    val fromDirect = if (savedApiKey.isNotEmpty()) {
+                        tmdbDirectClient.searchCandidates(
+                            apiKey = savedApiKey,
+                            rawQuery = trimmed,
+                            year = year,
+                            isSeries = isSeries,
+                            preferArabic = preferArabic
+                        )
+                    } else {
+                        emptyList()
+                    }
+                    if (fromDirect.isNotEmpty()) {
+                        tmdbCacheStore.recordApiSuccess(if (isSeries) "direct/search/tv" else "direct/search/movie")
+                        fromDirect
+                    } else if (proxyUrl.isNotBlank()) {
+                        val fromProxy = tmdbProxyClient.searchCandidates(
+                            rawProxyUrl = proxyUrl,
+                            rawQuery = trimmed,
+                            year = year,
+                            isSeries = isSeries,
+                            preferArabic = preferArabic
+                        )
+                        if (fromProxy.isNotEmpty()) {
+                            tmdbCacheStore.recordApiSuccess(if (isSeries) "proxy/search/tv" else "proxy/search/movie")
+                        }
+                        fromProxy
+                    } else {
+                        emptyList()
+                    }
+                }
+                _manualMatchCandidates.value = results
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                tmdbCacheStore.recordApiError(e.localizedMessage ?: "Search failed")
+                _manualMatchCandidates.value = emptyList()
+            } finally {
+                _isManualMatchSearching.value = false
+            }
+        }
+    }
+
+    fun clearManualMatchState() {
+        manualMatchJob?.cancel()
+        _manualMatchCandidates.value = emptyList()
+        _isManualMatchSearching.value = false
+    }
+
+    /**
+     * Permanently binds [mediaItem] to a user-selected TMDb [candidate], fetches full rich
+     * metadata by exact TMDb ID, updates persistent cache + Room + UI immediately.
+     */
+    fun applyManualTmdbMatch(mediaItem: MediaItem, candidate: TmdbSearchCandidate) {
+        val preferArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
+        val langKey = if (preferArabic) "ar" else "en"
+        val isSeries = mediaItem.type == MediaType.SERIES
+
+        viewModelScope.launch {
+            if (isSeries) _isSeriesDetailsLoading.value = true else _isMovieDetailsLoading.value = true
+            try {
+                withContext(Dispatchers.IO) {
+                    tmdbCacheStore.saveManualBinding(
+                        ManualTmdbBinding(
+                            mediaItemId = mediaItem.id,
+                            tmdbId = candidate.tmdbId,
+                            isSeries = isSeries,
+                            matchedTitle = candidate.title,
+                            boundAtMs = System.currentTimeMillis()
+                        )
+                    )
+                    // Immediately seed candidate artwork & overview so UI reflects the manual match
+                    // instantaneously even if proxy detail routes are unavailable or offline.
+                    val seededMeta = TmdbMediaMetadata(
+                        tmdbId = candidate.tmdbId,
+                        title = candidate.title,
+                        originalTitle = candidate.originalTitle,
+                        overview = TmdbMetadataMatcher.sanitizeSynopsis(candidate.overview, candidate.title),
+                        posterUrl = candidate.posterUrl,
+                        backdropUrl = candidate.backdropUrl,
+                        rating = candidate.rating,
+                        releaseYear = candidate.releaseYear,
+                        releaseDate = candidate.releaseDate,
+                        genres = TmdbMetadataMatcher.mapTmdbGenreIds(candidate.genreIds, preferArabic = preferArabic),
+                        cast = "",
+                        director = "",
+                        cachedAtMs = 0L, // Mark stale so rich details still fetch if available
+                        isManualMatch = true
+                    )
+                    tmdbCacheStore.putForMediaItem(
+                        mediaItemId = mediaItem.id,
+                        isSeries = isSeries,
+                        preferArabic = preferArabic,
+                        metadata = seededMeta,
+                        nowMs = 0L
+                    )
+                    enrichedMediaDetailsCache.remove("${mediaItem.id}:en")
+                    enrichedMediaDetailsCache.remove("${mediaItem.id}:ar")
+                    if (isSeries) {
+                        enrichedSeriesDetailsCache.remove("${mediaItem.streamId}:en")
+                        enrichedSeriesDetailsCache.remove("${mediaItem.streamId}:ar")
+                    }
+                    tmdbDirectClient.clearMemoryCaches()
+                    tmdbProxyClient.clearMemoryCaches()
+                }
+
+                val boundItem = mediaItem.copy(
+                    tmdbId = candidate.tmdbId,
+                    backdrop = candidate.backdropUrl.ifBlank { mediaItem.backdrop },
+                    plot = candidate.overview.ifBlank { mediaItem.plot },
+                    rating = if (candidate.rating > 0.0) candidate.rating else mediaItem.rating,
+                    year = candidate.releaseYear.ifBlank { mediaItem.year },
+                    genre = TmdbMetadataMatcher.mapTmdbGenreIds(candidate.genreIds, preferArabic = preferArabic).ifBlank { mediaItem.genre }
+                )
+                if (isSeries) {
+                    loadSeriesDetails(boundItem, forceRefresh = true)
+                } else {
+                    val enriched = getOrFetchEnrichedMediaDetails(boundItem, forceRefresh = true)
+                    if (_selectedMovieForDetails.value?.id == mediaItem.id) {
+                        _selectedMovieForDetails.value = enriched
+                        _selectedMovieRichMetadata.value = tmdbCacheStore.getForMediaItem(
+                            mediaItemId = mediaItem.id,
+                            tmdbId = candidate.tmdbId,
+                            isSeries = false,
+                            preferArabic = preferArabic
+                        )
+                    }
+                }
+                refreshDiagnosticsCacheCounts()
+            } finally {
+                if (!isSeries) _isMovieDetailsLoading.value = false
+            }
+        }
+    }
+
+    // --- Settings -> TMDb -> Connection Diagnostics & Manual Metadata Refresh ---
+
+    fun refreshDiagnosticsCacheCounts() {
+        val current = _tmdbDiagnosticsReport.value
+        val accountState = _tmdbAccountState.value
+        val accountCheck = buildAccountAuthDiagnosticCheck(accountState)
+        _tmdbDiagnosticsReport.value = current.copy(
+            accountAuth = accountCheck,
+            lastSuccessfulRequestMs = tmdbCacheStore.getLastSuccessfulRequestMs(),
+            lastErrorMessage = tmdbCacheStore.getLastSanitizedError(),
+            cachedMetadataCount = tmdbCacheStore.getCachedEntryCount(),
+            manualMatchCount = tmdbCacheStore.getManualMatchCount()
+        )
+    }
+
+    private fun buildAccountAuthDiagnosticCheck(state: TmdbAccountUiState): TmdbDiagnosticCheck {
+        return when {
+            state.isConnected && state.username.isNotBlank() -> TmdbDiagnosticCheck(
+                status = TmdbDiagnosticStatus.PASSED,
+                summary = "Signed in as @${state.username} (Favorites/Watchlist sync)"
+            )
+            state.isConnected -> TmdbDiagnosticCheck(
+                status = TmdbDiagnosticStatus.PASSED,
+                summary = "TMDb account signed in"
+            )
+            else -> TmdbDiagnosticCheck(
+                status = TmdbDiagnosticStatus.NOT_CONFIGURED,
+                summary = "Not signed in (metadata works via Proxy/API key)"
+            )
+        }
+    }
+
+    /**
+     * Runs a full live Connection Diagnostics suite covering:
+     * 1. Direct TMDb API v3/v4 authorization (if user API key is saved)
+     * 2. Cloudflare Worker Proxy connectivity (/api/tmdb/test)
+     * 3. User account authentication status (distinct from metadata API auth)
+     * 4. Movie search test ("Inception", 2010)
+     * 5. TV series search test ("Breaking Bad", 2008)
+     * 6. TMDb Image CDN test (image.tmdb.org)
+     * All errors are strictly sanitized so API keys/tokens are never exposed.
+     */
+    fun runTmdbConnectionDiagnostics() {
+        diagnosticsJob?.cancel()
+        diagnosticsJob = viewModelScope.launch {
+            val accountCheck = buildAccountAuthDiagnosticCheck(_tmdbAccountState.value)
+            val runningCheck = TmdbDiagnosticCheck(status = TmdbDiagnosticStatus.RUNNING, summary = "Testing...")
+            _tmdbDiagnosticsReport.value = _tmdbDiagnosticsReport.value.copy(
+                isRunning = true,
+                apiConnection = runningCheck,
+                proxyConnection = runningCheck,
+                accountAuth = accountCheck,
+                movieSearchTest = runningCheck,
+                tvSearchTest = runningCheck,
+                imageLoadingTest = runningCheck,
+                refreshFeedbackMessage = ""
+            )
+
+            val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
+            val proxyUrl = canonicalTmdbProxyUrl(_userSettings.value.tmdbProxyUrl)
+            var firstError = ""
+
+            // 1. Direct API Check
+            val directCheck = withContext(Dispatchers.IO) {
+                tmdbDirectClient.testApiConnectivity(savedApiKey)
+            }
+            if (directCheck.status == TmdbDiagnosticStatus.PASSED) {
+                tmdbCacheStore.recordApiSuccess("direct/configuration")
+            } else if (directCheck.status == TmdbDiagnosticStatus.FAILED && firstError.isBlank()) {
+                firstError = directCheck.summary
+            }
+
+            // 2. Proxy Check
+            val proxyStart = System.currentTimeMillis()
+            val proxyHealth = withContext(Dispatchers.IO) {
+                tmdbProxyClient.verifyConnection(proxyUrl)
+            }
+            val proxyLatency = (System.currentTimeMillis() - proxyStart).coerceAtLeast(1L)
+            val proxyCheck = if (proxyHealth.isConnected) {
+                tmdbCacheStore.recordApiSuccess("proxy/test")
+                TmdbDiagnosticCheck(
+                    status = TmdbDiagnosticStatus.PASSED,
+                    summary = "Proxy online & TMDb upstream OK (${proxyLatency}ms)",
+                    httpCode = proxyHealth.httpStatusCode,
+                    latencyMs = proxyLatency
+                )
+            } else {
+                val err = TmdbErrorSanitizer.sanitize(proxyHealth.message.ifBlank { "HTTP ${proxyHealth.httpStatusCode}" })
+                if (firstError.isBlank()) firstError = err
+                TmdbDiagnosticCheck(
+                    status = TmdbDiagnosticStatus.FAILED,
+                    summary = err,
+                    httpCode = proxyHealth.httpStatusCode,
+                    latencyMs = proxyLatency
+                )
+            }
+
+            // 3. Movie Search Test ("Inception", 2010)
+            val movieStart = System.currentTimeMillis()
+            val movieMeta = withContext(Dispatchers.IO) {
+                fetchAccurateTmdbMetadata(
+                    rawTitle = "Inception",
+                    year = "2010",
+                    isSeries = false,
+                    tmdbId = 0,
+                    preferArabic = false
+                )
+            }
+            val movieLatency = (System.currentTimeMillis() - movieStart).coerceAtLeast(1L)
+            val movieCheck = if (movieMeta != null && movieMeta.tmdbId > 0) {
+                val hasBackdrop = movieMeta.backdropUrl.isNotBlank()
+                val hasPlot = TmdbMetadataMatcher.isValidSynopsis(movieMeta.overview, movieMeta.title)
+                val hasCredits = movieMeta.castMembers.isNotEmpty() || movieMeta.director.isNotBlank()
+                val detailNote = if (hasCredits) "" else " • Search-only proxy (redeploy worker.js for cast/trailers)"
+                TmdbDiagnosticCheck(
+                    status = if (hasBackdrop && hasPlot) TmdbDiagnosticStatus.PASSED else TmdbDiagnosticStatus.WARNING,
+                    summary = "${movieMeta.title} (${movieMeta.releaseYear}) • ID ${movieMeta.tmdbId} (${movieLatency}ms)$detailNote",
+                    httpCode = 200,
+                    latencyMs = movieLatency
+                )
+            } else {
+                val err = "Movie search returned no verified match (${movieLatency}ms)"
+                if (firstError.isBlank()) firstError = err
+                TmdbDiagnosticCheck(
+                    status = TmdbDiagnosticStatus.FAILED,
+                    summary = err,
+                    latencyMs = movieLatency
+                )
+            }
+
+            // 4. TV Series Search Test ("Breaking Bad", 2008)
+            val tvStart = System.currentTimeMillis()
+            val tvMeta = withContext(Dispatchers.IO) {
+                fetchAccurateTmdbMetadata(
+                    rawTitle = "Breaking Bad",
+                    year = "2008",
+                    isSeries = true,
+                    tmdbId = 0,
+                    preferArabic = false
+                )
+            }
+            val tvLatency = (System.currentTimeMillis() - tvStart).coerceAtLeast(1L)
+            val tvCheck = if (tvMeta != null && tvMeta.tmdbId > 0) {
+                val hasBackdrop = tvMeta.backdropUrl.isNotBlank()
+                val hasPlot = TmdbMetadataMatcher.isValidSynopsis(tvMeta.overview, tvMeta.title)
+                TmdbDiagnosticCheck(
+                    status = if (hasBackdrop && hasPlot) TmdbDiagnosticStatus.PASSED else TmdbDiagnosticStatus.WARNING,
+                    summary = "${tvMeta.title} (${tvMeta.releaseYear}) • ID ${tvMeta.tmdbId} (${tvLatency}ms)",
+                    httpCode = 200,
+                    latencyMs = tvLatency
+                )
+            } else {
+                val err = "TV series search returned no verified match (${tvLatency}ms)"
+                if (firstError.isBlank()) firstError = err
+                TmdbDiagnosticCheck(
+                    status = TmdbDiagnosticStatus.FAILED,
+                    summary = err,
+                    latencyMs = tvLatency
+                )
+            }
+
+            // 5. Image Loading Test (verify actual TMDb backdrop/poster CDN URL)
+            val testImageUrl = listOf(
+                movieMeta?.backdropUrl.orEmpty(),
+                tvMeta?.backdropUrl.orEmpty(),
+                movieMeta?.posterUrl.orEmpty(),
+                "https://image.tmdb.org/t/p/w500/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg"
+            ).first { it.isNotBlank() }
+
+            val imageCheck = withContext(Dispatchers.IO) {
+                tmdbProxyClient.verifyImageUrl(testImageUrl)
+            }
+            if (imageCheck.status == TmdbDiagnosticStatus.FAILED && firstError.isBlank()) {
+                firstError = imageCheck.summary
+            }
+
+            val sanitizedError = TmdbErrorSanitizer.sanitize(firstError)
+            if (sanitizedError.isNotBlank()) {
+                tmdbCacheStore.recordApiError(sanitizedError)
+            } else {
+                tmdbCacheStore.clearLastApiError()
+            }
+
+            _tmdbDiagnosticsReport.value = TmdbDiagnosticsReport(
+                isRunning = false,
+                apiConnection = directCheck,
+                proxyConnection = proxyCheck,
+                accountAuth = buildAccountAuthDiagnosticCheck(_tmdbAccountState.value),
+                movieSearchTest = movieCheck,
+                tvSearchTest = tvCheck,
+                imageLoadingTest = imageCheck,
+                lastSuccessfulRequestMs = tmdbCacheStore.getLastSuccessfulRequestMs(),
+                lastErrorMessage = sanitizedError,
+                checkedAtMs = System.currentTimeMillis(),
+                cachedMetadataCount = tmdbCacheStore.getCachedEntryCount(),
+                manualMatchCount = tmdbCacheStore.getManualMatchCount()
+            )
+        }
+    }
+
+    /**
+     * Marks cached TMDb metadata as stale (preserving cached values on failure), clears client
+     * negative backoffs, and refreshes any currently open Movie/Series or top incomplete items
+     * without triggering a full IPTV library sync.
+     */
+    fun refreshTmdbMetadataManual() {
+        viewModelScope.launch {
+            val isArabic = SubscriptionInfoHelper.isArabicLanguage(_userSettings.value.language)
+            _tmdbDiagnosticsReport.value = _tmdbDiagnosticsReport.value.copy(
+                isRefreshingMetadata = true,
+                refreshFeedbackMessage = if (isArabic) "جاري تحديث بيانات TMDb..." else "Refreshing TMDb metadata..."
+            )
+            try {
+                var refreshedCount = 0
+                withContext(Dispatchers.IO) {
+                    tmdbCacheStore.markAllEntriesStaleForRefresh()
+                    tmdbDirectClient.clearMemoryCaches()
+                    tmdbProxyClient.clearMemoryCaches()
+                    enrichedMediaDetailsCache.clear()
+                    enrichedSeriesDetailsCache.clear()
+
+                    // Refresh up to 10 visible movies/series that are missing real backdrop or plot
+                    val candidates = (_movies.value.take(12) + _series.value.take(8))
+                        .filter {
+                            !TmdbMetadataMatcher.isValidBackdropUrl(it.backdrop, it.streamIcon) ||
+                                !TmdbMetadataMatcher.isValidSynopsis(it.plot, it.name) ||
+                                it.cast.isBlank()
+                        }
+                        .take(8)
+
+                    for (item in candidates) {
+                        val updated = getOrFetchEnrichedMediaDetails(item, forceRefresh = true)
+                        if (updated.tmdbId > 0 || updated.backdrop.isNotBlank() || updated.plot.isNotBlank()) {
+                            refreshedCount++
+                        }
+                    }
+                }
+
+                // Also refresh currently open Details screen if one is active
+                _selectedMovieForDetails.value?.let { openMovie ->
+                    val refreshed = getOrFetchEnrichedMediaDetails(openMovie, forceRefresh = true)
+                    if (_selectedMovieForDetails.value?.id == openMovie.id) {
+                        _selectedMovieForDetails.value = refreshed
+                        _selectedMovieRichMetadata.value = tmdbCacheStore.getForMediaItem(
+                            mediaItemId = openMovie.id,
+                            tmdbId = refreshed.tmdbId,
+                            isSeries = false,
+                            preferArabic = isArabic
+                        )
+                    }
+                }
+                _selectedSeriesForDetails.value?.let { openSeries ->
+                    loadSeriesDetails(openSeries, forceRefresh = true)
+                }
+
+                val feedback = if (isArabic) {
+                    if (refreshedCount > 0) "تم تحديث بيانات $refreshedCount عنصر من TMDb بنجاح"
+                    else "تم تجهيز ذاكرة TMDb للتحديث عند فتح أي فيلم أو مسلسل"
+                } else {
+                    if (refreshedCount > 0) "Refreshed metadata for $refreshedCount item(s) from TMDb"
+                    else "TMDb metadata cache refreshed — open any title to load latest details"
+                }
+
+                _tmdbDiagnosticsReport.value = _tmdbDiagnosticsReport.value.copy(
+                    isRefreshingMetadata = false,
+                    refreshFeedbackMessage = feedback,
+                    lastSuccessfulRequestMs = tmdbCacheStore.getLastSuccessfulRequestMs(),
+                    cachedMetadataCount = tmdbCacheStore.getCachedEntryCount(),
+                    manualMatchCount = tmdbCacheStore.getManualMatchCount()
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val err = TmdbErrorSanitizer.sanitize(e.localizedMessage ?: "Refresh failed")
+                tmdbCacheStore.recordApiError(err)
+                _tmdbDiagnosticsReport.value = _tmdbDiagnosticsReport.value.copy(
+                    isRefreshingMetadata = false,
+                    lastErrorMessage = err,
+                    refreshFeedbackMessage = err
+                )
             }
         }
     }
