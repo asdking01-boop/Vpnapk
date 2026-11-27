@@ -280,7 +280,18 @@ data class UserSettings(
     // KRAS TV — 3D Logo & Cinematic K Zoom-Through Intro (fully reversible)
     val startupAnimationMode: StartupAnimationMode = StartupAnimationMode.CINEMATIC_K_ZOOM_THROUGH,
     val usePremium3DLogo: Boolean = true,
-    val playZoomThroughBassSound: Boolean = false
+    val playZoomThroughBassSound: Boolean = false,
+    // KRAS TV — Global Smart Sync Engine settings (persistent, user-configurable)
+    val smartAutoSyncEnabled: Boolean = true,
+    val syncWifiOnly: Boolean = false,
+    val batterySavingSyncMode: Boolean = false,
+    val syncIntervalMoviesHours: Int = 6,
+    val syncIntervalSeriesHours: Int = 6,
+    val syncIntervalLiveHours: Int = 12,
+    val syncIntervalCategoriesHours: Int = 24,
+    val syncIntervalEpgHours: Int = 3,
+    val syncIntervalTmdbHours: Int = 24,
+    val syncIntervalAccountHours: Int = 24
 ) {
     /**
      * Restores the original Classic KRAS TV logo while strictly preserving all user data,

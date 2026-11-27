@@ -27,6 +27,10 @@ import com.example.player.ExoPlayerWrapper
 import com.example.player.KrasMediaPlaybackService
 import com.example.player.PlaybackNotificationMetadata
 import com.example.sound.CinematicSoundPlayer
+import com.example.sync.SmartSyncEngine
+import com.example.sync.SmartSyncWorker
+import com.example.sync.SyncContentType
+import com.example.sync.SyncTriggerReason
 import com.example.updater.AppUpdateUiState
 import com.example.updater.AppUpdater
 import com.example.updater.ReleaseCheckResult
@@ -48,7 +52,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = KrasRepository(application)
+    private val smartSyncEngine = SmartSyncEngine.getInstance(application)
+    private val repository = smartSyncEngine.repository
     private val tmdbSessionStore = TmdbSecureSessionStore(application)
     private val apiClient = XtreamClient()
     private val tmdbProxyClient = TmdbProxyClient()
@@ -56,8 +61,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private val appUpdater = AppUpdater()
     val playerWrapper = ExoPlayerWrapper(application)
 
-    // M3U parsed series details cache (seriesId -> SeriesDetails)
-    private val m3uSeriesDetailsMap = ConcurrentHashMap<Int, SeriesDetails>()
+    // Centralized Smart Sync Engine UI state (timestamps, next scheduled sync, manual progress)
+    val smartSyncState = smartSyncEngine.uiState
+
+    // M3U parsed series details cache (seriesId -> SeriesDetails), shared with SmartSyncEngine
+    private val m3uSeriesDetailsMap get() = smartSyncEngine.m3uSeriesDetailsCache
 
     // TMDb Proxy Connection & Health State (internal metadata enrichment health)
     private val _tmdbHealthState = MutableStateFlow(
@@ -242,6 +250,12 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     private var liveSortByQuality = false
     private var isLiveLoadingMore = false
 
+    // Tracks which account's current filter slice is already loaded in memory to avoid redundant
+    // Room re-queries and scroll resets when switching between tabs or recomposing.
+    private var moviesLoadedAccountId: String? = null
+    private var seriesLoadedAccountId: String? = null
+    private var liveLoadedAccountId: String? = null
+
     private val pageSize = 40
 
     init {
@@ -294,11 +308,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         _tmdbAccountState.value = buildInitialTmdbAccountUiState(krasUserId)
     }
 
-    private fun shouldRunLaunchAutoSync(state: TmdbAccountUiState): Boolean {
+    private fun hasPendingFavoritesOrHistorySync(krasUserId: String): Boolean {
+        val state = _tmdbAccountState.value
         if (!state.isConnected || !_userSettings.value.tmdbAutoSyncEnabled) return false
-        if (state.pendingOfflineChangesCount > 0) return true
-        val elapsed = System.currentTimeMillis() - state.lastSyncTimestampMs
-        return state.lastSyncTimestampMs <= 0L || elapsed >= AUTO_LAUNCH_SYNC_COOLDOWN_MS
+        return state.pendingOfflineChangesCount > 0 || smartSyncEngine.store.isFavoritesOrHistoryDirty(krasUserId)
     }
 
     private fun loadInitialData() {
@@ -335,19 +348,20 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 // Initialize player with buffer setting
                 playerWrapper.initPlayer(settings.bufferSize)
 
-                // Load cached categories and initial pages from Room instantly
+                // 1. Instant Startup: Load all existing cached categories & pages from Room immediately
                 loadInitialPagesFromRoom(active)
 
-                // Start background content sync
-                loadContentForAccount(active, isBackgroundRefresh = true)
+                // 2. Refresh Smart Sync UI timestamps & schedule unique periodic WorkManager job
+                smartSyncEngine.refreshUiState(active.id, settings)
+                SmartSyncWorker.scheduleOrUpdate(getApplication(), settings)
 
-                // Verify TMDb metadata proxy connection silently & run rate-limited auto-sync if account connected
-                if (_userSettings.value.tmdbProxyUrl.isNotBlank()) {
-                    verifyTmdbProxyConnection(_userSettings.value.tmdbProxyUrl)
-                }
-                if (shouldRunLaunchAutoSync(_tmdbAccountState.value)) {
-                    syncTmdbAccountNow(isAuto = true, targetKrasUserId = active.id)
-                }
+                // 3. Silent Smart Sync check: ONLY syncs content types that are missing locally or past
+                //    their configured refresh interval (0 network requests if everything is fresh!).
+                runSmartSync(
+                    account = active,
+                    requestedTypes = SyncContentType.entries.toList(),
+                    triggerReason = SyncTriggerReason.APP_STARTUP
+                )
 
                 // Clean up old downloaded APKs after update & run automatic 6-hour update check
                 checkForUpdatesOnLaunchIfNeeded()
@@ -442,12 +456,18 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _availableSeriesYears.value = repository.getAvailableYears(account.id, "SERIES", seriesCatFilter)
 
                 _favorites.value = repository.getFavorites(order, account.id)
+                moviesLoadedAccountId = account.id
+                seriesLoadedAccountId = account.id
+                liveLoadedAccountId = account.id
 
                 _isLoading.value = false
             } else if (account.isDemo) {
                 loadDemoDataFallback()
             } else {
-                _isLoading.value = true
+                moviesLoadedAccountId = null
+                seriesLoadedAccountId = null
+                liveLoadedAccountId = null
+                _isLoading.value = false
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -526,10 +546,13 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 resetPaginationStates()
                 loadInitialPagesFromRoom(active)
-                loadContentForAccount(active, isBackgroundRefresh = false)
-                if (shouldRunLaunchAutoSync(_tmdbAccountState.value)) {
-                    syncTmdbAccountNow(isAuto = true, targetKrasUserId = active.id)
-                }
+                smartSyncEngine.refreshUiState(active.id, _userSettings.value)
+                // Only syncs stale or missing content types for this account (no forced redownload if fresh)
+                runSmartSync(
+                    account = active,
+                    requestedTypes = SyncContentType.entries.toList(),
+                    triggerReason = SyncTriggerReason.APP_STARTUP
+                )
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -552,10 +575,13 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         refreshActiveUserTmdbAndFavoritesState(account.id)
                     }
                     resetPaginationStates()
-                    loadContentForAccount(account, isBackgroundRefresh = false)
-                    if (shouldRunLaunchAutoSync(_tmdbAccountState.value)) {
-                        syncTmdbAccountNow(isAuto = true, targetKrasUserId = account.id)
-                    }
+                    smartSyncEngine.refreshUiState(account.id, _userSettings.value)
+                    // Newly added account legitimately triggers initial full catalog sync
+                    runSmartSync(
+                        account = account,
+                        requestedTypes = SyncContentType.entries.toList(),
+                        triggerReason = SyncTriggerReason.NEW_ACCOUNT
+                    )
                     _isLoading.value = false
                     onResult(true, null)
                 }.onFailure { error ->
@@ -584,10 +610,13 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     refreshActiveUserTmdbAndFavoritesState(SampleData.demoAccount.id)
                 }
                 resetPaginationStates()
-                loadContentForAccount(SampleData.demoAccount, isBackgroundRefresh = false)
-                if (shouldRunLaunchAutoSync(_tmdbAccountState.value)) {
-                    syncTmdbAccountNow(isAuto = true, targetKrasUserId = SampleData.demoAccount.id)
-                }
+                loadInitialPagesFromRoom(SampleData.demoAccount)
+                smartSyncEngine.refreshUiState(SampleData.demoAccount.id, _userSettings.value)
+                runSmartSync(
+                    account = SampleData.demoAccount,
+                    requestedTypes = SyncContentType.entries.toList(),
+                    triggerReason = SyncTriggerReason.APP_STARTUP
+                )
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -607,6 +636,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     repository.removeAccount(accountId)
                     repository.mediaDao.deleteAllByAccount(accountId)
                     repository.mediaDao.deleteCategoriesByAccount(accountId)
+                    smartSyncEngine.store.clearAccount(accountId)
                 }
                 _accounts.value = withContext(Dispatchers.IO) { repository.getAccounts() }
                 val active = withContext(Dispatchers.IO) { repository.getActiveAccount() }
@@ -616,44 +646,82 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 resetPaginationStates()
                 loadInitialPagesFromRoom(active)
-                loadContentForAccount(active, isBackgroundRefresh = false)
+                smartSyncEngine.refreshUiState(active.id, _userSettings.value)
+                runSmartSync(
+                    account = active,
+                    requestedTypes = SyncContentType.entries.toList(),
+                    triggerReason = SyncTriggerReason.APP_STARTUP
+                )
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
     }
 
+    /**
+     * Explicit user pull-to-refresh / Refresh button action: triggers a manual incremental sync
+     * through SmartSyncEngine (single unified request path, no duplicate subscription fetch).
+     */
     fun refreshContent() {
-        val active = _activeAccount.value ?: return
-        viewModelScope.launch {
-            _isRefreshing.value = true
-            refreshSubscriptionInfo(active)
-            loadContentForAccount(active, isBackgroundRefresh = true)
-            _isRefreshing.value = false
-        }
+        syncNowManual()
     }
 
     /**
-     * Automatically refreshes subscription activation date, expiration date (`user_info.exp_date`),
-     * and account status from the Xtream Codes server when available.
+     * Settings → Synchronization → "Sync Now":
+     * Manually triggers incremental smart sync with ETag / Last-Modified headers and visible progress.
      */
-    fun refreshSubscriptionInfo(account: Account? = _activeAccount.value) {
+    fun syncNowManual() {
+        val active = _activeAccount.value ?: return
+        runSmartSync(
+            account = active,
+            requestedTypes = SyncContentType.entries.toList(),
+            triggerReason = SyncTriggerReason.MANUAL_SYNC_NOW
+        )
+    }
+
+    /**
+     * Settings → Synchronization → "Full Refresh":
+     * Explicitly clears conditional headers and reloads the entire active account catalog from scratch,
+     * preserving accounts, favorites, watch history, and settings.
+     */
+    fun fullRefreshManual() {
+        val active = _activeAccount.value ?: return
+        runSmartSync(
+            account = active,
+            requestedTypes = SyncContentType.entries.toList(),
+            triggerReason = SyncTriggerReason.MANUAL_FULL_REFRESH
+        )
+    }
+
+    /**
+     * Settings → Synchronization → Individual Content Sync:
+     * Manually synchronizes a single content type (Movies, Series, Live TV, Categories, EPG, TMDb,
+     * Account Status, or Favorites & Watch History).
+     */
+    fun syncSingleContentTypeManual(type: SyncContentType) {
+        val active = _activeAccount.value ?: return
+        runSmartSync(
+            account = active,
+            requestedTypes = listOf(type),
+            triggerReason = SyncTriggerReason.MANUAL_SINGLE_TYPE
+        )
+    }
+
+    /**
+     * Refreshes subscription status & expiration date through SmartSyncEngine.
+     * Automatic checks obey the 24-hour interval; manual taps on the Refresh button run immediately.
+     */
+    fun refreshSubscriptionInfo(
+        account: Account? = _activeAccount.value,
+        isManual: Boolean = true
+    ) {
         val target = account ?: return
         if (target.isDemo || target.serverUrl.isBlank() || target.username.isBlank()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                apiClient.fetchSubscriptionInfo(target).onSuccess { refreshed ->
-                    repository.updateAccountSubscription(refreshed)
-                    val allAccounts = repository.getAccounts()
-                    val active = repository.getActiveAccount()
-                    _accounts.value = allAccounts
-                    if (_activeAccount.value?.id == refreshed.id) {
-                        _activeAccount.value = active
-                    }
-                }
-            } catch (_: Exception) {
-            }
-        }
+        runSmartSync(
+            account = target,
+            requestedTypes = listOf(SyncContentType.ACCOUNT_STATUS),
+            triggerReason = if (isManual) SyncTriggerReason.MANUAL_SINGLE_TYPE else SyncTriggerReason.APP_STARTUP
+        )
     }
 
     private fun resetPaginationStates() {
@@ -665,6 +733,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         movieQualityFilter = "All"
         movieSortByQuality = false
         movieSortOrder = MediaSortOrder.RECENTLY_ADDED
+        moviesLoadedAccountId = null
 
         seriesPage = 0
         seriesCatFilter = "all"
@@ -674,181 +743,105 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         seriesQualityFilter = "All"
         seriesSortByQuality = false
         seriesSortOrder = MediaSortOrder.RECENTLY_ADDED
+        seriesLoadedAccountId = null
 
         livePage = 0
         liveCatFilter = "all"
         liveQueryFilter = ""
         liveQualityFilter = "All"
         liveSortByQuality = false
+        liveLoadedAccountId = null
     }
 
-    // --- Core Memory-Safe Batch Syncing (Xtream Codes + M3U Playlists + TMDb Enrichment) ---
-    private fun loadContentForAccount(account: Account, isBackgroundRefresh: Boolean = false) {
-        syncJob?.cancel()
-        syncJob = viewModelScope.launch(Dispatchers.IO) {
-            if (!isBackgroundRefresh && _movies.value.isEmpty()) {
-                _isLoading.value = true
+    /**
+     * Centralized synchronization entry point backed by [SmartSyncEngine].
+     * - Automatic triggers run 100% silently (NEVER populate [_syncProgress]).
+     * - Manual triggers show real-time progress in [_syncProgress] and [smartSyncState],
+     *   and surface actionable errors if a manual sync fails.
+     * - Preserves existing Room cache & UI scroll position whenever nothing changed.
+     */
+    private fun runSmartSync(
+        account: Account,
+        requestedTypes: List<SyncContentType>,
+        triggerReason: SyncTriggerReason
+    ) {
+        val isManual = triggerReason.isManual
+        // Manual sync cancels any prior ViewModel sync job; automatic sync relies on SmartSyncEngine single-flight
+        if (isManual) {
+            syncJob?.cancel()
+        }
+        val launchedJob = viewModelScope.launch(Dispatchers.IO) {
+            if (isManual) {
+                _isRefreshing.value = true
+                _errorMessage.value = null
             }
-            _errorMessage.value = null
-
-            if (account.isDemo) {
-                try {
-                    // Populate Room with Demo Sample Data (with groupKey, seq, groupOrder, serverOrder)
-                    val movieEntities = MediaItemEntity.fromMediaItemList(SampleData.sampleMovies, account.id)
-                    val seriesEntities = MediaItemEntity.fromMediaItemList(SampleData.sampleSeries, account.id)
-                    val liveEntities = MediaItemEntity.fromMediaItemList(SampleData.sampleLiveStreams, account.id)
-
-                    val movieCatEntities = SampleData.movieCategories.map { CategoryEntity.fromCategory(it, account.id) }
-                    val seriesCatEntities = SampleData.seriesCategories.map { CategoryEntity.fromCategory(it, account.id) }
-                    val liveCatEntities = SampleData.liveCategories.map { CategoryEntity.fromCategory(it, account.id) }
-
-                    repository.insertMediaBatch(movieEntities + seriesEntities + liveEntities)
-                    repository.saveCategories(account.id, MediaType.MOVIE, movieCatEntities)
-                    repository.saveCategories(account.id, MediaType.SERIES, seriesCatEntities)
-                    repository.saveCategories(account.id, MediaType.LIVE, liveCatEntities)
-
-                    loadInitialPagesFromRoom(account)
-                    enrichCatalogWithTmdb(account)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    loadDemoDataFallback()
-                } finally {
-                    _isLoading.value = false
-                    _isRefreshing.value = false
-                }
-                return@launch
-            }
-
             try {
-                // Branch A: Direct M3U Playlist Import
-                if (M3uPlaylistParser.isM3uPlaylistUrl(account.serverUrl)) {
-                    _syncProgress.value = "Importing M3U Playlist..."
-                    val m3uResult = apiClient.fetchM3uPlaylist(account)
-                    if (m3uResult != null) {
-                        repository.saveCategories(account.id, MediaType.LIVE, m3uResult.liveCategories)
-                        repository.saveCategories(account.id, MediaType.MOVIE, m3uResult.movieCategories)
-                        repository.saveCategories(account.id, MediaType.SERIES, m3uResult.seriesCategories)
-
-                        _liveCategories.value = m3uResult.liveCategories.map { it.toCategory() }
-                        _movieCategories.value = m3uResult.movieCategories.map { it.toCategory() }
-                        _seriesCategories.value = m3uResult.seriesCategories.map { it.toCategory() }
-
-                        repository.clearOldRows(account.id, "LIVE")
-                        repository.clearOldRows(account.id, "MOVIE")
-                        repository.clearOldRows(account.id, "SERIES")
-
-                        m3uResult.liveStreams.chunked(500).forEach { batch ->
-                            repository.insertMediaBatch(batch)
+                val settings = _userSettings.value
+                val report = smartSyncEngine.syncAccount(
+                    account = account,
+                    requestedTypes = requestedTypes,
+                    triggerReason = triggerReason,
+                    settings = settings,
+                    hasPendingFavoritesOrHistoryChanges = hasPendingFavoritesOrHistorySync(account.id),
+                    onManualProgress = { msg ->
+                        // Strictly ONLY show floating sync progress during user-initiated manual syncs
+                        if (isManual) {
+                            _syncProgress.value = msg
                         }
-                        m3uResult.movies.chunked(500).forEach { batch ->
-                            repository.insertMediaBatch(batch)
+                    },
+                    onAccountSubscriptionUpdated = { refreshed ->
+                        val allAccounts = repository.getAccounts()
+                        val currentActive = repository.getActiveAccount()
+                        _accounts.value = allAccounts
+                        if (_activeAccount.value?.id == refreshed.id) {
+                            _activeAccount.value = currentActive
                         }
-                        m3uResult.series.chunked(500).forEach { batch ->
-                            repository.insertMediaBatch(batch)
+                    },
+                    onTmdbMetadataSync = { targetAcc ->
+                        enrichCatalogWithTmdb(targetAcc)
+                    },
+                    onFavoritesHistorySync = { targetAcc ->
+                        if (_tmdbAccountState.value.isConnected && _userSettings.value.tmdbAutoSyncEnabled) {
+                            syncTmdbAccountNowSyncResult(isAuto = !isManual, targetKrasUserId = targetAcc.id)
+                        } else {
+                            true
                         }
-
-                        m3uSeriesDetailsMap.clear()
-                        m3uSeriesDetailsMap.putAll(m3uResult.seriesDetailsBySeriesId)
-
-                        _syncProgress.value = "M3U Playlist imported"
-                        delay(400)
-                        _syncProgress.value = null
-
-                        loadInitialPagesFromRoom(account)
-                        enrichCatalogWithTmdb(account)
-                    } else {
-                        _errorMessage.value = "Unable to download or parse M3U playlist."
-                        loadInitialPagesFromRoom(account)
                     }
-                    return@launch
+                )
+
+                // Reload Room pages ONLY if catalog data actually changed (prevents UI flicker & preserves scroll position)
+                if (report.hadAnyCatalogChange && _activeAccount.value?.id == account.id) {
+                    moviesLoadedAccountId = null
+                    seriesLoadedAccountId = null
+                    liveLoadedAccountId = null
+                    loadInitialPagesFromRoom(account)
                 }
 
-                // Branch B: Xtream Codes Server Sync
-                // Step 0: Refresh Account Subscription Info (user_info.exp_date, created_at, status)
-                apiClient.fetchSubscriptionInfo(account).onSuccess { refreshed ->
-                    repository.updateAccountSubscription(refreshed)
-                    _accounts.value = repository.getAccounts()
-                    if (_activeAccount.value?.id == refreshed.id) {
-                        _activeAccount.value = repository.getActiveAccount()
-                    }
+                // Surface actionable error message ONLY for manual sync failures (never spam during silent background sync)
+                if (isManual && report.failedTypes.isNotEmpty()) {
+                    val firstErr = report.failedTypes.entries.first()
+                    _errorMessage.value = "Sync failed (${firstErr.key.labelEn}): ${firstErr.value}"
                 }
-
-                // Step 1: Stream and Cache Categories
-                _syncProgress.value = "Updating Categories..."
-                val movieCats = apiClient.fetchCategories(account, MediaType.MOVIE)
-                if (movieCats.isNotEmpty()) {
-                    repository.saveCategories(account.id, MediaType.MOVIE, movieCats)
-                    _movieCategories.value = movieCats.map { it.toCategory() }
-                }
-
-                val seriesCats = apiClient.fetchCategories(account, MediaType.SERIES)
-                if (seriesCats.isNotEmpty()) {
-                    repository.saveCategories(account.id, MediaType.SERIES, seriesCats)
-                    _seriesCategories.value = seriesCats.map { it.toCategory() }
-                }
-
-                val liveCats = apiClient.fetchCategories(account, MediaType.LIVE)
-                if (liveCats.isNotEmpty()) {
-                    repository.saveCategories(account.id, MediaType.LIVE, liveCats)
-                    _liveCategories.value = liveCats.map { it.toCategory() }
-                }
-
-                val movieCatMap = movieCats.associate { it.categoryId to it.categoryName }
-                val seriesCatMap = seriesCats.associate { it.categoryId to it.categoryName }
-                val liveCatMap = liveCats.associate { it.categoryId to it.categoryName }
-
-                // Step 2: Stream Live Channels in 500-item Batches (Clearing old rows first)
-                _syncProgress.value = "Syncing Live Channels..."
-                repository.clearOldRows(account.id, "LIVE")
-                var totalLiveParsed = 0
-                apiClient.streamLiveStreams(account, categoryMap = liveCatMap, batchSize = 500) { batch ->
-                    repository.insertMediaBatch(batch)
-                    totalLiveParsed += batch.size
-                    _syncProgress.value = "Live Channels synced: $totalLiveParsed"
-                }
-
-                // Step 3: Stream Movies in 500-item Batches (Clearing old rows first)
-                _syncProgress.value = "Syncing Movies..."
-                repository.clearOldRows(account.id, "MOVIE")
-                var totalMoviesParsed = 0
-                apiClient.streamVodStreams(account, categoryMap = movieCatMap, batchSize = 500) { batch ->
-                    repository.insertMediaBatch(batch)
-                    totalMoviesParsed += batch.size
-                    _syncProgress.value = "Movies synced: $totalMoviesParsed"
-                }
-
-                // Step 4: Stream Series in 500-item Batches (Clearing old rows first)
-                _syncProgress.value = "Syncing Series..."
-                repository.clearOldRows(account.id, "SERIES")
-                var totalSeriesParsed = 0
-                apiClient.streamSeries(account, categoryMap = seriesCatMap, batchSize = 500) { batch ->
-                    repository.insertMediaBatch(batch)
-                    totalSeriesParsed += batch.size
-                    _syncProgress.value = "Series synced: $totalSeriesParsed"
-                }
-
-                _syncProgress.value = "Sync completed successfully"
-                delay(600)
-                _syncProgress.value = null
-
-                // Step 5: Refresh UI with updated paged content from Room
-                loadInitialPagesFromRoom(account)
-
-                // Step 6: Automatically enrich imported Movies & TV Series metadata via server-side TMDb proxy
-                enrichCatalogWithTmdb(account)
-
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (oom: OutOfMemoryError) {
-                handleOom(oom, "Out of memory during Xtream catalog synchronization")
+                handleOom(oom, "Out of memory during smart catalog synchronization")
                 loadInitialPagesFromRoom(account)
             } catch (e: Exception) {
                 e.printStackTrace()
-                _errorMessage.value = "Failed to update catalog: ${e.message}"
-                loadInitialPagesFromRoom(account)
+                if (isManual) {
+                    _errorMessage.value = "Sync error: ${e.message ?: "Unable to connect"}"
+                }
             } finally {
+                if (isManual) {
+                    _isRefreshing.value = false
+                    _syncProgress.value = null
+                }
                 _isLoading.value = false
-                _isRefreshing.value = false
-                _syncProgress.value = null
             }
+        }
+        if (isManual) {
+            syncJob = launchedJob
         }
     }
 
@@ -1034,6 +1027,15 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
      * Caches matched TMDb IDs in Room via repository.updateTmdbMetadata and skips unconfident matches.
      */
     fun syncTmdbAccountNow(isAuto: Boolean = false, targetKrasUserId: String? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            syncTmdbAccountNowSyncResult(isAuto = isAuto, targetKrasUserId = targetKrasUserId)
+        }
+    }
+
+    private suspend fun syncTmdbAccountNowSyncResult(
+        isAuto: Boolean = false,
+        targetKrasUserId: String? = null
+    ): Boolean = withContext(Dispatchers.IO) {
         val krasUserId = targetKrasUserId?.takeIf { it.isNotBlank() } ?: activeKrasUserId()
         val stored = tmdbSessionStore.getSession(krasUserId)
         val apiKey = stored?.apiKey?.ifBlank { tmdbSessionStore.getSavedApiKey() }.orEmpty()
@@ -1045,9 +1047,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                     isError = true
                 )
             }
-            return
+            return@withContext false
         }
-        if (krasUserId == activeKrasUserId() && _tmdbAccountState.value.syncStatus == TmdbSyncStatus.SYNCING) return
+        if (krasUserId == activeKrasUserId() && _tmdbAccountState.value.syncStatus == TmdbSyncStatus.SYNCING) {
+            return@withContext true
+        }
 
         if (krasUserId == activeKrasUserId()) {
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
@@ -1058,104 +1062,105 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
-        viewModelScope.launch(Dispatchers.IO) {
-            val localFavorites = repository.getLocalTmdbSyncFavorites(krasUserId)
-            val localWatchlist = repository.getLocalTmdbSyncWatchlist(krasUserId)
-            val localRatings = repository.getLocalTmdbSyncRatings(krasUserId)
-            val pendingMutations = repository.getPendingTmdbMutations(krasUserId)
+        val localFavorites = repository.getLocalTmdbSyncFavorites(krasUserId)
+        val localWatchlist = repository.getLocalTmdbSyncWatchlist(krasUserId)
+        val localRatings = repository.getLocalTmdbSyncRatings(krasUserId)
+        val pendingMutations = repository.getPendingTmdbMutations(krasUserId)
 
-            val syncResult = tmdbDirectClient.performTwoWaySync(
-                apiKey = apiKey,
-                sessionId = stored.sessionId,
-                accountId = stored.accountId,
-                krasUserId = krasUserId,
-                localFavorites = localFavorites,
-                localWatchlist = localWatchlist,
-                localRatings = localRatings,
-                pendingMutations = pendingMutations,
-                onResolveTmdbId = { title, year, isSeries ->
-                    val metadata = tmdbDirectClient.searchAndMatchMedia(
-                        apiKey = apiKey,
-                        rawTitle = title,
-                        year = year,
-                        isSeries = isSeries
+        val syncResult = tmdbDirectClient.performTwoWaySync(
+            apiKey = apiKey,
+            sessionId = stored.sessionId,
+            accountId = stored.accountId,
+            krasUserId = krasUserId,
+            localFavorites = localFavorites,
+            localWatchlist = localWatchlist,
+            localRatings = localRatings,
+            pendingMutations = pendingMutations,
+            onResolveTmdbId = { title, year, isSeries ->
+                val metadata = tmdbDirectClient.searchAndMatchMedia(
+                    apiKey = apiKey,
+                    rawTitle = title,
+                    year = year,
+                    isSeries = isSeries
+                )
+                if (metadata != null && metadata.tmdbId > 0) {
+                    val activeEntity = repository.mediaDao.findMediaByNameAndType(
+                        accountId = activeKrasUserId(),
+                        name = title,
+                        type = if (isSeries) "SERIES" else "MOVIE"
                     )
-                    if (metadata != null && metadata.tmdbId > 0) {
-                        val activeEntity = repository.mediaDao.findMediaByNameAndType(
-                            accountId = activeKrasUserId(),
-                            name = title,
-                            type = if (isSeries) "SERIES" else "MOVIE"
+                    if (activeEntity != null) {
+                        val activeMedia = activeEntity.toMediaItem()
+                        val enriched = activeMedia.copy(
+                            tmdbId = metadata.tmdbId,
+                            plot = metadata.overview.ifBlank { activeMedia.plot },
+                            streamIcon = metadata.posterUrl.ifBlank { activeMedia.streamIcon },
+                            backdrop = metadata.backdropUrl.ifBlank { activeMedia.backdrop },
+                            rating = if (metadata.rating > 0.0) metadata.rating else activeMedia.rating,
+                            year = metadata.releaseYear.ifBlank { activeMedia.year },
+                            genre = metadata.genres.ifBlank { activeMedia.genre },
+                            cast = metadata.cast.ifBlank { activeMedia.cast },
+                            director = metadata.director.ifBlank { activeMedia.director }
                         )
-                        if (activeEntity != null) {
-                            val activeMedia = activeEntity.toMediaItem()
-                            val enriched = activeMedia.copy(
-                                tmdbId = metadata.tmdbId,
-                                plot = metadata.overview.ifBlank { activeMedia.plot },
-                                streamIcon = metadata.posterUrl.ifBlank { activeMedia.streamIcon },
-                                backdrop = metadata.backdropUrl.ifBlank { activeMedia.backdrop },
-                                rating = if (metadata.rating > 0.0) metadata.rating else activeMedia.rating,
-                                year = metadata.releaseYear.ifBlank { activeMedia.year },
-                                genre = metadata.genres.ifBlank { activeMedia.genre },
-                                cast = metadata.cast.ifBlank { activeMedia.cast },
-                                director = metadata.director.ifBlank { activeMedia.director }
-                            )
-                            repository.updateTmdbMetadata(enriched)
-                            applyEnrichedTmdbItemToState(enriched)
-                        }
-                        metadata.tmdbId
-                    } else {
-                        0
+                        repository.updateTmdbMetadata(enriched)
+                        applyEnrichedTmdbItemToState(enriched)
                     }
-                }
-            )
-
-            if (syncResult.ok) {
-                repository.mergeTmdbSyncedData(
-                    remoteFavorites = syncResult.favorites,
-                    remoteWatchlist = syncResult.watchlist,
-                    remoteRatings = syncResult.ratings,
-                    krasAccountId = krasUserId
-                )
-
-                val nowMs = System.currentTimeMillis()
-                val favCount = repository.getLocalTmdbSyncFavorites(krasUserId).size.coerceAtLeast(syncResult.favorites.size)
-                val wlCount = repository.getWatchlist(krasUserId).size.coerceAtLeast(syncResult.watchlist.size)
-                val rtCount = repository.getUserRatings(krasUserId).size.coerceAtLeast(syncResult.ratings.size)
-
-                tmdbSessionStore.updateSyncStats(
-                    krasAccountId = krasUserId,
-                    lastSyncTimestampMs = nowMs,
-                    favoritesCount = favCount,
-                    watchlistCount = wlCount,
-                    ratingsCount = rtCount
-                )
-
-                if (krasUserId == activeKrasUserId()) {
-                    _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder, krasUserId)
-                    _tmdbAccountState.value = _tmdbAccountState.value.copy(
-                        krasAccountId = krasUserId,
-                        syncStatus = TmdbSyncStatus.SUCCESS,
-                        lastSyncTimestampMs = nowMs,
-                        syncedFavoritesCount = favCount,
-                        syncedWatchlistCount = wlCount,
-                        syncedRatingsCount = rtCount,
-                        pendingOfflineChangesCount = 0,
-                        statusMessage = if (isAuto) null else syncResult.userMessage,
-                        isError = false
-                    )
-                }
-            } else {
-                val remainingPending = repository.getPendingTmdbMutations(krasUserId).size
-                if (krasUserId == activeKrasUserId()) {
-                    _tmdbAccountState.value = _tmdbAccountState.value.copy(
-                        krasAccountId = krasUserId,
-                        syncStatus = TmdbSyncStatus.ERROR,
-                        pendingOfflineChangesCount = remainingPending,
-                        statusMessage = if (isAuto) null else syncResult.userMessage,
-                        isError = !isAuto
-                    )
+                    metadata.tmdbId
+                } else {
+                    0
                 }
             }
+        )
+
+        if (syncResult.ok) {
+            repository.mergeTmdbSyncedData(
+                remoteFavorites = syncResult.favorites,
+                remoteWatchlist = syncResult.watchlist,
+                remoteRatings = syncResult.ratings,
+                krasAccountId = krasUserId
+            )
+            smartSyncEngine.store.clearFavoritesOrHistoryDirty(krasUserId)
+
+            val nowMs = System.currentTimeMillis()
+            val favCount = repository.getLocalTmdbSyncFavorites(krasUserId).size.coerceAtLeast(syncResult.favorites.size)
+            val wlCount = repository.getWatchlist(krasUserId).size.coerceAtLeast(syncResult.watchlist.size)
+            val rtCount = repository.getUserRatings(krasUserId).size.coerceAtLeast(syncResult.ratings.size)
+
+            tmdbSessionStore.updateSyncStats(
+                krasAccountId = krasUserId,
+                lastSyncTimestampMs = nowMs,
+                favoritesCount = favCount,
+                watchlistCount = wlCount,
+                ratingsCount = rtCount
+            )
+
+            if (krasUserId == activeKrasUserId()) {
+                _favorites.value = repository.getFavorites(_userSettings.value.liveChannelOrder, krasUserId)
+                _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    krasAccountId = krasUserId,
+                    syncStatus = TmdbSyncStatus.SUCCESS,
+                    lastSyncTimestampMs = nowMs,
+                    syncedFavoritesCount = favCount,
+                    syncedWatchlistCount = wlCount,
+                    syncedRatingsCount = rtCount,
+                    pendingOfflineChangesCount = 0,
+                    statusMessage = if (isAuto) null else syncResult.userMessage,
+                    isError = false
+                )
+            }
+            true
+        } else {
+            val remainingPending = repository.getPendingTmdbMutations(krasUserId).size
+            if (krasUserId == activeKrasUserId()) {
+                _tmdbAccountState.value = _tmdbAccountState.value.copy(
+                    krasAccountId = krasUserId,
+                    syncStatus = TmdbSyncStatus.ERROR,
+                    pendingOfflineChangesCount = remainingPending,
+                    statusMessage = if (isAuto) null else syncResult.userMessage,
+                    isError = !isAuto
+                )
+            }
+            false
         }
     }
 
@@ -1167,7 +1172,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             statusMessage = null,
             isError = false
         )
-        if (enabled && _tmdbAccountState.value.isConnected) {
+        if (enabled && _tmdbAccountState.value.isConnected && hasPendingFavoritesOrHistorySync(activeKrasUserId())) {
             syncTmdbAccountNow(isAuto = true)
         }
     }
@@ -1203,7 +1208,8 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Verifies the server-side TMDb metadata service silently in the background.
+     * Verifies the server-side TMDb metadata service connectivity without bypassing
+     * SmartSyncEngine's 24-hour TMDb metadata interval.
      */
     fun verifyTmdbProxyConnection(proxyUrl: String = _userSettings.value.tmdbProxyUrl) {
         val trimmed = canonicalTmdbProxyUrl(proxyUrl)
@@ -1219,11 +1225,6 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val result = tmdbProxyClient.verifyConnection(trimmed)
                 _tmdbHealthState.value = result
-                if (result.state == TmdbConnectionState.CONNECTED && _userSettings.value.tmdbAutoEnrichEnabled) {
-                    _activeAccount.value?.let { active ->
-                        enrichCatalogWithTmdb(active)
-                    }
-                }
             } catch (_: Exception) {
                 _tmdbHealthState.value = TmdbHealthResult(
                     state = TmdbConnectionState.PROXY_UNREACHABLE,
@@ -1238,17 +1239,20 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Automatically fetches posters, backdrops, descriptions, ratings, release years, genres, cast,
      * and directors from the server-side TMDb proxy for imported Movies and TV Series.
+     * Invoked strictly on SmartSyncEngine's 24-hour interval (or when manually requested).
      */
-    private suspend fun enrichCatalogWithTmdb(account: Account) = withContext(Dispatchers.IO) {
+    private suspend fun enrichCatalogWithTmdb(account: Account): Boolean = withContext(Dispatchers.IO) {
         val settings = _userSettings.value
         val proxyUrl = canonicalTmdbProxyUrl(settings.tmdbProxyUrl)
         val savedApiKey = tmdbSessionStore.getSavedApiKey().trim()
-        if (!settings.tmdbAutoEnrichEnabled || (proxyUrl.isBlank() && savedApiKey.isBlank())) return@withContext
+        if (!settings.tmdbAutoEnrichEnabled || (proxyUrl.isBlank() && savedApiKey.isBlank())) {
+            return@withContext true
+        }
 
         if (savedApiKey.isBlank() && proxyUrl.isNotBlank()) {
             val health = tmdbProxyClient.verifyConnection(proxyUrl)
             _tmdbHealthState.value = health
-            if (health.state != TmdbConnectionState.CONNECTED) return@withContext
+            if (health.state != TmdbConnectionState.CONNECTED) return@withContext false
         }
 
         val preferArabic = settings.language.equals("Arabic", ignoreCase = true)
@@ -1325,8 +1329,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 _latestMoviesByCategoryMap.value = repository.getLatestForAllCategories(account.id, "MOVIE", movieCats, 20)
                 _latestSeriesByCategoryMap.value = repository.getLatestForAllCategories(account.id, "SERIES", seriesCats, 20)
             }
+            true
         } catch (e: Exception) {
             e.printStackTrace()
+            false
         }
     }
 
@@ -1404,6 +1410,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 qualityFilter == movieQualityFilter &&
                 sortByQuality == movieSortByQuality &&
                 sortOrder == movieSortOrder
+        val account = _activeAccount.value ?: return
+        // Prevent redundant DB queries and scroll resets when switching back to the Movies tab
+        if (isSameFilter && moviesLoadedAccountId == account.id && _movies.value.isNotEmpty()) {
+            return
+        }
         if (!isSameFilter) {
             moviePage = 0
         }
@@ -1415,7 +1426,6 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         movieSortByQuality = sortByQuality
         movieSortOrder = sortOrder
 
-        val account = _activeAccount.value ?: return
         val limitToFetch = (moviePage + 1) * pageSize
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -1454,6 +1464,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 _movies.value = paged
                 totalMoviesCount.value = count
+                moviesLoadedAccountId = account.id
                 if (latestForCat.isNotEmpty() || !account.isDemo) {
                     _latestMoviesForCategory.value = latestForCat
                 }
@@ -1517,6 +1528,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 qualityFilter == seriesQualityFilter &&
                 sortByQuality == seriesSortByQuality &&
                 sortOrder == seriesSortOrder
+        val account = _activeAccount.value ?: return
+        // Prevent redundant DB queries and scroll resets when switching back to the Series tab
+        if (isSameFilter && seriesLoadedAccountId == account.id && _series.value.isNotEmpty()) {
+            return
+        }
         if (!isSameFilter) {
             seriesPage = 0
         }
@@ -1528,7 +1544,6 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         seriesSortByQuality = sortByQuality
         seriesSortOrder = sortOrder
 
-        val account = _activeAccount.value ?: return
         val limitToFetch = (seriesPage + 1) * pageSize
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -1567,6 +1582,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 _series.value = paged
                 totalSeriesCount.value = count
+                seriesLoadedAccountId = account.id
                 if (latestForCat.isNotEmpty() || !account.isDemo) {
                     _latestSeriesForCategory.value = latestForCat
                 }
@@ -1624,6 +1640,11 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 query == liveQueryFilter &&
                 qualityFilter == liveQualityFilter &&
                 sortByQuality == liveSortByQuality
+        val account = _activeAccount.value ?: return
+        // Prevent redundant DB queries and scroll resets when switching back to the Live TV tab
+        if (isSameFilter && liveLoadedAccountId == account.id && _liveStreams.value.isNotEmpty()) {
+            return
+        }
         if (!isSameFilter) {
             livePage = 0
         }
@@ -1632,7 +1653,6 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         liveQualityFilter = qualityFilter
         liveSortByQuality = sortByQuality
 
-        val account = _activeAccount.value ?: return
         val order = _userSettings.value.liveChannelOrder
         val limitToFetch = (livePage + 1) * pageSize
         viewModelScope.launch(Dispatchers.IO) {
@@ -1661,6 +1681,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 _liveStreams.value = paged
                 totalLiveCount.value = count
+                liveLoadedAccountId = account.id
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -2558,6 +2579,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
                         )
                         withContext(Dispatchers.IO) {
                             repository.saveWatchProgress(progress)
+                            val uid = activeKrasUserId()
+                            if (!smartSyncEngine.store.isFavoritesOrHistoryDirty(uid)) {
+                                smartSyncEngine.store.markFavoritesOrHistoryDirty(uid)
+                            }
                         }
                         _watchHistory.value = withContext(Dispatchers.IO) { repository.getWatchHistory() }
                     }
@@ -2582,6 +2607,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         val krasUserId = activeKrasUserId()
         viewModelScope.launch(Dispatchers.IO) {
             val isAdded = repository.toggleFavorite(item, krasUserId)
+            smartSyncEngine.store.markFavoritesOrHistoryDirty(krasUserId)
             _favorites.value = repository.getFavorites(order, krasUserId)
             val favSyncCount = repository.getLocalTmdbSyncFavorites(krasUserId).size
             val pendingCount = repository.getPendingTmdbMutations(krasUserId).size
@@ -2658,6 +2684,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         val krasUserId = activeKrasUserId()
         viewModelScope.launch(Dispatchers.IO) {
             val isAdded = repository.toggleWatchlist(item, krasUserId)
+            smartSyncEngine.store.markFavoritesOrHistoryDirty(krasUserId)
             val wlCount = repository.getWatchlist(krasUserId).size
             val pendingCount = repository.getPendingTmdbMutations(krasUserId).size
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
@@ -2704,6 +2731,7 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         val krasUserId = activeKrasUserId()
         viewModelScope.launch(Dispatchers.IO) {
             repository.setUserRating(item, rating, krasUserId)
+            smartSyncEngine.store.markFavoritesOrHistoryDirty(krasUserId)
             val rtCount = repository.getUserRatings(krasUserId).size
             val pendingCount = repository.getPendingTmdbMutations(krasUserId).size
             _tmdbAccountState.value = _tmdbAccountState.value.copy(
@@ -2829,14 +2857,25 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- Settings & Cache ---
     fun updateSettings(newSettings: UserSettings) {
+        val prev = _userSettings.value
         val normalizedSettings = newSettings.copy(
             tmdbProxyUrl = canonicalTmdbProxyUrl(newSettings.tmdbProxyUrl)
         )
-        val orderChanged = _userSettings.value.liveChannelOrder != normalizedSettings.liveChannelOrder
-        val bufferChanged = _userSettings.value.bufferSize != normalizedSettings.bufferSize
-        val languageChanged = !_userSettings.value.language.equals(normalizedSettings.language, ignoreCase = true)
-        val tmdbProxyChanged = _userSettings.value.tmdbProxyUrl != normalizedSettings.tmdbProxyUrl ||
-                _userSettings.value.tmdbAutoEnrichEnabled != normalizedSettings.tmdbAutoEnrichEnabled
+        val orderChanged = prev.liveChannelOrder != normalizedSettings.liveChannelOrder
+        val bufferChanged = prev.bufferSize != normalizedSettings.bufferSize
+        val languageChanged = !prev.language.equals(normalizedSettings.language, ignoreCase = true)
+        val tmdbProxyChanged = prev.tmdbProxyUrl != normalizedSettings.tmdbProxyUrl
+        val syncScheduleChanged = prev.smartAutoSyncEnabled != normalizedSettings.smartAutoSyncEnabled ||
+            prev.syncWifiOnly != normalizedSettings.syncWifiOnly ||
+            prev.batterySavingSyncMode != normalizedSettings.batterySavingSyncMode ||
+            prev.syncIntervalMoviesHours != normalizedSettings.syncIntervalMoviesHours ||
+            prev.syncIntervalSeriesHours != normalizedSettings.syncIntervalSeriesHours ||
+            prev.syncIntervalLiveHours != normalizedSettings.syncIntervalLiveHours ||
+            prev.syncIntervalCategoriesHours != normalizedSettings.syncIntervalCategoriesHours ||
+            prev.syncIntervalEpgHours != normalizedSettings.syncIntervalEpgHours ||
+            prev.syncIntervalTmdbHours != normalizedSettings.syncIntervalTmdbHours ||
+            prev.syncIntervalAccountHours != normalizedSettings.syncIntervalAccountHours
+
         KrasMediaPlaybackService.backgroundPlaybackEnabled = normalizedSettings.backgroundPlayback
         _userSettings.value = normalizedSettings
         viewModelScope.launch(Dispatchers.IO) {
@@ -2851,6 +2890,12 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         if (tmdbProxyChanged) {
             verifyTmdbProxyConnection(normalizedSettings.tmdbProxyUrl)
         }
+        if (syncScheduleChanged) {
+            SmartSyncWorker.scheduleOrUpdate(getApplication(), normalizedSettings)
+            _activeAccount.value?.let { active ->
+                smartSyncEngine.refreshUiState(active.id, normalizedSettings)
+            }
+        }
         if (languageChanged) {
             _selectedMovieForDetails.value?.let { showMediaDetails(it) }
             _selectedSeriesForDetails.value?.let { showMediaDetails(it) }
@@ -2862,6 +2907,10 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         enrichedSeriesDetailsCache.clear()
         viewModelScope.launch(Dispatchers.IO) {
             repository.clearCache()
+            _activeAccount.value?.let { active ->
+                smartSyncEngine.store.clearCatalogTimestamps(active.id)
+                smartSyncEngine.refreshUiState(active.id, _userSettings.value)
+            }
             _watchHistory.value = emptyList()
             resetPaginationStates()
             _activeAccount.value?.let { loadInitialPagesFromRoom(it) }
@@ -3197,10 +3246,6 @@ class KrasViewModel(application: Application) : AndroidViewModel(application) {
         updateDownloadJob?.cancel()
         appUpdater.cancelActiveDownload()
         playerWrapper.release()
-    }
-
-    companion object {
-        private const val AUTO_LAUNCH_SYNC_COOLDOWN_MS = 60_000L
     }
 }
 

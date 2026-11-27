@@ -206,6 +206,7 @@ class MainActivity : ComponentActivity() {
                 val totalLiveCount by viewModel.totalLiveCount.collectAsState()
                 val updateState by viewModel.updateState.collectAsState()
                 val tmdbAccountState by viewModel.tmdbAccountState.collectAsState()
+                val smartSyncState by viewModel.smartSyncState.collectAsState()
                 val navigateToSettingsFromAuth by viewModel.navigateToSettingsFromAuth.collectAsState()
 
                 LaunchedEffect(navigateToSettingsFromAuth) {
@@ -654,7 +655,7 @@ class MainActivity : ComponentActivity() {
                                         onClearCache = { viewModel.clearCache() },
                                         updateState = updateState,
                                         onCheckForUpdatesClick = { viewModel.checkForUpdates(isManual = true) },
-                                        onRefreshSubscriptionClick = { viewModel.refreshSubscriptionInfo() },
+                                        onRefreshSubscriptionClick = { viewModel.refreshSubscriptionInfo(isManual = true) },
                                         tmdbAccountState = tmdbAccountState,
                                         onLoginTmdbAccountClick = { apiKey, username, password ->
                                             viewModel.loginToTmdbAccount(apiKey, username, password)
@@ -667,7 +668,11 @@ class MainActivity : ComponentActivity() {
                                         },
                                         onDisconnectTmdbAccountClick = {
                                             viewModel.disconnectTmdbAccount()
-                                        }
+                                        },
+                                        smartSyncState = smartSyncState,
+                                        onSyncNowClick = { viewModel.syncNowManual() },
+                                        onFullRefreshClick = { viewModel.fullRefreshManual() },
+                                        onSyncSingleTypeClick = { type -> viewModel.syncSingleContentTypeManual(type) }
                                     )
                                 }
                             }

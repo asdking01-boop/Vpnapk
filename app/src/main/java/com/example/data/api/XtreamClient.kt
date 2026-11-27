@@ -19,23 +19,46 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
-class XtreamClient {
+import android.util.Base64
+import okhttp3.Response
 
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .retryOnConnectionFailure(true)
-        .addInterceptor { chain ->
-            val request = chain.request().newBuilder()
-                .header("User-Agent", "KrasTV/2.0 (Android; SmartIPTV; ExoPlayer)")
-                .header("Accept", "*/*")
-                .build()
-            chain.proceed(request)
+data class ConditionalHttpHeaders(
+    val etag: String? = null,
+    val lastModified: String? = null
+)
+
+sealed class ConditionalFetchResult<out T> {
+    data class Success<T>(val data: T, val headers: ConditionalHttpHeaders) : ConditionalFetchResult<T>()
+    data class NotModified(val headers: ConditionalHttpHeaders) : ConditionalFetchResult<Nothing>()
+    data class Failure(val error: String, val httpCode: Int = 0) : ConditionalFetchResult<Nothing>()
+}
+
+class XtreamClient(
+    private val httpClient: OkHttpClient = defaultHttpClient()
+) {
+
+    private fun buildConditionalRequest(
+        url: String,
+        conditionalHeaders: ConditionalHttpHeaders? = null
+    ): Request {
+        val builder = Request.Builder().url(url).get()
+        conditionalHeaders?.etag?.takeIf { it.isNotBlank() }?.let { etag ->
+            builder.header("If-None-Match", etag)
         }
-        .build()
+        conditionalHeaders?.lastModified?.takeIf { it.isNotBlank() }?.let { lastMod ->
+            builder.header("If-Modified-Since", lastMod)
+        }
+        return builder.build()
+    }
+
+    private fun extractConditionalHeaders(
+        response: Response,
+        previous: ConditionalHttpHeaders? = null
+    ): ConditionalHttpHeaders {
+        val etag = response.header("ETag")?.trim()?.takeIf { it.isNotBlank() } ?: previous?.etag
+        val lastMod = response.header("Last-Modified")?.trim()?.takeIf { it.isNotBlank() } ?: previous?.lastModified
+        return ConditionalHttpHeaders(etag = etag, lastModified = lastMod)
+    }
 
     private fun normalizeUrl(serverUrl: String): String {
         var url = serverUrl.trim()
@@ -168,22 +191,111 @@ class XtreamClient {
         }
     }
 
+    suspend fun fetchM3uPlaylistConditional(
+        account: Account,
+        conditionalHeaders: ConditionalHttpHeaders? = null
+    ): ConditionalFetchResult<M3uImportResult> = withContext(Dispatchers.IO) {
+        try {
+            val url = normalizeUrl(account.serverUrl)
+            val request = buildConditionalRequest(url, conditionalHeaders)
+            httpClient.newCall(request).execute().use { response ->
+                val headers = extractConditionalHeaders(response, conditionalHeaders)
+                if (response.code == 304) {
+                    return@withContext ConditionalFetchResult.NotModified(headers)
+                }
+                if (!response.isSuccessful) {
+                    return@withContext ConditionalFetchResult.Failure(
+                        error = "M3U server returned HTTP ${response.code}",
+                        httpCode = response.code
+                    )
+                }
+                val body = response.body?.string().orEmpty()
+                if (body.isBlank()) {
+                    return@withContext ConditionalFetchResult.Failure("Empty M3U playlist response")
+                }
+                val parsed = M3uPlaylistParser.parse(body, account.id)
+                ConditionalFetchResult.Success(parsed, headers)
+            }
+        } catch (e: Exception) {
+            ConditionalFetchResult.Failure(e.message ?: "Unable to fetch M3U playlist")
+        }
+    }
+
     /**
      * Downloads and parses an M3U playlist into Live TV, Movies, and Series categories and entities.
      */
-    suspend fun fetchM3uPlaylist(account: Account): M3uImportResult? = withContext(Dispatchers.IO) {
+    suspend fun fetchM3uPlaylist(account: Account): M3uImportResult? {
+        return when (val result = fetchM3uPlaylistConditional(account, null)) {
+            is ConditionalFetchResult.Success -> result.data
+            else -> null
+        }
+    }
+
+    /**
+     * Refreshes authenticated subscription information with HTTP ETag / Last-Modified support.
+     */
+    suspend fun fetchSubscriptionInfoConditional(
+        account: Account,
+        conditionalHeaders: ConditionalHttpHeaders? = null
+    ): ConditionalFetchResult<Account> = withContext(Dispatchers.IO) {
+        if (account.isDemo || account.serverUrl.isBlank() || account.username.isBlank() || M3uPlaylistParser.isM3uPlaylistUrl(account.serverUrl)) {
+            return@withContext ConditionalFetchResult.Success(account, conditionalHeaders ?: ConditionalHttpHeaders())
+        }
         try {
-            val url = normalizeUrl(account.serverUrl)
-            val request = Request.Builder().url(url).get().build()
-            val body = httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext null
-                response.body?.string().orEmpty()
+            val base = normalizeUrl(account.serverUrl)
+            val apiUrl = "$base/player_api.php?username=${account.username}&password=${account.password}"
+            val request = buildConditionalRequest(apiUrl, conditionalHeaders)
+
+            httpClient.newCall(request).execute().use { response ->
+                val headers = extractConditionalHeaders(response, conditionalHeaders)
+                if (response.code == 304) {
+                    return@withContext ConditionalFetchResult.NotModified(headers)
+                }
+                if (!response.isSuccessful) {
+                    return@withContext ConditionalFetchResult.Failure("HTTP ${response.code}", response.code)
+                }
+                val body = response.body?.string().orEmpty()
+                if (body.isBlank() || !body.trimStart().startsWith("{")) {
+                    return@withContext ConditionalFetchResult.Failure("Invalid subscription response")
+                }
+
+                val json = JSONObject(body)
+                val userInfo = json.optJSONObject("user_info")
+                    ?: return@withContext ConditionalFetchResult.Failure("Missing user_info")
+
+                val status = if (userInfo.isNull("status")) {
+                    account.status
+                } else {
+                    userInfo.optString("status", account.status).trim().ifBlank { account.status }
+                }
+                val expDateRaw = if (userInfo.isNull("exp_date")) {
+                    ""
+                } else {
+                    userInfo.optString("exp_date", "").trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+                }
+                val createdAtRaw = if (userInfo.isNull("created_at")) {
+                    ""
+                } else {
+                    userInfo.optString("created_at", "").trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
+                }
+                val maxConn = if (userInfo.isNull("max_connections")) {
+                    account.maxConnections
+                } else {
+                    userInfo.optString("max_connections", account.maxConnections).trim().ifBlank { account.maxConnections }
+                }
+
+                ConditionalFetchResult.Success(
+                    data = account.copy(
+                        status = status,
+                        expDate = expDateRaw,
+                        activationDate = createdAtRaw.ifBlank { account.activationDate },
+                        maxConnections = maxConn
+                    ),
+                    headers = headers
+                )
             }
-            if (body.isBlank()) return@withContext null
-            M3uPlaylistParser.parse(body, account.id)
         } catch (e: Exception) {
-            e.printStackTrace()
-            null
+            ConditionalFetchResult.Failure(e.message ?: "Subscription refresh failed")
         }
     }
 
@@ -192,69 +304,20 @@ class XtreamClient {
      * `user_info.status`, and `user_info.max_connections`) for an existing Xtream Codes account.
      * Preserves the existing account ID, name, and active flag.
      */
-    suspend fun fetchSubscriptionInfo(account: Account): Result<Account> = withContext(Dispatchers.IO) {
-        if (account.isDemo || account.serverUrl.isBlank() || account.username.isBlank() || M3uPlaylistParser.isM3uPlaylistUrl(account.serverUrl)) {
-            return@withContext Result.success(account)
-        }
-        try {
-            val base = normalizeUrl(account.serverUrl)
-            val apiUrl = "$base/player_api.php?username=${account.username}&password=${account.password}"
-            val request = Request.Builder().url(apiUrl).get().build()
-
-            val body = httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    return@withContext Result.failure(Exception("HTTP ${response.code}"))
-                }
-                response.body?.string().orEmpty()
-            }
-
-            if (body.isBlank() || !body.trimStart().startsWith("{")) {
-                return@withContext Result.failure(Exception("Invalid response"))
-            }
-
-            val json = JSONObject(body)
-            val userInfo = json.optJSONObject("user_info")
-                ?: return@withContext Result.failure(Exception("Missing user_info"))
-
-            val status = if (userInfo.isNull("status")) {
-                account.status
-            } else {
-                userInfo.optString("status", account.status).trim().ifBlank { account.status }
-            }
-            val expDateRaw = if (userInfo.isNull("exp_date")) {
-                ""
-            } else {
-                userInfo.optString("exp_date", "").trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
-            }
-            val createdAtRaw = if (userInfo.isNull("created_at")) {
-                ""
-            } else {
-                userInfo.optString("created_at", "").trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
-            }
-            val maxConn = if (userInfo.isNull("max_connections")) {
-                account.maxConnections
-            } else {
-                userInfo.optString("max_connections", account.maxConnections).trim().ifBlank { account.maxConnections }
-            }
-
-            Result.success(
-                account.copy(
-                    status = status,
-                    expDate = expDateRaw,
-                    activationDate = createdAtRaw.ifBlank { account.activationDate },
-                    maxConnections = maxConn
-                )
-            )
-        } catch (e: Exception) {
-            Result.failure(e)
+    suspend fun fetchSubscriptionInfo(account: Account): Result<Account> {
+        return when (val result = fetchSubscriptionInfoConditional(account, null)) {
+            is ConditionalFetchResult.Success -> Result.success(result.data)
+            is ConditionalFetchResult.NotModified -> Result.success(account)
+            is ConditionalFetchResult.Failure -> Result.failure(Exception(result.error))
         }
     }
 
-    // --- Streamed Category Parsing with JsonReader ---
-    suspend fun fetchCategories(
+    // --- Streamed Category Parsing with JsonReader & HTTP Conditional Headers ---
+    suspend fun fetchCategoriesConditional(
         account: Account,
-        type: MediaType
-    ): List<CategoryEntity> = withContext(Dispatchers.IO) {
+        type: MediaType,
+        conditionalHeaders: ConditionalHttpHeaders? = null
+    ): ConditionalFetchResult<List<CategoryEntity>> = withContext(Dispatchers.IO) {
         val action = when (type) {
             MediaType.LIVE -> "get_live_categories"
             MediaType.MOVIE -> "get_vod_categories"
@@ -267,12 +330,19 @@ class XtreamClient {
         }
         val list = mutableListOf<CategoryEntity>()
         val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=$action"
-        val request = Request.Builder().url(url).build()
+        val request = buildConditionalRequest(url, conditionalHeaders)
 
         try {
             httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext emptyList()
-                val inputStream = response.body?.byteStream() ?: return@withContext emptyList()
+                val headers = extractConditionalHeaders(response, conditionalHeaders)
+                if (response.code == 304) {
+                    return@withContext ConditionalFetchResult.NotModified(headers)
+                }
+                if (!response.isSuccessful) {
+                    return@withContext ConditionalFetchResult.Failure("HTTP ${response.code}", response.code)
+                }
+                val inputStream = response.body?.byteStream()
+                    ?: return@withContext ConditionalFetchResult.Failure("Empty category stream")
                 val reader = JsonReader(InputStreamReader(inputStream, "UTF-8"))
 
                 if (reader.peek() == JsonToken.BEGIN_ARRAY) {
@@ -328,22 +398,32 @@ class XtreamClient {
                     }
                     reader.endArray()
                 }
+                ConditionalFetchResult.Success(list, headers)
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            ConditionalFetchResult.Failure(e.message ?: "Failed to fetch categories")
         }
-        list
     }
 
-    // --- Streamed Live Channels Parsing (No giant strings in RAM) ---
-    suspend fun streamLiveStreams(
+    suspend fun fetchCategories(
+        account: Account,
+        type: MediaType
+    ): List<CategoryEntity> {
+        return when (val result = fetchCategoriesConditional(account, type, null)) {
+            is ConditionalFetchResult.Success -> result.data
+            else -> emptyList()
+        }
+    }
+
+    suspend fun streamLiveStreamsConditional(
         account: Account,
         batchSize: Int = 500,
         categoryMap: Map<String, String> = emptyMap(),
+        conditionalHeaders: ConditionalHttpHeaders? = null,
         onBatch: suspend (List<MediaItemEntity>) -> Unit
-    ): Int = withContext(Dispatchers.IO) {
+    ): ConditionalFetchResult<Int> = withContext(Dispatchers.IO) {
         val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_live_streams"
-        val request = Request.Builder().url(url).build()
+        val request = buildConditionalRequest(url, conditionalHeaders)
         val base = normalizeUrl(account.serverUrl)
         var totalCount = 0
         val batch = ArrayList<MediaItemEntity>(batchSize)
@@ -351,8 +431,15 @@ class XtreamClient {
 
         try {
             httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext 0
-                val inputStream = response.body?.byteStream() ?: return@withContext 0
+                val headers = extractConditionalHeaders(response, conditionalHeaders)
+                if (response.code == 304) {
+                    return@withContext ConditionalFetchResult.NotModified(headers)
+                }
+                if (!response.isSuccessful) {
+                    return@withContext ConditionalFetchResult.Failure("HTTP ${response.code}", response.code)
+                }
+                val inputStream = response.body?.byteStream()
+                    ?: return@withContext ConditionalFetchResult.Failure("Empty live streams response")
                 val reader = JsonReader(InputStreamReader(inputStream, "UTF-8"))
 
                 if (reader.peek() == JsonToken.BEGIN_ARRAY) {
@@ -417,7 +504,7 @@ class XtreamClient {
                                         quality = detectedQuality,
                                         streamUrl = streamUrl,
                                         containerExtension = "m3u8",
-                                        addedTimestamp = System.currentTimeMillis(),
+                                        addedTimestamp = 0L,
                                         groupKey = orderInfo.groupKey,
                                         seq = orderInfo.seq,
                                         groupOrder = orderInfo.groupOrder,
@@ -429,7 +516,7 @@ class XtreamClient {
                                 if (batch.size >= batchSize) {
                                     onBatch(batch.toList())
                                     batch.clear()
-                                    yield() // Free memory and cooperative dispatching
+                                    yield()
                                 }
                             }
                         } else {
@@ -438,18 +525,46 @@ class XtreamClient {
                     }
                     reader.endArray()
                 }
-            }
-            if (batch.isNotEmpty()) {
-                onBatch(batch.toList())
-                batch.clear()
+                if (batch.isNotEmpty()) {
+                    onBatch(batch.toList())
+                    batch.clear()
+                }
+                ConditionalFetchResult.Success(totalCount, headers)
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            ConditionalFetchResult.Failure(e.message ?: "Live streams sync failed")
         }
-        totalCount
+    }
+
+    // --- Streamed Live Channels Parsing (No giant strings in RAM) ---
+    suspend fun streamLiveStreams(
+        account: Account,
+        batchSize: Int = 500,
+        categoryMap: Map<String, String> = emptyMap(),
+        onBatch: suspend (List<MediaItemEntity>) -> Unit
+    ): Int {
+        return when (val result = streamLiveStreamsConditional(account, batchSize, categoryMap, null, onBatch)) {
+            is ConditionalFetchResult.Success -> result.data
+            else -> 0
+        }
     }
 
     companion object {
+        fun defaultHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .addInterceptor { chain ->
+                val request = chain.request().newBuilder()
+                    .header("User-Agent", "KrasTV/2.0 (Android; SmartIPTV; ExoPlayer)")
+                    .header("Accept", "*/*")
+                    .build()
+                chain.proceed(request)
+            }
+            .build()
         /**
          * Parses an Xtream Codes / playlist server addition timestamp (`added`, `date_added`, `last_modified`)
          * into epoch milliseconds. Returns 0L when missing or invalid so the repository can assign/preserve
@@ -515,15 +630,16 @@ class XtreamClient {
         }
     }
 
-    // --- Streamed Movies Parsing (No giant strings in RAM) ---
-    suspend fun streamVodStreams(
+    // --- Streamed Movies Parsing with HTTP Conditional Headers ---
+    suspend fun streamVodStreamsConditional(
         account: Account,
         batchSize: Int = 500,
         categoryMap: Map<String, String> = emptyMap(),
+        conditionalHeaders: ConditionalHttpHeaders? = null,
         onBatch: suspend (List<MediaItemEntity>) -> Unit
-    ): Int = withContext(Dispatchers.IO) {
+    ): ConditionalFetchResult<Int> = withContext(Dispatchers.IO) {
         val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_vod_streams"
-        val request = Request.Builder().url(url).build()
+        val request = buildConditionalRequest(url, conditionalHeaders)
         val base = normalizeUrl(account.serverUrl)
         var totalCount = 0
         val batch = ArrayList<MediaItemEntity>(batchSize)
@@ -531,8 +647,15 @@ class XtreamClient {
 
         try {
             httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext 0
-                val inputStream = response.body?.byteStream() ?: return@withContext 0
+                val headers = extractConditionalHeaders(response, conditionalHeaders)
+                if (response.code == 304) {
+                    return@withContext ConditionalFetchResult.NotModified(headers)
+                }
+                if (!response.isSuccessful) {
+                    return@withContext ConditionalFetchResult.Failure("HTTP ${response.code}", response.code)
+                }
+                val inputStream = response.body?.byteStream()
+                    ?: return@withContext ConditionalFetchResult.Failure("Empty movies response")
                 val reader = JsonReader(InputStreamReader(inputStream, "UTF-8"))
 
                 if (reader.peek() == JsonToken.BEGIN_ARRAY) {
@@ -667,7 +790,7 @@ class XtreamClient {
                                 if (batch.size >= batchSize) {
                                     onBatch(batch.toList())
                                     batch.clear()
-                                    yield() // Free memory and cooperative dispatching
+                                    yield()
                                 }
                             }
                         } else {
@@ -676,34 +799,54 @@ class XtreamClient {
                     }
                     reader.endArray()
                 }
-            }
-            if (batch.isNotEmpty()) {
-                onBatch(batch.toList())
-                batch.clear()
+                if (batch.isNotEmpty()) {
+                    onBatch(batch.toList())
+                    batch.clear()
+                }
+                ConditionalFetchResult.Success(totalCount, headers)
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            ConditionalFetchResult.Failure(e.message ?: "Movies sync failed")
         }
-        totalCount
     }
 
-    // --- Streamed Series Parsing (No giant strings in RAM) ---
-    suspend fun streamSeries(
+    suspend fun streamVodStreams(
         account: Account,
         batchSize: Int = 500,
         categoryMap: Map<String, String> = emptyMap(),
         onBatch: suspend (List<MediaItemEntity>) -> Unit
-    ): Int = withContext(Dispatchers.IO) {
+    ): Int {
+        return when (val result = streamVodStreamsConditional(account, batchSize, categoryMap, null, onBatch)) {
+            is ConditionalFetchResult.Success -> result.data
+            else -> 0
+        }
+    }
+
+    // --- Streamed Series Parsing with HTTP Conditional Headers ---
+    suspend fun streamSeriesConditional(
+        account: Account,
+        batchSize: Int = 500,
+        categoryMap: Map<String, String> = emptyMap(),
+        conditionalHeaders: ConditionalHttpHeaders? = null,
+        onBatch: suspend (List<MediaItemEntity>) -> Unit
+    ): ConditionalFetchResult<Int> = withContext(Dispatchers.IO) {
         val url = "${normalizeUrl(account.serverUrl)}/player_api.php?username=${account.username}&password=${account.password}&action=get_series"
-        val request = Request.Builder().url(url).build()
+        val request = buildConditionalRequest(url, conditionalHeaders)
         var totalCount = 0
         val batch = ArrayList<MediaItemEntity>(batchSize)
         val groupingTracker = ChannelNameNormalizer.ChannelGroupingTracker()
 
         try {
             httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext 0
-                val inputStream = response.body?.byteStream() ?: return@withContext 0
+                val headers = extractConditionalHeaders(response, conditionalHeaders)
+                if (response.code == 304) {
+                    return@withContext ConditionalFetchResult.NotModified(headers)
+                }
+                if (!response.isSuccessful) {
+                    return@withContext ConditionalFetchResult.Failure("HTTP ${response.code}", response.code)
+                }
+                val inputStream = response.body?.byteStream()
+                    ?: return@withContext ConditionalFetchResult.Failure("Empty series response")
                 val reader = JsonReader(InputStreamReader(inputStream, "UTF-8"))
 
                 if (reader.peek() == JsonToken.BEGIN_ARRAY) {
@@ -832,7 +975,7 @@ class XtreamClient {
                                 if (batch.size >= batchSize) {
                                     onBatch(batch.toList())
                                     batch.clear()
-                                    yield() // Free memory and cooperative dispatching
+                                    yield()
                                 }
                             }
                         } else {
@@ -841,15 +984,101 @@ class XtreamClient {
                     }
                     reader.endArray()
                 }
-            }
-            if (batch.isNotEmpty()) {
-                onBatch(batch.toList())
-                batch.clear()
+                if (batch.isNotEmpty()) {
+                    onBatch(batch.toList())
+                    batch.clear()
+                }
+                ConditionalFetchResult.Success(totalCount, headers)
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            ConditionalFetchResult.Failure(e.message ?: "Series sync failed")
         }
-        totalCount
+    }
+
+    suspend fun streamSeries(
+        account: Account,
+        batchSize: Int = 500,
+        categoryMap: Map<String, String> = emptyMap(),
+        onBatch: suspend (List<MediaItemEntity>) -> Unit
+    ): Int {
+        return when (val result = streamSeriesConditional(account, batchSize, categoryMap, null, onBatch)) {
+            is ConditionalFetchResult.Success -> result.data
+            else -> 0
+        }
+    }
+
+    /**
+     * Lightweight Xtream EPG fetch for active/recent/favorite live channels (`action=get_short_epg`),
+     * decoding Base64 program titles when encoded by the provider.
+     */
+    suspend fun fetchShortEpgForChannels(
+        account: Account,
+        channels: List<MediaItem>
+    ): ConditionalFetchResult<Map<String, String>> = withContext(Dispatchers.IO) {
+        if (account.isDemo || account.serverUrl.isBlank() || account.username.isBlank() || M3uPlaylistParser.isM3uPlaylistUrl(account.serverUrl)) {
+            return@withContext ConditionalFetchResult.Success(emptyMap(), ConditionalHttpHeaders())
+        }
+        if (channels.isEmpty()) {
+            return@withContext ConditionalFetchResult.Success(emptyMap(), ConditionalHttpHeaders())
+        }
+        val base = normalizeUrl(account.serverUrl)
+        val epgMap = LinkedHashMap<String, String>()
+        var hadAnySuccess = false
+        var lastError: String? = null
+
+        for (channel in channels.take(30)) {
+            if (channel.streamId <= 0) continue
+            try {
+                val url = "$base/player_api.php?username=${account.username}&password=${account.password}&action=get_short_epg&stream_id=${channel.streamId}&limit=2"
+                val request = Request.Builder().url(url).get().build()
+                httpClient.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        lastError = "HTTP ${resp.code}"
+                        return@use
+                    }
+                    hadAnySuccess = true
+                    val body = resp.body?.string().orEmpty()
+                    if (body.startsWith("{")) {
+                        val json = JSONObject(body)
+                        val listings = json.optJSONArray("epg_listings")
+                        if (listings != null && listings.length() > 0) {
+                            val nowObj = listings.optJSONObject(0)
+                            val nextObj = if (listings.length() > 1) listings.optJSONObject(1) else null
+                            val nowTitle = decodeEpgText(nowObj?.optString("title", "").orEmpty())
+                            val nextTitle = decodeEpgText(nextObj?.optString("title", "").orEmpty())
+                            val summary = when {
+                                nowTitle.isNotBlank() && nextTitle.isNotBlank() -> "Now: $nowTitle • Next: $nextTitle"
+                                nowTitle.isNotBlank() -> "Now: $nowTitle"
+                                else -> ""
+                            }
+                            if (summary.isNotBlank()) {
+                                epgMap[channel.id] = summary
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                lastError = e.message ?: "EPG fetch error"
+            }
+        }
+
+        if (hadAnySuccess || lastError == null) {
+            ConditionalFetchResult.Success(epgMap, ConditionalHttpHeaders())
+        } else {
+            ConditionalFetchResult.Failure(lastError ?: "EPG sync failed")
+        }
+    }
+
+    private fun decodeEpgText(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return ""
+        return try {
+            val decodedBytes = Base64.decode(trimmed, Base64.DEFAULT)
+            val decoded = String(decodedBytes, Charsets.UTF_8).trim()
+            if (decoded.isNotBlank() && decoded.none { it.code < 9 }) decoded else trimmed
+        } catch (_: Exception) {
+            trimmed
+        }
     }
 
     /**

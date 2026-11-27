@@ -46,7 +46,10 @@ import com.example.data.model.TmdbAuthStatus
 import com.example.data.model.TmdbSyncStatus
 import com.example.data.model.UserSettings
 import com.example.player.PlayerImmersiveHelper
+import com.example.sync.SmartSyncUiState
+import com.example.sync.SyncContentType
 import com.example.ui.components.KrasLogo
+import com.example.ui.components.SynchronizationSettingsCard
 import com.example.ui.components.liquidGlassPanel
 import com.example.ui.premium.AppearanceExperienceSettingsCard
 import com.example.ui.premium.PlayerAmbientCinemaSettingsBlock
@@ -76,7 +79,11 @@ fun SettingsScreen(
     onCancelTmdbAuthClick: () -> Unit = {},
     onSyncTmdbNowClick: () -> Unit = {},
     onToggleTmdbAutoSync: (Boolean) -> Unit = {},
-    onDisconnectTmdbAccountClick: () -> Unit = {}
+    onDisconnectTmdbAccountClick: () -> Unit = {},
+    smartSyncState: SmartSyncUiState = SmartSyncUiState(),
+    onSyncNowClick: () -> Unit = {},
+    onFullRefreshClick: () -> Unit = {},
+    onSyncSingleTypeClick: (SyncContentType) -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -87,12 +94,8 @@ fun SettingsScreen(
     var showDndPermissionDialog by remember { mutableStateOf(false) }
     var cacheClearedFeedback by remember { mutableStateOf(false) }
 
-    // Live clock state for real-time countdown (days, hours, minutes)
+    // Live clock state for real-time countdown (days, hours, minutes) — local calculation only, zero network calls
     var currentTimeMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-
-    LaunchedEffect(activeAccount?.id) {
-        onRefreshSubscriptionClick()
-    }
 
     LaunchedEffect(activeAccount?.id, activeAccount?.expDate) {
         while (true) {
@@ -109,12 +112,11 @@ fun SettingsScreen(
         SubscriptionInfoHelper.calculate(activeAccount, currentTimeMs)
     }
 
-    // Re-check DND permission when returning from system settings screen
+    // Re-check DND permission when returning from system settings screen (NO network sync on ON_RESUME!)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 currentTimeMs = System.currentTimeMillis()
-                onRefreshSubscriptionClick()
                 if (PlayerImmersiveHelper.isDndPermissionGranted(context)) {
                     if (showDndPermissionDialog) {
                         showDndPermissionDialog = false
@@ -259,6 +261,22 @@ fun SettingsScreen(
                     currentTimeMs = System.currentTimeMillis()
                     onRefreshSubscriptionClick()
                 },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+            )
+        }
+
+        // 1b-2. Settings → Synchronization (Global Smart Sync Engine Controls)
+        item {
+            SynchronizationSettingsCard(
+                userSettings = userSettings,
+                syncState = smartSyncState,
+                isArabic = isArabic,
+                onUpdateSettings = onUpdateSettings,
+                onSyncNowClick = onSyncNowClick,
+                onFullRefreshClick = onFullRefreshClick,
+                onSyncSingleTypeClick = onSyncSingleTypeClick,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 16.dp)

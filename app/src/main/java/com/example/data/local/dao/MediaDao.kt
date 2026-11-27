@@ -22,6 +22,18 @@ interface MediaDao {
     @Query("DELETE FROM media_items")
     suspend fun clearAll()
 
+    @Query("SELECT * FROM media_items WHERE accountId = :accountId AND type = :type")
+    suspend fun getEntitiesByAccountAndType(accountId: String, type: String): List<MediaItemEntity>
+
+    @Query("DELETE FROM media_items WHERE accountId = :accountId AND type = :type AND id IN (:ids)")
+    suspend fun deleteByIds(accountId: String, type: String, ids: List<String>)
+
+    @Query("SELECT COUNT(*) FROM media_items WHERE accountId = :accountId AND type = :type")
+    suspend fun countByAccountAndType(accountId: String, type: String): Int
+
+    @Query("UPDATE media_items SET plot = :plot WHERE id = :id AND accountId = :accountId")
+    suspend fun updatePlotForAccountItem(accountId: String, id: String, plot: String)
+
     // Bounded queries for Home screen (no memory bloat)
     @Query("SELECT * FROM media_items WHERE accountId = :accountId AND type = :type ORDER BY rating DESC, addedTimestamp DESC LIMIT :limit")
     suspend fun getTopRated(accountId: String, type: String, limit: Int = 20): List<MediaItemEntity>
@@ -481,6 +493,9 @@ interface MediaDao {
 
     @Query("SELECT * FROM categories WHERE accountId = :accountId AND type = :type")
     suspend fun getCategories(accountId: String, type: String): List<CategoryEntity>
+
+    @Query("SELECT COUNT(*) FROM categories WHERE accountId = :accountId AND type = :type")
+    suspend fun countCategoriesByAccountAndType(accountId: String, type: String): Int
 
     @Query("DELETE FROM categories WHERE accountId = :accountId")
     suspend fun deleteCategoriesByAccount(accountId: String)

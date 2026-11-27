@@ -1135,7 +1135,17 @@ class KrasRepository(context: Context) {
             reelsWifiOnlyAutoplay = prefs.getBoolean("reelsWifiOnlyAutoplay", true),
             startupAnimationMode = startupAnimMode,
             usePremium3DLogo = prefs.getBoolean("usePremium3DLogo", true),
-            playZoomThroughBassSound = prefs.getBoolean("playZoomThroughBassSound", false)
+            playZoomThroughBassSound = prefs.getBoolean("playZoomThroughBassSound", false),
+            smartAutoSyncEnabled = prefs.getBoolean("smartAutoSyncEnabled", true),
+            syncWifiOnly = prefs.getBoolean("syncWifiOnly", false),
+            batterySavingSyncMode = prefs.getBoolean("batterySavingSyncMode", false),
+            syncIntervalMoviesHours = prefs.getInt("syncIntervalMoviesHours", 6).coerceIn(1, 168),
+            syncIntervalSeriesHours = prefs.getInt("syncIntervalSeriesHours", 6).coerceIn(1, 168),
+            syncIntervalLiveHours = prefs.getInt("syncIntervalLiveHours", 12).coerceIn(1, 168),
+            syncIntervalCategoriesHours = prefs.getInt("syncIntervalCategoriesHours", 24).coerceIn(1, 168),
+            syncIntervalEpgHours = prefs.getInt("syncIntervalEpgHours", 3).coerceIn(1, 48),
+            syncIntervalTmdbHours = prefs.getInt("syncIntervalTmdbHours", 24).coerceIn(1, 168),
+            syncIntervalAccountHours = prefs.getInt("syncIntervalAccountHours", 24).coerceIn(1, 168)
         )
     }
 
@@ -1178,6 +1188,16 @@ class KrasRepository(context: Context) {
             putString("startupAnimationMode", settings.startupAnimationMode.name)
             putBoolean("usePremium3DLogo", settings.usePremium3DLogo)
             putBoolean("playZoomThroughBassSound", settings.playZoomThroughBassSound)
+            putBoolean("smartAutoSyncEnabled", settings.smartAutoSyncEnabled)
+            putBoolean("syncWifiOnly", settings.syncWifiOnly)
+            putBoolean("batterySavingSyncMode", settings.batterySavingSyncMode)
+            putInt("syncIntervalMoviesHours", settings.syncIntervalMoviesHours.coerceIn(1, 168))
+            putInt("syncIntervalSeriesHours", settings.syncIntervalSeriesHours.coerceIn(1, 168))
+            putInt("syncIntervalLiveHours", settings.syncIntervalLiveHours.coerceIn(1, 168))
+            putInt("syncIntervalCategoriesHours", settings.syncIntervalCategoriesHours.coerceIn(1, 168))
+            putInt("syncIntervalEpgHours", settings.syncIntervalEpgHours.coerceIn(1, 48))
+            putInt("syncIntervalTmdbHours", settings.syncIntervalTmdbHours.coerceIn(1, 168))
+            putInt("syncIntervalAccountHours", settings.syncIntervalAccountHours.coerceIn(1, 168))
         }.apply()
     }
 
@@ -1585,9 +1605,249 @@ class KrasRepository(context: Context) {
         mediaDao.insertCategories(categories)
     }
 
+    /**
+     * Incremental category update: avoids rewriting SQLite rows when categories are unchanged.
+     * Never deletes existing categories if incoming list is empty.
+     */
+    suspend fun saveCategoriesIfChanged(
+        accountId: String,
+        type: MediaType,
+        incoming: List<CategoryEntity>
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (incoming.isEmpty()) return@withContext false
+        val existing = mediaDao.getCategories(accountId, type.name)
+        val existingSig = existing.map { Triple(it.categoryId, it.categoryName, it.parentId) }.sortedBy { it.first }
+        val incomingSig = incoming.map { Triple(it.categoryId, it.categoryName, it.parentId) }.sortedBy { it.first }
+        if (existingSig == incomingSig) {
+            return@withContext false
+        }
+        mediaDao.deleteCategoriesByAccountAndType(accountId, type.name)
+        mediaDao.insertCategories(incoming)
+        true
+    }
+
     suspend fun getCategories(accountId: String, type: MediaType): List<Category> = withContext(Dispatchers.IO) {
         mediaDao.getCategories(accountId, type.name).map { it.toCategory() }
     }
+
+    suspend fun countLocalMedia(accountId: String, type: String): Int = withContext(Dispatchers.IO) {
+        try {
+            mediaDao.countByAccountAndType(accountId, type)
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    suspend fun countLocalCategories(accountId: String, type: MediaType): Int = withContext(Dispatchers.IO) {
+        try {
+            mediaDao.countCategoriesByAccountAndType(accountId, type.name)
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    /**
+     * Performs a safe, incremental diff-based synchronization into Room:
+     * - Never wipes existing cached data before fetching succeeds.
+     * - Preserves previously enriched TMDb metadata (`plot`, `backdropUrl`, `posterUrl`, `genre`,
+     *   `cast`, `director`, `tmdbId`, `rating`, `year`) and richer detected real stream `quality`
+     *   whenever the provider payload lacks those details.
+     * - Writes ONLY new or modified rows to SQLite to minimize disk I/O and prevent UI flicker.
+     * - Prunes removed rows ONLY after a complete non-empty fetch succeeds when [pruneRemoved] is true.
+     */
+    suspend fun syncMediaIncremental(
+        accountId: String,
+        type: String,
+        incoming: List<MediaItemEntity>,
+        pruneRemoved: Boolean = true
+    ): IncrementalMediaSyncResult = withContext(Dispatchers.IO) {
+        if (incoming.isEmpty()) {
+            return@withContext IncrementalMediaSyncResult(
+                totalIncoming = 0,
+                upsertedCount = 0,
+                deletedCount = 0,
+                unchangedCount = 0
+            )
+        }
+
+        val existingList = mediaDao.getEntitiesByAccountAndType(accountId, type)
+        val existingById = existingList.associateBy { it.id }
+
+        val needsOrderComputation = incoming.size > 1 && incoming.all { it.serverOrder == 0 && it.groupOrder == 0 }
+        val tracker = if (needsOrderComputation) ChannelNameNormalizer.ChannelGroupingTracker() else null
+
+        val toUpsert = ArrayList<MediaItemEntity>()
+        val incomingIds = HashSet<String>(incoming.size)
+        var unchangedCount = 0
+
+        for (rawItem in incoming) {
+            val item = if (rawItem.accountId == accountId) rawItem else rawItem.copy(accountId = accountId)
+            if (!incomingIds.add(item.id)) continue
+
+            val canonicalQuality = MediaItemEntity.computeCanonicalQuality(
+                name = item.name,
+                categoryName = item.categoryName,
+                explicitQuality = item.quality,
+                explicitResolution = item.resolution
+            )
+
+            val existing = existingById[item.id]
+            val mergedQuality = if (existing != null) {
+                val existingParsed = QualityDetector.parseStoredQuality(existing.quality)
+                val incomingParsed = QualityDetector.parseStoredQuality(canonicalQuality)
+                // Preserve richer playback-verified quality specs (e.g. HEVC / 60FPS / 5.1)
+                if (existingParsed.extraTags.size > incomingParsed.extraTags.size ||
+                    (existing.quality.isNotBlank() && canonicalQuality.isBlank())
+                ) {
+                    existing.quality
+                } else {
+                    canonicalQuality
+                }
+            } else {
+                canonicalQuality
+            }
+
+            val ordered = when {
+                tracker != null -> {
+                    val info = tracker.nextChannel(item.name)
+                    item.copy(
+                        groupKey = info.groupKey,
+                        seq = info.seq,
+                        groupOrder = info.groupOrder,
+                        serverOrder = info.serverOrder
+                    )
+                }
+                item.groupKey.isEmpty() -> {
+                    val norm = ChannelNameNormalizer.normalize(item.name)
+                    item.copy(groupKey = norm.groupKey, seq = norm.seq)
+                }
+                else -> item
+            }
+
+            val merged = if (existing != null) {
+                ordered.copy(
+                    posterUrl = ordered.posterUrl.ifBlank { existing.posterUrl },
+                    backdropUrl = if (ordered.backdropUrl.isNotBlank() && ordered.backdropUrl != ordered.posterUrl) {
+                        ordered.backdropUrl
+                    } else {
+                        existing.backdropUrl.ifBlank { ordered.backdropUrl }
+                    },
+                    plot = ordered.plot.ifBlank { existing.plot },
+                    genre = ordered.genre.ifBlank { existing.genre },
+                    cast = ordered.cast.ifBlank { existing.cast },
+                    director = ordered.director.ifBlank { existing.director },
+                    tmdbId = if (ordered.tmdbId > 0) ordered.tmdbId else existing.tmdbId,
+                    year = ordered.year.ifBlank { existing.year },
+                    rating = if (existing.tmdbId > 0 && existing.rating > 0.0) existing.rating else ordered.rating,
+                    quality = mergedQuality,
+                    resolution = mergedQuality,
+                    addedTimestamp = when {
+                        ordered.addedTimestamp > 0L -> ordered.addedTimestamp
+                        existing.addedTimestamp > 0L -> existing.addedTimestamp
+                        else -> System.currentTimeMillis()
+                    }
+                )
+            } else {
+                ordered.copy(
+                    quality = mergedQuality,
+                    resolution = mergedQuality,
+                    addedTimestamp = if (ordered.addedTimestamp > 0L) ordered.addedTimestamp else System.currentTimeMillis()
+                )
+            }
+
+            if (existing == null || !isEquivalentForIncrementalSync(existing, merged)) {
+                toUpsert.add(merged)
+            } else {
+                unchangedCount++
+            }
+        }
+
+        toUpsert.chunked(500).forEach { chunk ->
+            mediaDao.insertAll(chunk)
+        }
+
+        var deletedCount = 0
+        if (pruneRemoved && existingById.isNotEmpty()) {
+            val removedIds = existingById.keys.filterNot { it in incomingIds }
+            if (removedIds.isNotEmpty()) {
+                removedIds.chunked(500).forEach { chunk ->
+                    mediaDao.deleteByIds(accountId, type, chunk)
+                }
+                deletedCount = removedIds.size
+            }
+        }
+
+        IncrementalMediaSyncResult(
+            totalIncoming = incomingIds.size,
+            upsertedCount = toUpsert.size,
+            deletedCount = deletedCount,
+            unchangedCount = unchangedCount
+        )
+    }
+
+    private fun isEquivalentForIncrementalSync(a: MediaItemEntity, b: MediaItemEntity): Boolean {
+        return a.name == b.name &&
+            a.title == b.title &&
+            a.posterUrl == b.posterUrl &&
+            a.backdropUrl == b.backdropUrl &&
+            a.categoryId == b.categoryId &&
+            a.categoryName == b.categoryName &&
+            a.rating == b.rating &&
+            a.year == b.year &&
+            a.quality == b.quality &&
+            a.streamUrl == b.streamUrl &&
+            a.containerExtension == b.containerExtension &&
+            a.groupKey == b.groupKey &&
+            a.seq == b.seq &&
+            a.groupOrder == b.groupOrder &&
+            a.serverOrder == b.serverOrder &&
+            a.plot == b.plot &&
+            a.genre == b.genre &&
+            a.cast == b.cast &&
+            a.director == b.director &&
+            a.tmdbId == b.tmdbId
+    }
+
+    suspend fun getLiveChannelsForEpg(accountId: String, limit: Int = 35): List<MediaItem> = withContext(Dispatchers.IO) {
+        try {
+            val recent = getRecentLiveChannels()
+            val favIds = getFavoritesRaw(accountId).filter { it.type == MediaType.LIVE }.map { it.mediaId }
+            val favItems = if (favIds.isNotEmpty()) {
+                mediaDao.getItemsByIds(favIds).filter { it.accountId == accountId }.map { it.toMediaItem() }
+            } else emptyList()
+            val topLive = mediaDao.queryLiveSmartPaged(accountId, "all", "", limit, 0).map { it.toMediaItem() }
+            (recent + favItems + topLive)
+                .filter { it.streamId > 0 }
+                .distinctBy { it.id }
+                .take(limit)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    suspend fun updateLiveChannelEpgPlots(
+        accountId: String,
+        epgByMediaId: Map<String, String>
+    ): Int = withContext(Dispatchers.IO) {
+        if (epgByMediaId.isEmpty()) return@withContext 0
+        var updated = 0
+        for ((mediaId, epgSummary) in epgByMediaId) {
+            if (epgSummary.isBlank()) continue
+            val existing = mediaDao.getItemById(mediaId)
+            if (existing != null && existing.accountId == accountId && existing.plot != epgSummary) {
+                mediaDao.updatePlotForAccountItem(accountId, mediaId, epgSummary)
+                updated++
+            }
+        }
+        updated
+    }
+
+    data class IncrementalMediaSyncResult(
+        val totalIncoming: Int,
+        val upsertedCount: Int,
+        val deletedCount: Int,
+        val unchangedCount: Int
+    )
 
     fun clearCache() {
         prefs.edit().remove("watch_history")
